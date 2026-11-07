@@ -3,21 +3,49 @@ plugins {
     id 'org.jetbrains.kotlin.android' version '2.2.10'
 }
 
+def signingProps = new Properties()
+def signingPropsFile = rootProject.file('local.properties')
+if (signingPropsFile.exists()) {
+    signingPropsFile.withInputStream { signingProps.load(it) }
+}
+def releaseKeystore = System.getenv('BDPLAYER_KEYSTORE') ?: signingProps.getProperty('bdplayer.keystore')
+def releaseStorePassword = System.getenv('BDPLAYER_STORE_PASSWORD') ?: signingProps.getProperty('bdplayer.storePassword')
+def releaseKeyAlias = System.getenv('BDPLAYER_KEY_ALIAS') ?: signingProps.getProperty('bdplayer.keyAlias')
+def releaseKeyPassword = System.getenv('BDPLAYER_KEY_PASSWORD') ?: signingProps.getProperty('bdplayer.keyPassword')
+def hasReleaseSigning = releaseKeystore && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+
 android {
     namespace 'com.hnwd.bdplayer'
-    compileSdk 36
+    compileSdk 37
 
     defaultConfig {
         applicationId 'com.hnwd.bdplayer'
-        minSdk 26
+        minSdk 29
         targetSdk 35
-        versionCode 10
-        versionName '0.1.9'
+        versionCode 12
+        versionName '0.1.11'
     }
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystore)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+        buildTypes {
+            release {
+                minifyEnabled false
+                signingConfig signingConfigs.release
+            }
+        }
     }
 }
 
@@ -26,9 +54,11 @@ kotlin {
 }
 
 dependencies {
-    implementation 'androidx.webkit:webkit:1.12.1'
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'
     implementation 'androidx.media3:media3-session:1.8.0'
     implementation 'androidx.media3:media3-ui:1.8.0'
+    implementation 'androidx.pdf:pdf-viewer-fragment:1.0.0-beta01'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.11.0'
 }

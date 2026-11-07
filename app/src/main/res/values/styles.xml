@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Chip">
+        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:textColor">@color/ink2</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingLeft">13dp</item>
+        <item name="android:paddingRight">13dp</item>
+        <item name="android:paddingTop">7dp</item>
+        <item name="android:paddingBottom">7dp</item>
+        <item name="android:minHeight">32dp</item>
+        <item name="android:clickable">true</item>
+    </style>
+
+    <style name="ChipOn">
+        <item name="android:background">@drawable/bg_chip_on</item>
+        <item name="android:textColor">@color/surface</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingLeft">13dp</item>
+        <item name="android:paddingRight">13dp</item>
+        <item name="android:paddingTop">7dp</item>
+        <item name="android:paddingBottom">7dp</item>
+        <item name="android:minHeight">32dp</item>
+        <item name="android:clickable">true</item>
+    </style>
+
+    <style name="HeadAction">
+        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:textColor">@color/ink2</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingLeft">10dp</item>
+        <item name="android:paddingRight">10dp</item>
+        <item name="android:paddingTop">6dp</item>
+        <item name="android:paddingBottom">6dp</item>
+        <item name="android:minHeight">30dp</item>
+        <item name="android:clickable">true</item>
+    </style>
+
+    <style name="ItemTitle">
+        <item name="android:textColor">@color/ink</item>
+        <item name="android:textSize">13.5sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:ellipsize">end</item>
+        <item name="android:lineSpacingMultiplier">1.2</item>
+    </style>
+
+    <style name="ItemMeta">
+        <item name="android:textColor">@color/ink3</item>
+        <item name="android:textSize">10.5sp</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:ellipsize">end</item>
+    </style>
+
+    <!-- 仅用于 PdfReaderActivity：PdfViewerFragment 要求 AppCompat 系主题 -->
+    <style name="PdfReaderTheme" parent="Theme.MaterialComponents.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>

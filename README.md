@@ -1,10 +1,10 @@
 # 群组播放
 
-Android 验证版，包名 `com.hnwd.bdplayer`，支持 Android 8.0 及以上。
+Android 验证版，包名 `com.hnwd.bdplayer`，支持 Android 10（API 29）及以上。
 
 ## 构建调试包
 
-使用 JDK 17、Gradle 8.14 和 Android SDK 36。在 Android Studio 打开项目根目录，或设置 `ANDROID_HOME` 后运行：
+使用 JDK 17、Gradle 8.14+ 和 Android SDK 37（compileSdk 37，需 SDK extension ≥ 19）。在 Android Studio 打开项目根目录，或设置 `ANDROID_HOME` 后运行：
 
 ```sh
 gradle :app:assembleDebug

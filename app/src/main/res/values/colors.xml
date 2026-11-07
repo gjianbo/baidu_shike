@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#F7F6F3</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="surface2">#F1F0EC</color>
+    <color name="surface3">#E9E7E1</color>
+    <color name="ink">#1C1B19</color>
+    <color name="ink2">#6B6862</color>
+    <color name="ink3">#9B978F</color>
+    <color name="line">#E5E2DB</color>
+    <color name="line2">#D6D2C9</color>
+    <color name="accent">#C2603C</color>
+    <color name="accentSoft">#FBEEE8</color>
+    <color name="accentInk">#8E4127</color>
+    <color name="ok">#5B7A4B</color>
+    <color name="okSoft">#EDF2E9</color>
+    <color name="barTrack">#E9E7E1</color>
+    <color name="transparent">#00000000</color>
+</resources>

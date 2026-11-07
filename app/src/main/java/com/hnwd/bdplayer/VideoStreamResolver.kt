@@ -4,101 +4,44 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import androidx.webkit.ScriptHandler
-import androidx.webkit.WebViewCompat
-import androidx.webkit.WebViewFeature
 import java.net.URL
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import javax.net.ssl.HttpsURLConnection
 import org.json.JSONObject
 
-internal data class VideoStream(val uri: Uri, val playlist: ByteArray, val userAgent: String)
+internal data class VideoStream(val uri: Uri, val playlist: ByteArray)
 
 internal class VideoStreamResolver {
-    private data class Candidate(val uri: Uri, val referer: String?)
-
-    private class Request(val entry: PanEntry, val onResult: (Result<VideoStream>) -> Unit) {
-        var worker: Future<*>? = null
-        var lastError: Throwable? = null
-        val candidates = ArrayDeque<Candidate>()
-        val observed = mutableSetOf<Uri>()
-    }
-
     private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
-    private var active: Request? = null
-    private var canReadPageResponse = false
-    private var observer: ScriptHandler? = null
+    private var worker: Future<*>? = null
+    private var requestId = 0
 
-    fun attach(web: WebView) {
-        canReadPageResponse = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT) &&
-            WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
-        if (!canReadPageResponse) return
-        WebViewCompat.addWebMessageListener(web, "GroupVideoPlaylist", setOf(ORIGIN)) { view, message, origin, mainFrame, _ ->
-            if (!mainFrame || origin.toString() != ORIGIN) return@addWebMessageListener
-            val current = active ?: return@addWebMessageListener
-            val payload = message.data?.takeIf { it.length <= 2 * MAX_PLAYLIST_CHARS } ?: return@addWebMessageListener
-            val data = runCatching { JSONObject(payload) }.getOrNull() ?: return@addWebMessageListener
-            val uri = Uri.parse(data.optString("url"))
-            if (!PanApi.isVideoPlaylist(uri) || !matches(current, uri)) return@addWebMessageListener
-            val body = data.optString("body")
-            if (!isVod(body)) return@addWebMessageListener
-            finish(current, Result.success(VideoStream(uri, body.toByteArray(Charsets.UTF_8), view.settings.userAgentString)))
-        }
-    }
-
-    fun start(web: WebView, entry: PanEntry, onResult: (Result<VideoStream>) -> Unit) {
+    fun start(entry: PanEntry, userAgent: String, onResult: (Result<VideoStream>) -> Unit) {
         cancel()
-        val request = Request(entry, onResult)
-        active = request
-        if (canReadPageResponse) {
-            observer = WebViewCompat.addDocumentStartJavaScript(web, PLAYLIST_OBSERVER, setOf(ORIGIN))
+        val id = requestId
+        val uri = PanApi.videoPlaylist(entry)
+        val cookie = CookieManager.getInstance().getCookie(uri.toString())
+        worker = executor.submit {
+            val result = runCatching { fetch(uri, userAgent, cookie) }
+            handler.post {
+                if (id != requestId) return@post
+                cancel()
+                onResult(result)
+            }
         }
         handler.postDelayed({
-            finish(request, Result.failure(request.lastError ?: IllegalStateException("获取视频播放清单超时。")))
-        }, 18_000)
-    }
-
-    fun observe(request: WebResourceRequest, userAgent: () -> String) {
-        val uri = request.url
-        if (request.method != "GET" || !PanApi.isVideoPlaylist(uri)) return
-        val referer = request.requestHeaders.entries.firstOrNull { it.key.equals("Referer", true) }?.value
-        handler.post {
-            if (canReadPageResponse) return@post
-            val current = active ?: return@post
-            if (!matches(current, uri)) return@post
-            if (current.observed.size < 8 && current.observed.add(uri)) {
-                current.candidates.addLast(Candidate(uri, referer))
-                fetchNext(current, userAgent())
-            }
-        }
-    }
-
-    private fun fetchNext(request: Request, agent: String) {
-        if (request.worker != null) return
-        val candidate = request.candidates.removeFirstOrNull() ?: return
-        val cookie = CookieManager.getInstance().getCookie(candidate.uri.toString())
-        request.worker = executor.submit {
-            val result = runCatching { fetch(candidate.uri, agent, candidate.referer, cookie) }
-            handler.post {
-                if (active !== request) return@post
-                request.worker = null
-                result.onSuccess { finish(request, result) }.onFailure {
-                    request.lastError = it
-                    fetchNext(request, agent)
-                }
-            }
-        }
+            if (id != requestId) return@postDelayed
+            cancel()
+            onResult(Result.failure(IllegalStateException("获取视频播放清单超时。")))
+        }, 15_000)
     }
 
     fun cancel() {
-        observer?.remove()
-        observer = null
-        active?.worker?.cancel(true)
-        active = null
+        requestId++
+        worker?.cancel(true)
+        worker = null
         handler.removeCallbacksAndMessages(null)
     }
 
@@ -107,13 +50,7 @@ internal class VideoStreamResolver {
         executor.shutdownNow()
     }
 
-    private fun finish(request: Request, result: Result<VideoStream>) {
-        if (active !== request) return
-        cancel()
-        request.onResult(result)
-    }
-
-    private fun fetch(uri: Uri, userAgent: String, referer: String?, cookie: String?): VideoStream {
+    private fun fetch(uri: Uri, userAgent: String, cookie: String?): VideoStream {
         val connection = URL(uri.toString()).openConnection() as HttpsURLConnection
         try {
             connection.instanceFollowRedirects = false
@@ -122,9 +59,12 @@ internal class VideoStreamResolver {
             connection.setRequestProperty("User-Agent", userAgent)
             connection.setRequestProperty("X-Requested-With", "XMLHttpRequest")
             if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
-            if (!referer.isNullOrEmpty()) connection.setRequestProperty("Referer", referer)
+            connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             val code = connection.responseCode
-            check(code == 200) { "播放清单请求失败（HTTP $code）。" }
+            if (code != 200) {
+                val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                throw IllegalStateException(playlistError(code, errorBody))
+            }
             val body = connection.inputStream.bufferedReader().use { reader ->
                 val buffer = CharArray(8192)
                 val output = StringBuilder()
@@ -136,43 +76,39 @@ internal class VideoStreamResolver {
                 }
                 output.toString()
             }
-            check(isVod(body)) {
-                "网盘未返回可试播的点播清单。"
-            }
-            return VideoStream(uri, body.toByteArray(Charsets.UTF_8), userAgent)
+            check(isPlaybackPlaylist(body)) { playlistError(200, body) }
+            return VideoStream(uri, body.toByteArray(Charsets.UTF_8))
         } finally {
             connection.disconnect()
         }
     }
 
-    private fun matches(request: Request, uri: Uri): Boolean =
-        uri.getQueryParameter("fs_id") == request.entry.fileId &&
-            uri.getQueryParameter("msg_id") == request.entry.messageId &&
-            uri.getQueryParameter("to") == request.entry.gid
+    private fun isPlaybackPlaylist(body: String): Boolean =
+        body.startsWith("#EXTM3U") && body.lineSequence().any {
+            it.startsWith("#EXT-X-STREAM-INF:") || it.trimEnd() == "#EXT-X-ENDLIST"
+        }
 
-    private fun isVod(body: String): Boolean =
-        body.length <= MAX_PLAYLIST_CHARS && body.startsWith("#EXTM3U") &&
-            body.lineSequence().any { it.trimEnd() == "#EXT-X-ENDLIST" }
+    /** 文档 §12：错误码速查，把取址失败翻成人话（只改提示，不改播放链）。 */
+    private fun playlistError(code: Int, body: String): String {
+        val json = runCatching { JSONObject(body) }.getOrNull()
+        val errno = json?.optInt("errno")
+        val errorCode = json?.optInt("error_code")
+        return when {
+            errno == -6 -> "请重新登录百度网盘后再试。"
+            errno == -20 || errorCode == -20 -> {
+                val message = json.optString("show_msg").trim().take(60)
+                val detail = if (message.isEmpty()) "" else " · 网盘提示：$message"
+                "百度网盘拒绝了视频取址请求（错误码 -20 · 接口 /mbox/msg/streaming）$detail"
+            }
+            errorCode == 31304 -> "该文件类型不支持此转码档位，请换档位或改用原始文件。"
+            errorCode == 31023 -> "网盘取址参数有误，请重新打开。"
+            code == 401 || code == 403 -> "播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）。"
+            code != 200 -> "播放清单请求失败（HTTP $code）。"
+            else -> "网盘未返回可播放的点播清单。"
+        }
+    }
 
     private companion object {
-        const val ORIGIN = "https://pan.baidu.com"
         const val MAX_PLAYLIST_CHARS = 1024 * 1024
-        val PLAYLIST_OBSERVER = """
-            (() => {
-                if (window !== window.top || location.pathname !== '/mbox/streampage') return;
-                const send = XMLHttpRequest.prototype.send;
-                XMLHttpRequest.prototype.send = function (...args) {
-                    this.addEventListener('load', () => {
-                        if (this.status !== 200 || !this.responseURL.startsWith(location.origin + '/mbox/msg/streaming?')) return;
-                        if (this.responseType !== '' && this.responseType !== 'text') return;
-                        const body = this.responseText;
-                        if (body.length <= 1048576 && body.startsWith('#EXTM3U')) {
-                            GroupVideoPlaylist.postMessage(JSON.stringify({url: this.responseURL, body}));
-                        }
-                    }, {once: true});
-                    return send.apply(this, args);
-                };
-            })();
-        """.trimIndent()
     }
 }

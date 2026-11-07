@@ -16,10 +16,38 @@ internal data class PanEntry(
     val directory: Boolean,
 )
 
+/** 文档《媒体取址技术方案》§2：按扩展名分流后的媒体类别。 */
+internal enum class MediaKind { VIDEO, AUDIO, PDF, DOCUMENT, DIRECTORY, OTHER }
+
 internal object PanApi {
     const val HOST = "pan.baidu.com"
     const val MOBILE_HOME = "https://pan.baidu.com/wap/home#/"
     const val CONTACTS = "https://pan.baidu.com/disk/main#/im/addrBook"
+
+    /** §5.3 / §6.3：dlink 直链要带这个 UA 才 302 到 CDN；签名自带，不需要 Cookie。 */
+    const val DLINK_USER_AGENT = "pan.baidu.com"
+
+    /**
+     * §2 取址总决策表：目录 / 视频(HLS) / 音频(原始文件 dlink) / PDF(下载后阅读) /
+     * 其它文档(只能 dlink，当前版本没做下载)。只按扩展名分类，不做网络请求。
+     */
+    fun kindOf(entry: PanEntry): MediaKind {
+        if (entry.directory) return MediaKind.DIRECTORY
+        return when (entry.name.substringAfterLast('.', "").lowercase()) {
+            in VIDEO_EXT -> MediaKind.VIDEO
+            in AUDIO_EXT -> MediaKind.AUDIO
+            "pdf" -> MediaKind.PDF
+            in DOC_EXT -> MediaKind.DOCUMENT
+            else -> MediaKind.OTHER
+        }
+    }
+
+    private val VIDEO_EXT = setOf("mp4", "mkv", "mov", "avi", "flv", "wmv", "webm", "ts", "m4v")
+    private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "wav", "wma", "ogg", "m4b", "amr")
+    private val DOC_EXT = setOf(
+        "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "zip", "rar", "7z",
+        "jpg", "jpeg", "png", "gif", "webp", "bmp",
+    )
 
     val login: String = Uri.parse("https://wappass.baidu.com/passport?login")
         .buildUpon()
@@ -39,9 +67,11 @@ internal object PanApi {
         "/imbox/file/recentv2", "channel" to "chunlei", "id" to "1", "session_id" to "04_$gid",
     )
 
-    fun roots(gid: String) = api(
-        "/mbox/group/listshare", "gid" to gid, "type" to "2", "limit" to "50", "desc" to "1",
-    )
+    fun roots(gid: String, cursor: String = ""): String {
+        val query = mutableListOf("gid" to gid, "type" to "2", "limit" to "50", "desc" to "1")
+        if (cursor.isNotEmpty()) query.add("last_msg_time" to cursor)
+        return api("/mbox/group/listshare", *query.toTypedArray())
+    }
 
     fun children(entry: PanEntry, page: Int) = api(
         "/mbox/msg/shareinfo",
@@ -51,6 +81,13 @@ internal object PanApi {
     )
 
     fun viewer() = api("/api/gettemplatevariable", "fields" to "[\"uk\"]")
+
+    fun groupListSession() = api("/api/gettemplatevariable", "fields" to "[\"uk\",\"bdstoken\"]")
+
+    fun groups(token: String, start: Int, limit: Int) = api(
+        "/mbox/group/list", "channel" to "chunlei", "bdstoken" to token,
+        "start" to start.toString(), "limit" to limit.toString(),
+    )
 
     fun mediaLinkRequest() = api("/api/sharedownload", "sign" to "", "timestamp" to "")
 
@@ -77,24 +114,26 @@ internal object PanApi {
     fun isFileLink(uri: Uri): Boolean =
         uri.scheme == "https" && uri.host == "d.pcs.baidu.com" && uri.path.orEmpty().startsWith("/file/")
 
-    fun isVideoPlaylist(uri: Uri): Boolean =
-        uri.scheme == "https" && uri.host == HOST && uri.path == "/mbox/msg/streaming" &&
-            uri.getQueryParameter("stream_type").orEmpty().startsWith("M3U8_AUTO_") &&
-            uri.getQueryParameter("nom3u8") == null
+    // 群目录根接口 listshare 返回的 path 整条是百分号编码（%2F%E5%B7%A5%E4%BD%9C...），
+    // recentv2 / shareinfo 返回的是明文中文。只在确认为编码路径时解码，
+    // 避免误伤明文路径里合法的 % 或 +（Uri.decode 不会把 + 当空格）。
+    fun readablePath(raw: String): String =
+        if (raw.startsWith("%2F", ignoreCase = true)) Uri.decode(raw) else raw
 
-    fun video(entry: PanEntry) = url(
-        "/pfile/mboxvideo",
-        "type" to "2", "to_ciduk" to "", "from_ciduk" to "", "to" to entry.gid,
-        "from_uk" to entry.owner, "msg_id" to entry.messageId, "from_doc_lib" to "true",
-        "fs_id" to entry.fileId, "path" to entry.path, "name" to entry.name,
-        "selection_cursor" to System.currentTimeMillis().toString(), "imTransferBlock" to "",
-        "download_source" to "im", "size" to entry.size,
-    )
+    fun videoPlaylist(entry: PanEntry): Uri = Uri.parse(api(
+        "/mbox/msg/streaming",
+        "from_uk" to entry.owner, "to" to entry.gid, "msg_id" to entry.messageId,
+        "fs_id" to entry.fileId, "type" to "2", "stream_type" to "M3U8_AUTO_480",
+    ))
 
-    fun parseRecent(json: JSONObject): List<PanEntry> =
-        json.getJSONObject("data").getJSONArray("recentlist").objects().map { item ->
+    fun parseRecent(json: JSONObject): List<PanEntry> {
+        val data = json.getJSONObject("data")
+        // Some groups return an explicit JSON null when there are no recent updates.
+        if (data.has("recentlist") && data.isNull("recentlist")) return emptyList()
+        return data.getJSONArray("recentlist").objects().map { item ->
             entry(item, item.getString("gid"), item.getString("msg_id"), item.getString("fuk"), "fsid")
         }
+    }
 
     fun parseRoots(json: JSONObject, gid: String): List<PanEntry> =
         json.getJSONObject("records").getJSONArray("msg_list").objects().flatMap { message ->
@@ -114,7 +153,7 @@ internal object PanApi {
         val meta = item.optJSONObject("meta")
         return PanEntry(
             gid, messageId, owner, item.getString(idKey), item.getString("server_filename"),
-            item.getString("path"), item.optString("size", meta?.optString("size") ?: ""),
+            readablePath(item.getString("path")), item.optString("size", meta?.optString("size") ?: ""),
             item.getString("isdir") == "1",
         )
     }

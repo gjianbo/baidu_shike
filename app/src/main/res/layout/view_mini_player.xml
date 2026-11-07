@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/miniPlayer"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:background="@drawable/bg_rec_card"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="8dp"
+    android:visibility="gone">
+
+    <ImageView
+        android:id="@+id/miniCover"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/bg_fmt_audio"
+        android:padding="9dp"
+        android:src="@drawable/ic_music" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical"
+        android:paddingLeft="10dp">
+
+        <TextView
+            android:id="@+id/miniTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:textColor="@color/ink"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/miniMeta"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="3dp"
+            android:ellipsize="end"
+            android:singleLine="true"
+            android:textColor="@color/ink3"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <ImageView
+        android:id="@+id/miniPlay"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:contentDescription="播放"
+        android:padding="12dp"
+        android:src="@drawable/ic_play" />
+
+    <ImageView
+        android:id="@+id/miniExpand"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:contentDescription="打开音频播放器"
+        android:padding="12dp"
+        android:src="@drawable/ic_chevron_up" />
+</LinearLayout>

@@ -3,14 +3,19 @@ package com.hnwd.bdplayer
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ComponentName
+import android.content.Intent
 import android.graphics.Color
+import android.graphics.Typeface
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceResponse
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -18,10 +23,14 @@ import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.annotation.OptIn
+import androidx.core.content.FileProvider
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -33,9 +42,15 @@ import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerControlView
 import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
+import java.text.Collator
+import java.util.Locale
 import java.util.concurrent.Executor
+import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+
+private const val CACHE_TTL_MS = 30 * 60 * 1000L
 
 class MainActivity : Activity() {
     private lateinit var web: WebView
@@ -43,37 +58,137 @@ class MainActivity : Activity() {
     private lateinit var content: LinearLayout
     private lateinit var status: TextView
     private lateinit var title: TextView
+    private lateinit var appSub: TextView
+    private lateinit var chipAll: TextView
+    private lateinit var chipUnheard: TextView
+    private lateinit var filterBar: LinearLayout
+    private lateinit var filterCount: TextView
+    private lateinit var navRoots: List<View>
     private lateinit var historyPanel: LinearLayout
+    private lateinit var nowPlaying: View
+    private lateinit var courseSwitch: LinearLayout
+    private lateinit var btnPrev: TextView
+    private lateinit var btnNext: TextView
+    private lateinit var courseHint: TextView
     private lateinit var audioHistory: AudioHistory
     private lateinit var videoHistory: AudioHistory
+    private lateinit var favorites: Favorites
+    private lateinit var courseCache: CourseCache
+    private var cacheNote = ""
     private var audioControls: AudioControls? = null
-    private var playbackDialog: AlertDialog? = null
+    private var audioPage: View? = null
+    private var releaseAudioPage: (() -> Unit)? = null
+    private var pendingAudioPage: Pair<Int, PanEntry>? = null
     private val videoResolver = VideoStreamResolver()
+    private val pdfFetcher by lazy { PdfFileFetcher(this) }
+    private var pdfLoading: AlertDialog? = null
+    private var videoLoading: AlertDialog? = null
     private var videoPage: VideoPlaybackPage? = null
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
-    private lateinit var nowPlaying: Button
     private val uiExecutor = Executor { runOnUiThread(it) }
 
     private enum class PlaybackRoute { AUDIO, WEB_AUDIO }
+    private enum class MediaFilter(val label: String) {
+        ALL("全部"), DOCUMENT("文档"), AUDIO("音频"), VIDEO("视频");
+
+        fun includes(kind: MediaKind): Boolean = kind == MediaKind.DIRECTORY || when (this) {
+            ALL -> true
+            DOCUMENT -> kind == MediaKind.PDF || kind == MediaKind.DOCUMENT
+            AUDIO -> kind == MediaKind.AUDIO
+            VIDEO -> kind == MediaKind.VIDEO
+        }
+    }
+
+    private var mediaFilter = MediaFilter.ALL
+    private var redrawFilteredRows: (() -> Unit)? = null
+    private var showingHomeDirectory = false
+    private lateinit var mediaChips: List<TextView>
+
+    private enum class CourseOrder(val label: String) {
+        ASCENDING("名称升序"),
+        DESCENDING("名称降序"),
+        NETWORK("网盘顺序"),
+    }
+
+    private val courseNameParts = Regex("[0-9]+|[^0-9]+")
+    private val courseCollator = Collator.getInstance(Locale.SIMPLIFIED_CHINESE)
+    private var courseOrder = CourseOrder.ASCENDING
+
+    private enum class Screen { HOME, FAVORITES, BROWSE, SETTINGS }
     private val folders = mutableListOf<PanEntry>()
+    private val courseEntries = mutableListOf<PanEntry>()
+    private var courseParentKey = ""
+    private enum class RequestLane { LIST, AUDIO, RENEWAL }
+
+    private var audioRequestId = 0
+    private var audioPlayToken: Long? = null
+    private var dispatchedAudioEntry: PanEntry? = null
+    private var pendingAudioEntry: PanEntry? = null
+    private var stoppedVideo: VideoPlaybackPage.Snapshot? = null
+    private var videoToRestore: VideoPlaybackPage.Snapshot? = null
+    private var loadingVideo: VideoPlaybackPage.Snapshot? = null
+    private data class QueueSelection(val entry: PanEntry, val entries: List<PanEntry>, val listKey: String?)
+    private data class RetainedPlayback(val video: VideoPlaybackPage.Snapshot?, val selection: QueueSelection?)
+    private var pendingQueue: QueueSelection? = null
+    private var audioRequestMessage: String? = null
+    private var refreshAudioPageMessage: (() -> Unit)? = null
+    private val nowPlayingTicker = object : Runnable {
+        override fun run() {
+            updateNowPlaying()
+            nowPlaying.postDelayed(this, 1_000)
+        }
+    }
+    private var screen = Screen.HOME
+    private var unheardOnly = false
+    private var unheardCount = 0
     private var recent = true
+    private val wide: Boolean
+        get() = resources.configuration.screenWidthDp >= 600
+    private var activityVisible = false
     private var ready = false
     private var requestId = 0
     private var gid = ""
+    private var loginPending = false
+    private var pickingSource = false
+    private var verifiedAccount = ""
+    private var accountProbeId = 0
+    private var renewalRequestId = 0
+    private var renewingPlaybackId: String? = null
+    private var renewedPlaybackId: String? = null
+    private var checkingAccount = false
 
+    private fun hasVerifiedAccount() = verifiedAccount.isNotEmpty() && verifiedAccount == AccountScope.current
+    private var observedGroup: Pair<String, String>? = null
+    private lateinit var addSourceButton: View
+
+    private data class ShareSource(val id: String, val name: String, val sessionUrl: String = "")
+
+    @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = Color.rgb(42, 31, 25)
-        window.navigationBarColor = Color.rgb(42, 31, 25)
+        (lastNonConfigurationInstance as? RetainedPlayback)?.let {
+            videoToRestore = it.video
+            pendingQueue = it.selection
+        }
+        val savedOrder = getPreferences(MODE_PRIVATE).getString("course_order", null)
+        courseOrder = CourseOrder.entries.firstOrNull { it.name == savedOrder } ?: CourseOrder.ASCENDING
+        window.statusBarColor = Color.rgb(247, 246, 243)
+        window.navigationBarColor = Color.rgb(247, 246, 243)
+        if (Build.VERSION.SDK_INT >= 26) {
+            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility or
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        }
+        PdfCache.prune(this)
+        AccountScope.init(this)
         audioHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE))
         videoHistory = AudioHistory(getSharedPreferences("video_history", MODE_PRIVATE))
-        gid = getPreferences(MODE_PRIVATE).getString("group_id", "").orEmpty()
+        favorites = Favorites(getSharedPreferences("favorites", MODE_PRIVATE))
+        courseCache = CourseCache(getSharedPreferences("course_cache", MODE_PRIVATE))
+        gid = getSharedPreferences("account_scope", MODE_PRIVATE)
+            .getString(AccountScope.key("group_id"), "").orEmpty()
         val frame = FrameLayout(this)
-        native = column().apply {
-            setPadding(dp(16), dp(12), dp(16), 0)
-            setBackgroundColor(Color.rgb(255, 249, 244))
-        }
+        native = column().apply { setBackgroundColor(Color.rgb(247, 246, 243)) }
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -96,36 +211,52 @@ class MainActivity : Activity() {
                     return url.scheme != "https" || (host != "baidu.com" && !host.endsWith(".baidu.com"))
                 }
 
-                override fun shouldInterceptRequest(
-                    view: WebView, request: WebResourceRequest,
-                ): android.webkit.WebResourceResponse? {
-                    videoResolver.observe(request) { view.settings.userAgentString }
+                override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+                    val url = request.url
+                    if (url.scheme == "https" && url.host == PanApi.HOST && url.path == "/mbox/group/listshare") {
+                        val group = url.getQueryParameter("gid").orEmpty()
+                        if (group.matches(Regex("[0-9]{1,24}"))) view.post {
+                            val route = Uri.parse(view.url.orEmpty()).fragment.orEmpty()
+                            if (pickingSource && route.startsWith("/im/session?")) {
+                                observedGroup = route to group
+                            }
+                        }
+                    }
                     return null
                 }
 
+                override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                    if (Uri.parse(url).fragment == "/im/addrBook") observedGroup = null
+                }
+
                 override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                    if (pickingSource && Uri.parse(url).host == "wappass.baidu.com") loginPending = true
                     ready = false
-                    requestId++
+                    invalidateAccount()
+                    if (native.visibility == View.VISIBLE) refresh()
                 }
 
                 override fun onPageFinished(view: WebView, url: String) {
+                    if (view.url?.substringBefore('#') != url.substringBefore('#')) return
                     val address = Uri.parse(url)
                     ready = address.scheme == "https" && address.host == PanApi.HOST
                     if (ready) {
                         CookieManager.getInstance().flush()
-                        if (native.visibility == View.VISIBLE) refresh()
+                        verifyAndRefresh()
+                    } else if (native.visibility == View.VISIBLE) {
+                        refresh()
                     }
                 }
             }
         }
-        videoResolver.attach(web)
         frame.addView(web, FrameLayout.LayoutParams(-1, -1))
         frame.addView(native, FrameLayout.LayoutParams(-1, -1))
         val webControls = row().apply {
             setBackgroundColor(Color.WHITE)
             addView(button("返回 App") { showApp() })
-            addView(button("手机网盘") { web.loadUrl(PanApi.MOBILE_HOME) })
-            addView(button("百度登录") { web.loadUrl(PanApi.login) })
+            addView(button("通讯录") { openContacts() })
+            addView(button("关联当前会话") { associateCurrentSession() }.also { addSourceButton = it })
+            addView(button("百度登录") { showWeb(PanApi.login) })
             visibility = View.GONE
         }
         frame.addView(webControls, FrameLayout.LayoutParams(-1, dp(52)))
@@ -143,207 +274,1372 @@ class MainActivity : Activity() {
         native.tag = webControls
         setContentView(frame)
 
-        title = label(getString(R.string.app_name), 26f)
-        native.addView(title)
-        native.addView(row().apply {
-            addView(button("登录") { showWeb(PanApi.login) })
-            addView(button("手机网盘") { showWeb(PanApi.MOBILE_HOME) })
-            addView(button("设置群 ID") { editGroup() })
+        val shell = layoutInflater.inflate(R.layout.app_main, native, false)
+        val shellWidth = if (wide) minOf(resources.displayMetrics.widthPixels, dp(760)) else -1
+        native.addView(shell, LinearLayout.LayoutParams(shellWidth, -1).apply {
+            if (wide) gravity = Gravity.CENTER_HORIZONTAL
         })
-        native.addView(row().apply {
-            addView(button("最近更新") { openSection(true) })
-            addView(button("群目录") { openSection(false) })
-            addView(button("刷新") { refresh() })
-        })
-        status = label("", 14f)
-        native.addView(status)
-        nowPlaying = button("当前播放") {
-            controller?.let { showPlayback(it) }
-        }.apply { visibility = View.GONE }
-        native.addView(nowPlaying)
-        historyPanel = column()
-        native.addView(historyPanel)
-        content = column()
-        native.addView(ScrollView(this).apply { addView(content) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        title = shell.findViewById(R.id.appTitle)
+        appSub = shell.findViewById(R.id.appSub)
+        chipAll = shell.findViewById(R.id.chipAll)
+        chipUnheard = shell.findViewById(R.id.chipUnheard)
+        filterBar = shell.findViewById(R.id.filterBar)
+        val mediaFilters = shell.findViewById<LinearLayout>(R.id.mediaFilters)
+        mediaChips = MediaFilter.entries.map { filter ->
+            TextView(this).apply {
+                text = filter.label
+                textSize = 12f
+                gravity = Gravity.CENTER
+                minHeight = dp(40)
+                setOnClickListener {
+                    mediaFilter = filter
+                    updateFilterChips()
+                    redrawFilteredRows?.invoke()
+                }
+                mediaFilters.addView(this, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                    if (filter != MediaFilter.ALL) marginStart = dp(6)
+                })
+            }
+        }
+        filterCount = shell.findViewById(R.id.filterCount)
+        navRoots = listOf(
+            shell.findViewById(R.id.navHome),
+            shell.findViewById(R.id.navFavorites),
+            shell.findViewById(R.id.navBrowse),
+            shell.findViewById(R.id.navSettings),
+        )
+        status = shell.findViewById(R.id.status)
+        nowPlaying = shell.findViewById(R.id.miniPlayer)
+        historyPanel = shell.findViewById(R.id.historyPanel)
+        content = shell.findViewById(R.id.content)
+        courseSwitch = shell.findViewById(R.id.courseSwitch)
+        btnPrev = shell.findViewById(R.id.btnPrev)
+        btnNext = shell.findViewById(R.id.btnNext)
+        courseHint = shell.findViewById(R.id.courseHint)
+        shell.findViewById<View>(R.id.btnBrowse).setOnClickListener { showScreen(Screen.BROWSE) }
+        shell.findViewById<View>(R.id.btnRefresh).setOnClickListener { if (ready) verifyAndRefresh(force = true) else showApp() }
+        chipAll.setOnClickListener { setFilter(false) }
+        chipUnheard.setOnClickListener { setFilter(true) }
+        nowPlaying.setOnClickListener { controller?.let { showPlayback(it) } }
+        nowPlaying.findViewById<View>(R.id.miniExpand).setOnClickListener { controller?.let { showPlayback(it) } }
+        nowPlaying.findViewById<View>(R.id.miniPlay).setOnClickListener {
+            controller?.let { player ->
+                if (!ownsAudio(player)) return@let
+                pendingQueue = null
+                cancelPendingAudioRequest()
+                syncAudioAnchor(player)
+                when {
+                    player.playbackState == Player.STATE_ENDED -> {
+                        player.seekToDefaultPosition()
+                        player.play()
+                    }
+                    player.playWhenReady -> player.pause()
+                    else -> player.play()
+                }
+            }
+        }
         refresh()
         val token = SessionToken(this, ComponentName(this, AudioPlaybackService::class.java))
         controllerFuture = MediaController.Builder(this, token).buildAsync().also { future ->
             future.addListener({
                 if (!isDestroyed && !isFinishing) {
                     controller = runCatching { future.get() }.getOrNull()?.also { player ->
+                        if (hasVerifiedAccount()) player.sendCustomCommand(AudioPlaybackService.SYNC_ACCOUNT, Bundle.EMPTY)
                         player.addListener(object : Player.Listener {
-                            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                            override fun onEvents(player: Player, events: Player.Events) {
+                                if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) syncAudioAnchor(player)
                                 updateNowPlaying()
+                            }
+
+                            override fun onPlaybackStateChanged(playbackState: Int) {
+                                if (playbackState == Player.STATE_ENDED) advanceAudioIfEnded(player)
+                            }
+
+                            override fun onPlayerError(error: PlaybackException) {
+                                renewBackgroundAudio(player)
                             }
                         })
                     }
                     updateNowPlaying()
+                    controller?.let {
+                        syncAudioAnchor(it)
+                        renewBackgroundAudio(it)
+                        advanceAudioIfEnded(it)
+                    }
                 }
             }, uiExecutor)
         }
     }
 
-    private fun updateNowPlaying() {
-        nowPlaying.visibility = if (controller?.currentMediaItem != null) View.VISIBLE else View.GONE
+    private fun advanceAudioIfEnded(player: Player) {
+        if (pendingAudioEntry != null || player.playbackState != Player.STATE_ENDED || !player.playWhenReady) return
+        val ended = currentAudioEntry(player) ?: return
+        if (PlaybackQueueState.anchor?.let { sameEntry(it, ended) } == true) {
+            playSibling(ended, 1, automatic = true)
+        }
     }
 
-    private fun openSection(showRecent: Boolean) {
-        recent = showRecent
+    private fun syncAudioAnchor(player: Player) {
+        val active = currentAudioEntry(player) ?: return
+        if (pendingAudioEntry?.let { !sameEntry(it, active) } == true) return
+        if (pendingQueue?.let { sameEntry(it.entry, active) } == true ||
+            PlaybackQueueState.entries.any { sameEntry(it, active) }
+        ) confirmPlayback(active)
+    }
+
+    private fun confirmPlayback(entry: PanEntry) {
+        pendingQueue?.takeIf { sameEntry(it.entry, entry) }?.let {
+            PlaybackQueueState.entries = it.entries
+            PlaybackQueueState.listKey = it.listKey
+            pendingQueue = null
+        }
+        PlaybackQueueState.anchor = entry
+        renderCourseSwitch()
+    }
+
+    private fun ownsAudio(player: Player): Boolean =
+        hasVerifiedAccount() &&
+            player.currentMediaItem?.mediaMetadata?.extras?.getString("account") == verifiedAccount
+
+    private fun updateNowPlaying() {
+        val active = controller
+        if (active == null || !ownsAudio(active)) {
+            nowPlaying.visibility = View.GONE
+            return
+        }
+        nowPlaying.visibility = View.VISIBLE
+        nowPlaying.findViewById<TextView>(R.id.miniTitle).text = active.mediaMetadata.title ?: "当前播放"
+        val durationMs = active.duration
+        val duration = if (durationMs > 0) (durationMs / 1000).toInt() else 0
+        val position = (active.currentPosition / 1000).toInt().coerceAtLeast(0)
+        nowPlaying.findViewById<TextView>(R.id.miniMeta).text =
+            if (duration > 0) "${formatAudioTime(position)} / ${formatAudioTime(duration)}"
+            else formatAudioTime(position)
+        nowPlaying.findViewById<ImageView>(R.id.miniPlay).apply {
+            val canPause = active.playWhenReady && active.playbackState != Player.STATE_ENDED
+            setImageResource(if (canPause) R.drawable.ic_pause else R.drawable.ic_play)
+            contentDescription = if (canPause) "暂停" else "播放"
+            setColorFilter(color(R.color.accentInk))
+        }
+        nowPlaying.findViewById<ImageView>(R.id.miniCover).setColorFilter(color(R.color.accentInk))
+        nowPlaying.findViewById<ImageView>(R.id.miniExpand).setColorFilter(color(R.color.ink2))
+        pendingAudioPage?.let { (id, entry) ->
+            val item = active.currentMediaItem
+            val extras = item?.mediaMetadata?.extras
+            if (id != audioRequestId) {
+                pendingAudioPage = null
+            } else if (item?.mediaId == entry.fileId && extras?.getString("gid") == entry.gid &&
+                extras.getString("message") == entry.messageId
+            ) {
+                pendingAudioPage = null
+                showPlayback(active)
+            }
+        }
+    }
+
+    private fun showScreen(target: Screen) {
+        screen = target
+        recent = target == Screen.HOME
+        unheardOnly = false
         folders.clear()
+        courseEntries.clear()
+        courseParentKey = ""
         refresh()
     }
 
-    private fun editGroup() {
-        val field = EditText(this).apply {
-            hint = "输入群 ID（gid）"
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            setSingleLine()
-            setText(gid)
-        }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("设置群文件库")
-            .setMessage("可使用群 ID，或通讯录请求 session_id 中 04_ 后面的数字。")
-            .setView(field)
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存", null)
-            .create()
-        dialog.setOnShowListener {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
-                val value = field.text.toString().trim()
-                if (!value.matches(Regex("[0-9]{1,24}"))) {
-                    field.error = "请输入数字群 ID"
-                    return@setOnClickListener
-                }
-                gid = value
-                getPreferences(MODE_PRIVATE).edit().putString("group_id", gid).apply()
-                folders.clear()
-                dialog.dismiss()
-                refresh()
-            }
-        }
-        dialog.show()
+    private fun setFilter(unheard: Boolean) {
+        unheardOnly = unheard
+        updateFilterChips()
+        redrawFilteredRows?.invoke()
     }
 
-    private fun refresh() {
+    private fun updateFilterChips() {
+        MediaFilter.entries.forEach { filter ->
+            val chip = mediaChips[filter.ordinal]
+            chip.isSelected = filter == mediaFilter
+            setTabActive(chip, chip.isSelected)
+        }
+        setTabActive(chipAll, !unheardOnly)
+        setTabActive(chipUnheard, unheardOnly)
+        chipUnheard.text = "未听 $unheardCount"
+    }
+
+    private fun updateNav() {
+        val active = when (screen) {
+            Screen.HOME -> 0
+            Screen.FAVORITES -> 1
+            Screen.BROWSE -> 2
+            Screen.SETTINGS -> 3
+        }
+        val titles = listOf("最近更新", "收藏", "目录", "设置")
+        val icons = listOf(R.drawable.ic_home, R.drawable.ic_star, R.drawable.ic_folder, R.drawable.ic_settings)
+        navRoots.forEachIndexed { index, root ->
+            val on = index == active
+            root.findViewById<View>(R.id.navIndicator)
+                .setBackgroundColor(color(if (on) R.color.accent else R.color.transparent))
+            root.findViewById<ImageView>(R.id.navIcon).apply {
+                setImageResource(icons[index])
+                setColorFilter(color(if (on) R.color.accent else R.color.ink3))
+            }
+            val label = root.findViewById<TextView>(R.id.navLabel)
+            label.text = titles[index]
+            label.setTextColor(color(if (on) R.color.accent else R.color.ink3))
+            root.setOnClickListener { showScreen(Screen.entries[index]) }
+        }
+    }
+
+    private fun isPlayed(entry: PanEntry): Boolean {
+        val item = when (PanApi.kindOf(entry)) {
+            MediaKind.AUDIO -> audioHistory.find(entry)
+            MediaKind.VIDEO -> videoHistory.find(entry)
+            else -> null
+        }
+        return item?.completed == true
+    }
+
+    private fun shareSources(): List<ShareSource> {
+        val prefs = getSharedPreferences("account_scope", MODE_PRIVATE)
+        val stored = JSONArray(prefs.getString(AccountScope.key("share_sources"), "[]") ?: "[]")
+        val sources = List(stored.length()) { index ->
+            val item = stored.getJSONObject(index)
+            ShareSource(item.getString("id"), item.getString("name"), item.optString("session"))
+        }
+        return if (gid.isNotEmpty() && sources.none { it.id == gid }) {
+            listOf(ShareSource(gid, "原群文件库")) + sources
+        } else sources
+    }
+
+    private fun chooseSource() {
+        if (!hasVerifiedAccount() || !ready) {
+            toast("请先确认百度网盘登录")
+            return
+        }
+        val account = verifiedAccount
+        val sources = shareSources()
+        if (sources.isEmpty()) {
+            discoverGroups()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("共享来源")
+            .setItems(sources.map { it.name }.toTypedArray()) { _, index ->
+                if (hasVerifiedAccount() && verifiedAccount == account) {
+                    val source = sources[index]
+                    if (source.sessionUrl.isNotEmpty()) showWeb(source.sessionUrl)
+                    else activateGroup(source.id)
+                }
+            }
+            .setPositiveButton("从网盘勾选群组") { _, _ -> discoverGroups() }
+            .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun discoverGroups() {
+        if (!ready || !hasVerifiedAccount()) return
+        val account = verifiedAccount
+        val candidates = linkedMapOf<String, ShareSource>()
+        val pageSize = 20
+
+        fun failed() {
+            if (!hasVerifiedAccount() || verifiedAccount != account) return
+            AlertDialog.Builder(this)
+                .setTitle("无法读取网盘群组")
+                .setMessage(status.text)
+                .setPositiveButton("重试") { _, _ -> discoverGroups() }
+                .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+
+        fun nextPage(token: String, start: Int) {
+            load(PanApi.groups(token, start, pageSize), statusHint = "正在读取网盘群组…", onFailure = ::failed) { json ->
+                val records = json.getJSONArray("records")
+                val previousCount = candidates.size
+                for (index in 0 until records.length()) {
+                    val item = records.getJSONObject(index)
+                    val id = item.optString("gid")
+                    if (id.matches(Regex("[0-9]{1,24}"))) {
+                        candidates[id] = ShareSource(id, item.optString("name").ifBlank { "群组 $id" })
+                    }
+                }
+                val nextStart = start + records.length()
+                val hasMore = if (json.has("has_more")) json.optInt("has_more") != 0
+                    else json.optInt("count", nextStart) > nextStart || records.length() == pageSize
+                if (hasMore && candidates.size > previousCount) nextPage(token, nextStart)
+                else showGroupPicker(account, candidates.values.toList())
+            }
+        }
+
+        load(PanApi.groupListSession(), statusHint = "正在读取网盘群组…", onFailure = ::failed) { json ->
+            val session = json.getJSONObject("result")
+            if (session.optString("uk") != account) {
+                verifyAndRefresh()
+            } else {
+                val token = session.optString("bdstoken")
+                check(token.isNotBlank()) { "网盘未返回群组列表所需的会话参数，请重新登录。" }
+                nextPage(token, 0)
+            }
+        }
+    }
+
+    private fun showGroupPicker(account: String, candidates: List<ShareSource>) {
+        status.text = ""
+        if (candidates.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("网盘群组")
+                .setMessage("这个账号的群组列表为空。")
+                .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
+                .setPositiveButton("关闭", null)
+                .show()
+            return
+        }
+        val existing = shareSources().associateBy { it.id }
+        val checked = BooleanArray(candidates.size) { candidates[it].id in existing }
+        AlertDialog.Builder(this)
+            .setTitle("勾选共享来源")
+            .setMultiChoiceItems(candidates.map { it.name }.toTypedArray(), checked) { _, index, selected ->
+                checked[index] = selected
+            }
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存") { _, _ ->
+                if (!hasVerifiedAccount() || verifiedAccount != account) return@setPositiveButton
+                val candidateIds = candidates.map { it.id }.toSet()
+                val selected = candidates.filterIndexed { index, _ -> checked[index] }
+                    .map { existing[it.id]?.takeUnless { source -> source.name == "原群文件库" } ?: it }
+                val retained = shareSources().filterNot { it.id in candidateIds }
+                val sources = retained + selected
+                val nextGroup = gid.takeIf { current -> sources.any { it.id == current } }
+                    ?: selected.firstOrNull()?.id
+                    ?: retained.firstOrNull { it.sessionUrl.isEmpty() }?.id.orEmpty()
+                saveShareSources(sources, nextGroup)
+                activateGroup(nextGroup)
+            }
+            .show()
+    }
+
+    private fun saveShareSources(sources: List<ShareSource>, activeGroup: String) {
+        val entries = JSONArray()
+        sources.forEach {
+            entries.put(JSONObject().put("id", it.id).put("name", it.name).put("session", it.sessionUrl))
+        }
+        getSharedPreferences("account_scope", MODE_PRIVATE).edit()
+            .putString(AccountScope.key("share_sources"), entries.toString())
+            .putString(AccountScope.key("group_id"), activeGroup)
+            .apply()
+    }
+
+    private fun openContacts() {
+        pickingSource = true
+        observedGroup = null
+        showWeb(PanApi.CONTACTS)
+        toast("打开群里的文件库，再点「关联当前会话」")
+    }
+
+    private fun associateCurrentSession() {
+        val account = verifiedAccount
+        if (!ready || account.isEmpty() || account != AccountScope.current) {
+            toast("请先登录百度网盘")
+            return
+        }
+        val address = Uri.parse(web.url.orEmpty())
+        val route = address.fragment.orEmpty()
+        val isSession = address.scheme == "https" && address.host == PanApi.HOST &&
+            address.path == "/disk/main" && route.startsWith("/im/session?")
+        val group = observedGroup?.takeIf { isSession && it.first == route }?.second.orEmpty()
+        if (group.isEmpty()) {
+            toast("还未识别到群文件库。请进入会话的文件列表，或返回 App 从网盘勾选群组。")
+            return
+        }
+        val sources = shareSources()
+        val existing = sources.firstOrNull { it.id == group }
+        val defaultName = existing?.name ?: "群文件库 ${sources.size + 1}"
+        val name = EditText(this).apply {
+            setSingleLine()
+            setText(defaultName)
+            hint = "显示名称"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("关联群文件库")
+            .setView(name)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存") { _, _ ->
+                if (account != verifiedAccount || account != AccountScope.current) return@setPositiveButton
+                val source = ShareSource(group, name.text.toString().trim().ifEmpty { defaultName })
+                saveShareSources(shareSources().filterNot { it.id == group } + source, group)
+                activateGroup(group, returnFromWeb = true)
+            }.show()
+    }
+
+    private fun activateGroup(group: String, returnFromWeb: Boolean = false) {
+        gid = group
+        getSharedPreferences("account_scope", MODE_PRIVATE).edit()
+            .putString(AccountScope.key("group_id"), gid).apply()
+        if (returnFromWeb) {
+            screen = Screen.HOME
+            recent = true
+            folders.clear()
+            showApp()
+        } else showScreen(if (screen == Screen.BROWSE) Screen.BROWSE else Screen.HOME)
+    }
+
+    private fun refresh(force: Boolean = false) {
         requestId++
+        redrawFilteredRows = null
+        showingHomeDirectory = false
+        unheardCount = 0
+        filterCount.text = ""
         content.removeAllViews()
+        styleContent()
+        if (!hasVerifiedAccount()) {
+            historyPanel.removeAllViews()
+            filterBar.visibility = View.GONE
+            title.text = getString(R.string.app_name)
+            appSub.text = ""
+            courseEntries.clear()
+            renderCourseSwitch()
+            updateNowPlaying()
+            updateNav()
+            status.text = if (checkingAccount || !ready) "正在连接网盘并确认账号…" else "无法确认网盘账号，请登录后刷新。"
+            content.addView(headAction("登录百度网盘") { showWeb(PanApi.login) })
+            if (web.url == null) web.loadUrl(PanApi.CONTACTS)
+            return
+        }
+        updateNowPlaying()
         val parent = folders.lastOrNull()
+        val cacheKey = when {
+            parent != null -> "dir:${parent.gid}:${parent.messageId}:${parent.fileId}"
+            screen == Screen.FAVORITES || screen == Screen.SETTINGS -> ""
+            screen == Screen.HOME -> "recent:$gid"
+            else -> "roots:$gid"
+        }
+        val key = parent?.let { "${it.gid}:${it.messageId}:${it.fileId}" }.orEmpty()
+        if (key != courseParentKey) {
+            courseParentKey = key
+            courseEntries.clear()
+        }
+        updateNav()
+        updateFilterChips()
+        filterBar.visibility =
+            if (parent != null || screen == Screen.HOME || screen == Screen.BROWSE) View.VISIBLE else View.GONE
+        title.text = when (screen) {
+            Screen.FAVORITES -> parent?.name ?: "我的收藏"
+            Screen.SETTINGS -> "设置"
+            else -> parent?.name ?: if (recent) "最近更新" else "群目录"
+        }
+        appSub.text = when {
+            parent != null -> "目录 · 第 ${folders.size} 级 · ${parent.name}"
+            screen == Screen.FAVORITES -> "同时跟的几节课 · 一步直达"
+            screen == Screen.SETTINGS -> "只保留自用必需项"
+            recent -> "${getString(R.string.app_name)} · 最近更新与最近播放"
+            else -> "${getString(R.string.app_name)} · 选择课程目录"
+        }
         renderAudioHistory()
-        title.text = parent?.name ?: "${getString(R.string.app_name)} · ${if (recent) "最近更新" else "群目录"}"
-        if (parent != null) content.addView(button("返回上一级") {
-            folders.removeAt(folders.lastIndex)
-            refresh()
-        })
+        renderCourseSwitch()
+        if ((screen == Screen.HOME || screen == Screen.BROWSE) && parent == null) {
+            renderSourcePicker()
+        }
+        val cached = if (cacheKey.isNotEmpty()) courseCache.readAll(cacheKey) else emptyList()
+        val homeRootKey = if (screen == Screen.HOME && parent == null && gid.isNotEmpty()) "roots:$gid" else null
+        val recentPage = homeRootKey?.let { courseCache.readPage(cacheKey, 1) }
+        val recentIsEmpty = recentPage?.let { it.latestEmpty || it.entries.isEmpty() } == true
+        cacheNote = if (cached.isNotEmpty()) {
+            "缓存内容 · 上次同步 ${courseCache.syncLabel(cacheKey)}"
+        } else ""
+        if (homeRootKey != null && recentIsEmpty) {
+            renderHomeDirectory(homeRootKey)
+        } else if (cached.isNotEmpty()) {
+            if (parent != null) {
+                courseEntries.clear()
+                courseEntries.addAll(cached)
+                renderCourse()
+            } else {
+                display(cached)
+            }
+        } else if (parent != null) {
+            content.addView(headAction("← 返回上一级") {
+                folders.removeAt(folders.lastIndex)
+                refresh()
+            })
+        }
         when {
-            gid.isEmpty() -> status.text = "请先登录百度网盘，并设置要查看的群 ID。"
+            screen == Screen.FAVORITES && parent == null -> renderFavorites()
+            screen == Screen.SETTINGS -> renderSettings()
+            parent == null && gid.isEmpty() -> {
+                status.text = "请从网盘勾选共享来源"
+            }
             !ready -> {
-                status.text = "正在连接百度网盘。如果列表无法加载，请先登录。"
+                status.text = if (cached.isNotEmpty()) "$cacheNote · 正在连接网盘"
+                else "正在连接百度网盘。如果列表无法加载，请先登录。"
                 if (web.url != PanApi.CONTACTS) web.loadUrl(PanApi.CONTACTS)
             }
-            parent != null -> loadChildren(parent, 1)
-            recent -> load(PanApi.recent(gid)) { json ->
-                display(PanApi.parseRecent(json))
-                if (json.getJSONObject("data").optBoolean("hasmore")) {
-                    status.append(" · 已显示首批记录")
+            cacheKey.isNotEmpty() && parent == null && !force && courseCache.isFresh(cacheKey, CACHE_TTL_MS) &&
+                (screen != Screen.BROWSE || courseCache.readPage(cacheKey, 1)?.nextCursor != null) -> {
+                if (homeRootKey != null && recentIsEmpty) {
+                    loadHomeDirectory(homeRootKey, force = false)
+                } else {
+                    status.text = "$cacheNote · 30 分钟内已检查"
+                    if (screen == Screen.BROWSE) renderRootMore(cacheKey)
                 }
             }
-            else -> load(PanApi.roots(gid)) { json ->
-                display(PanApi.parseRoots(json, gid))
-                if (json.optInt("has_more") != 0) status.append(" · 已显示首批目录")
+            parent != null -> loadChildren(parent, 1, cacheKey = cacheKey)
+            homeRootKey != null -> load(
+                PanApi.recent(gid),
+                statusHint = "正在检查最近更新…",
+                onFailure = {
+                    if (recentIsEmpty) {
+                        cacheFailure(homeRootKey)
+                    } else if (cached.isEmpty()) {
+                        content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
+                    } else cacheFailure(cacheKey)
+                },
+            ) { json ->
+                val fresh = PanApi.parseRecent(json)
+                val changed = courseCache.writeNewFirst(cacheKey, 1, fresh)
+                if (fresh.isEmpty()) {
+                    loadHomeDirectory(homeRootKey, force)
+                    return@load
+                }
+                showingHomeDirectory = false
+                cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
+                content.removeAllViews()
+                renderSourcePicker()
+                display(courseCache.readAll(cacheKey))
+                if (!changed) status.text = "$cacheNote · 无更新"
+                else if (json.getJSONObject("data").optBoolean("hasmore")) {
+                    status.text = "$cacheNote · 已显示首批记录"
+                }
+            }
+            else -> loadRoots(cacheKey)
+        }
+    }
+
+    private fun loadHomeDirectory(key: String, force: Boolean) {
+        if (!showingHomeDirectory) renderHomeDirectory(key)
+        else status.text = if (courseCache.readPage(key, 1)?.entries?.isEmpty() == true) "群目录暂无内容" else ""
+        if (!force && courseCache.isFresh(key, CACHE_TTL_MS) && courseCache.readPage(key, 1)?.nextCursor != null) {
+            renderRootMore(key)
+        } else {
+            loadRoots(key)
+        }
+    }
+
+    private fun renderHomeDirectory(key: String) {
+        showingHomeDirectory = true
+        redrawFilteredRows = null
+        content.removeAllViews()
+        renderSourcePicker()
+        content.addView(label("近期没有更新，可以从群目录打开已有内容。", 13f))
+        content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
+        val entries = courseCache.readAll(key)
+        if (entries.isNotEmpty()) {
+            addGroupTitle("当前群目录")
+            addFilteredCourseRows(entries, sortable = true)
+        } else {
+            unheardCount = 0
+            filterCount.text = ""
+            updateFilterChips()
+        }
+        status.text = if (courseCache.readPage(key, 1) != null && entries.isEmpty()) "群目录暂无内容" else ""
+    }
+
+    private fun loadRoots(key: String, page: Int = 1, cursor: String = "", previousButton: View? = null) {
+        val group = gid
+        val homeDirectory = showingHomeDirectory
+        load(
+            PanApi.roots(group, cursor),
+            statusHint = if (homeDirectory) "正在读取群目录…"
+            else if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else null,
+            onCancelled = { previousButton?.isEnabled = true },
+            onFailure = {
+                previousButton?.isEnabled = true
+                if (page == 1) {
+                    cacheFailure(key)
+                    renderRootMore(key)
+                }
+            },
+        ) { json ->
+            val entries = PanApi.parseRoots(json, group)
+            val next = json.optString("last_msg_time").takeIf {
+                val time = it.toLongOrNull()
+                json.optInt("has_more") != 0 && time != null && time > 0 &&
+                    time < (cursor.toLongOrNull() ?: Long.MAX_VALUE)
+            }.orEmpty()
+            courseCache.writeIfChanged(key, page, entries, next)
+            courseCache.clearAfter(key, page)
+            cacheNote = "已同步 ${courseCache.syncLabel(key)}"
+            if (homeDirectory) {
+                renderHomeDirectory(key)
+            } else {
+                content.removeAllViews()
+                renderSourcePicker()
+                display(courseCache.readAll(key))
+            }
+            renderRootMore(key)
+            if (next.isEmpty() && json.optInt("has_more") != 0) {
+                status.text = "网盘未返回可用的分页游标，请刷新后重试。"
             }
         }
     }
 
-    private fun loadChildren(parent: PanEntry, page: Int, previousButton: Button? = null) {
-        load(PanApi.children(parent, page), post = true, onFailure = {
-            previousButton?.isEnabled = true
-        }) { json ->
+    private fun renderRootMore(key: String) {
+        val (page, cached) = courseCache.lastPage(key) ?: return
+        val cursor = cached.nextCursor?.takeIf { it.isNotEmpty() } ?: return
+        val more = headAction("加载更多") {}
+        more.setBackgroundResource(R.drawable.bg_load_more)
+        more.setTextColor(color(R.color.ink3))
+        more.setOnClickListener {
+            more.isEnabled = false
+            loadRoots(key, page + 1, cursor, more)
+        }
+        content.addView(more)
+    }
+
+    private fun invalidateAccount() {
+        accountProbeId++
+        renewalRequestId++
+        renewingPlaybackId = null
+        cancelPendingAudioRequest()
+        requestId++
+        checkingAccount = false
+        verifiedAccount = ""
+        videoResolver.cancel()
+        videoLoading?.dismiss()
+        videoLoading = null
+        if (pdfLoading != null) {
+            pdfFetcher.cancel()
+            pdfLoading?.dismiss()
+            pdfLoading = null
+        }
+    }
+
+    private fun verifyAndRefresh(force: Boolean = false) {
+        invalidateAccount()
+        checkingAccount = true
+        if (native.visibility == View.VISIBLE) refresh()
+        probeAccount { changed, confirmed ->
+            checkingAccount = false
+            if (loginPending && confirmed) {
+                loginPending = false
+                if (pickingSource) openContacts() else showApp()
+            } else if (native.visibility == View.VISIBLE) {
+                refresh(force = force || changed)
+            }
+        }
+    }
+
+    private fun probeAccount(onDone: (Boolean, Boolean) -> Unit) {
+        val probe = accountProbeId
+        val key = "__groupPlayerUk$probe"
+        val script = """
+            (() => {
+              if (location.origin !== 'https://pan.baidu.com') return false;
+              const r = { ready: false };
+              window.$key = r;
+              fetch(${JSONObject.quote(PanApi.viewer())}, { credentials: 'same-origin', cache: 'no-store', headers: {'X-Requested-With':'XMLHttpRequest'} })
+                .then(async resp => { r.body = await resp.text(); })
+                .catch(() => { r.body = ''; })
+                .finally(() => { r.ready = true; });
+              return true;
+            })()
+        """.trimIndent()
+        web.evaluateJavascript(script) { started ->
+            if (probe != accountProbeId || isDestroyed) return@evaluateJavascript
+            if (started != "true") {
+                onDone(false, false)
+                return@evaluateJavascript
+            }
+            var tries = 0
+            var finished = false
+            fun finish(changed: Boolean, confirmed: Boolean = false) {
+                if (finished || isDestroyed) return
+                finished = true
+                onDone(changed, confirmed)
+            }
+            fun poll() {
+                if (isDestroyed || probe != accountProbeId) return
+                if (tries++ > 50) {
+                    web.evaluateJavascript("delete window.$key", null)
+                    finish(false)
+                    return
+                }
+                web.evaluateJavascript(
+                    "(() => { const r = window.$key; if (!r || !r.ready) return null; delete window.$key; return r.body || ''; })()",
+                ) { raw ->
+                    if (probe != accountProbeId || isDestroyed) return@evaluateJavascript
+                    if (raw == null || raw == "null") {
+                        web.postDelayed({ poll() }, 200)
+                        return@evaluateJavascript
+                    }
+                    val body = runCatching { JSONTokener(raw).nextValue()?.toString() }.getOrNull().orEmpty()
+                    val uk = runCatching {
+                        val json = JSONObject(body)
+                        if (json.optInt("errno", -1) == 0) json.optJSONObject("result")?.optString("uk").orEmpty()
+                        else ""
+                    }.getOrDefault("")
+                    val confirmed = uk.matches(Regex("[0-9]{1,24}"))
+                    verifiedAccount = uk.takeIf { confirmed }.orEmpty()
+                    val changed = confirmed && AccountScope.set(this@MainActivity, uk)
+                    if (confirmed) controller?.let {
+                        it.sendCustomCommand(AudioPlaybackService.SYNC_ACCOUNT, Bundle.EMPTY)
+                        renewBackgroundAudio(it)
+                    }
+                    if (changed) {
+                        videoPage?.close()
+                        closeAudioPage()
+                        folders.clear()
+                        courseEntries.clear()
+                        courseParentKey = ""
+                        pendingQueue = pendingQueue?.takeIf { videoToRestore?.account == verifiedAccount }
+                        PlaybackQueueState.anchor = null
+                        PlaybackQueueState.entries = emptyList()
+                        PlaybackQueueState.listKey = null
+                        toast("已切换账号，数据按账号隔离")
+                        gid = getSharedPreferences("account_scope", MODE_PRIVATE)
+                            .getString(AccountScope.key("group_id"), "").orEmpty()
+                    }
+                    finish(changed, confirmed)
+                    if (confirmed) {
+                        restoreVideoIfReady()
+                        if (!changed) controller?.let {
+                            syncAudioAnchor(it)
+                            advanceAudioIfEnded(it)
+                        }
+                    }
+                }
+            }
+            poll()
+        }
+    }
+
+    private fun cacheFailure(key: String) {
+        if (key.isEmpty()) return
+        val label = courseCache.syncLabel(key)
+        if (label.isEmpty()) return
+        cacheNote = "显示缓存内容 · 上次同步 $label"
+        status.text = "${status.text}\n$cacheNote"
+    }
+
+    private fun loadChildren(
+        parent: PanEntry,
+        page: Int,
+        previousButton: View? = null,
+        cacheKey: String = "",
+    ) {
+        val key = cacheKey.ifEmpty { "dir:${parent.gid}:${parent.messageId}:${parent.fileId}" }
+        load(
+            PanApi.children(parent, page),
+            post = true,
+            statusHint = if (page == 1 && courseCache.syncLabel(key).isNotEmpty()) {
+                "$cacheNote · 正在检查更新"
+            } else null,
+            onCancelled = { previousButton?.isEnabled = true },
+            onFailure = {
+                previousButton?.isEnabled = true
+                if (page == 1) cacheFailure(key)
+            },
+        ) { json ->
             val entries = PanApi.parseChildren(json, parent)
-            previousButton?.let { content.removeView(it) }
-            display(entries)
-            if (json.optInt("has_more") != 0 && entries.isNotEmpty()) {
-                val more = button("加载下一页") {}
+            val hasMore = json.optInt("has_more") != 0 && entries.isNotEmpty()
+            val changed = courseCache.writeIfChanged(key, page, entries)
+            if (page == 1 || changed || !hasMore) courseCache.clearAfter(key, page)
+            courseEntries.clear()
+            courseEntries.addAll(courseCache.readAll(key))
+            cacheNote = "已同步 ${courseCache.syncLabel(key)}"
+            renderCourse()
+            if (!changed) status.text = "$cacheNote · 无更新"
+            if (hasMore) {
+                val more = headAction("加载更多") {}
+                more.setBackgroundResource(R.drawable.bg_load_more)
+                more.setTextColor(color(R.color.ink3))
                 more.setOnClickListener {
                     more.isEnabled = false
-                    loadChildren(parent, page + 1, more)
+                    loadChildren(parent, page + 1, more, key)
                 }
                 content.addView(more)
             }
         }
     }
 
+    private fun renderSourcePicker() {
+        val sourceName = shareSources().firstOrNull { it.id == gid }?.name
+        content.addView(headAction(sourceName?.let { "$it ▾" } ?: "从网盘勾选群组") { chooseSource() })
+    }
+
     private fun display(entries: List<PanEntry>) {
-        status.text = if (entries.isEmpty()) "没有条目" else "已读取 ${entries.size} 条"
-        for (entry in entries) {
-            val format = if (entry.directory) "目录" else entry.name.substringAfterLast('.', "文件").uppercase()
-            content.addView(button("$format · ${entry.name}") {
-                when {
-                    entry.directory -> {
-                        folders.add(entry)
-                        refresh()
+        status.text = if (entries.isEmpty()) "没有条目" else cacheNote
+        addGroupTitle(if (screen == Screen.HOME) "最近更新" else "当前目录")
+        addFilteredCourseRows(entries, sortable = screen == Screen.BROWSE)
+    }
+
+    private fun renderCourse() {
+        content.removeAllViews()
+        if (folders.isNotEmpty()) content.addView(headAction("← 返回上一级") {
+            folders.removeAt(folders.lastIndex)
+            refresh()
+        })
+        status.text = if (courseEntries.isEmpty()) "没有条目" else cacheNote
+        addGroupTitle("当前目录 · 第 ${folders.size} 级")
+        addFilteredCourseRows(courseEntries.toList(), sortable = true)
+    }
+
+    private fun addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
+        val rows = column()
+        fun renderRows() {
+            val matching = entries.filter { mediaFilter.includes(PanApi.kindOf(it)) }
+            val unheard = matching.filter { it.directory || !isPlayed(it) }
+            unheardCount = unheard.count { !it.directory }
+            updateFilterChips()
+            val shown = if (unheardOnly) unheard else matching
+            val ordered = when (if (sortable) courseOrder else CourseOrder.NETWORK) {
+                CourseOrder.ASCENDING -> shown.sortedWith { first, second -> compareCourseNames(first.name, second.name) }
+                CourseOrder.DESCENDING -> shown.sortedWith { first, second -> compareCourseNames(second.name, first.name) }
+                CourseOrder.NETWORK -> shown
+            }
+            filterCount.text = "共 ${ordered.size} 项"
+            rows.removeAllViews()
+            extendPlaybackQueue(ordered)
+            if (ordered.isEmpty() && entries.isNotEmpty()) rows.addView(label("当前已加载的内容中没有匹配项", 12f))
+            addCourseRows(rows, ordered)
+            renderCourseSwitch()
+        }
+        if (sortable) content.addView(courseSortButton())
+        content.addView(rows)
+        redrawFilteredRows = ::renderRows
+        renderRows()
+    }
+
+    private fun courseSortButton(): TextView {
+        val sort = headAction("排序 · ${courseOrder.label}") {}
+        sort.setOnClickListener {
+            val options = CourseOrder.entries
+            AlertDialog.Builder(this)
+                .setTitle("课程排序")
+                .setSingleChoiceItems(options.map { it.label }.toTypedArray(), courseOrder.ordinal) { dialog, index ->
+                    courseOrder = options[index]
+                    getPreferences(MODE_PRIVATE).edit().putString("course_order", courseOrder.name).apply()
+                    dialog.dismiss()
+                    if (sort.parent === content) {
+                        sort.text = "排序 · ${courseOrder.label}"
+                        redrawFilteredRows?.invoke()
                     }
-                    format == "MP4" -> startVideo(entry)
-                    format == "MP3" -> resolveAudio(entry)
-                    else -> AlertDialog.Builder(this)
-                        .setTitle(entry.name)
-                        .setMessage("此版本提供该文件的目录信息。")
-                        .setPositiveButton("关闭", null)
-                        .show()
                 }
-            }.apply {
-                if (format == "MP3" || format == "MP4") setOnLongClickListener {
-                    if (format == "MP3") resolveAudio(entry, PlaybackRoute.WEB_AUDIO)
-                    else {
-                        controller?.pause()
-                        showWeb(PanApi.video(entry))
-                    }
-                    true
+                .setNegativeButton("取消", null)
+                .show()
+        }
+        return sort
+    }
+
+    private fun compareCourseNames(first: String, second: String): Int {
+        val left = courseNameParts.findAll(first).iterator()
+        val right = courseNameParts.findAll(second).iterator()
+        while (left.hasNext() && right.hasNext()) {
+            val a = left.next().value
+            val b = right.next().value
+            val aNumber = a[0] in '0'..'9'
+            val bNumber = b[0] in '0'..'9'
+            val order = when {
+                aNumber && bNumber -> {
+                    val aDigits = a.trimStart('0')
+                    val bDigits = b.trimStart('0')
+                    val lengthOrder = aDigits.length.compareTo(bDigits.length)
+                    if (lengthOrder == 0) aDigits.compareTo(bDigits) else lengthOrder
                 }
-            })
+                aNumber != bNumber -> if (aNumber) -1 else 1
+                else -> courseCollator.compare(a, b)
+            }
+            if (order != 0) return order
+        }
+        return left.hasNext().compareTo(right.hasNext())
+    }
+
+    private fun styleContent() {
+        if (folders.isNotEmpty() || screen == Screen.HOME || screen == Screen.BROWSE) {
+            content.setBackgroundResource(R.drawable.bg_card)
+            content.setPadding(dp(12), dp(4), dp(12), dp(8))
+        } else {
+            content.setBackgroundColor(color(R.color.transparent))
+            content.setPadding(0, 0, 0, dp(8))
         }
     }
+
+    private fun addGroupTitle(value: String) {
+        content.addView(TextView(this).apply {
+            text = value
+            textSize = 11f
+            setTextColor(color(R.color.ink3))
+            setPadding(0, dp(8), 0, dp(6))
+        })
+    }
+
+    private fun addCourseRows(container: LinearLayout, entries: List<PanEntry>) {
+        if (!wide) {
+            entries.forEach { container.addView(courseRow(it, entries)) }
+            return
+        }
+        entries.chunked(2).forEach { pair ->
+            val line = row()
+            pair.forEachIndexed { index, entry ->
+                val params = LinearLayout.LayoutParams(0, -2, 1f)
+                if (index == 0 && pair.size == 2) params.rightMargin = dp(8)
+                line.addView(courseRow(entry, entries), params)
+            }
+            if (pair.size == 1) line.addView(View(this), LinearLayout.LayoutParams(0, -2, 1f))
+            container.addView(line)
+        }
+    }
+
+    private fun courseRow(entry: PanEntry, entries: List<PanEntry>): View {
+        val format = formatOf(entry)
+        val kind = PanApi.kindOf(entry)
+        val row = layoutInflater.inflate(R.layout.item_course, content, false)
+        val fmt = row.findViewById<ImageView>(R.id.fmt)
+        when (kind) {
+            MediaKind.AUDIO -> {
+                fmt.setImageResource(R.drawable.ic_music)
+                fmt.setBackgroundResource(R.drawable.bg_fmt_audio)
+                fmt.setColorFilter(color(R.color.accentInk))
+            }
+            MediaKind.VIDEO -> {
+                fmt.setImageResource(R.drawable.ic_video)
+                fmt.setBackgroundResource(R.drawable.bg_fmt_video)
+                fmt.setColorFilter(color(R.color.ink2))
+            }
+            else -> {
+                fmt.setImageResource(if (entry.directory) R.drawable.ic_folder else R.drawable.ic_file)
+                fmt.setBackgroundResource(R.drawable.bg_fmt_folder)
+                fmt.setColorFilter(color(R.color.ink2))
+            }
+        }
+        row.findViewById<TextView>(R.id.itemTitle).text = entry.name
+        // 兼容旧收藏/历史里已持久化的编码路径；无斜杠时不再把整串路径回显到 meta
+        val folder = PanApi.readablePath(entry.path)
+            .substringBeforeLast('/', "")
+            .substringAfterLast('/')
+        val size = entry.size.toLongOrNull()?.let { if (it >= 1024 * 1024) "${it / 1024 / 1024} MB" else "" }.orEmpty()
+        row.findViewById<TextView>(R.id.itemMeta).text =
+            listOf(format.lowercase(), folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
+        val side = row.findViewById<ImageView>(R.id.itemSide)
+        side.tag = favoriteTag(entry)
+        paintFavorite(side, favorites.has(entry))
+        side.setOnClickListener { toggleFavorite(entry) }
+        val mark = progressMark(entry)
+        if (mark != null) {
+            row.findViewById<View>(R.id.itemFoot).visibility = View.VISIBLE
+            val time = row.findViewById<TextView>(R.id.footTime)
+            time.text = mark.first
+            time.setTextColor(color(if (mark.second) R.color.ok else R.color.ink3))
+            row.findViewById<View>(R.id.footDot).setBackgroundResource(
+                if (mark.second) R.drawable.bg_dot_ok else R.drawable.bg_dot_accent,
+            )
+        }
+        row.setOnClickListener { openEntry(entry, entries, currentPlaybackListKey()) }
+        if (kind == MediaKind.AUDIO) row.setOnLongClickListener {
+            selectPlayback(entry, entries, currentPlaybackListKey())
+            resolveAudio(entry, PlaybackRoute.WEB_AUDIO)
+            true
+        }
+        return row
+    }
+
+    /** 文档 §2：按扩展名分类决定走 HLS / 原始文件 dlink / PDF 下载，不再硬编码 MP3、MP4、PDF。 */
+    private fun openEntry(entry: PanEntry, entries: List<PanEntry>, listKey: String? = null) {
+        val kind = PanApi.kindOf(entry)
+        if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) selectPlayback(entry, entries, listKey)
+        when (kind) {
+            MediaKind.DIRECTORY -> {
+                folders.add(entry)
+                refresh()
+            }
+            MediaKind.VIDEO -> startVideo(entry)
+            MediaKind.AUDIO -> resolveAudio(entry)
+            MediaKind.PDF -> openPdf(entry)
+            MediaKind.DOCUMENT -> AlertDialog.Builder(this)
+                .setTitle(entry.name)
+                .setMessage("文档/图片类不能转码播放，只能下载原始文件；当前版本暂只提供 PDF 在线阅读。")
+                .setPositiveButton("关闭", null)
+                .show()
+            MediaKind.OTHER -> AlertDialog.Builder(this)
+                .setTitle(entry.name)
+                .setMessage("此版本暂不支持该类型，只提供目录信息。")
+                .setPositiveButton("关闭", null)
+                .show()
+        }
+    }
+
+    private fun progressMark(entry: PanEntry): Pair<String, Boolean>? {
+        val kind = PanApi.kindOf(entry)
+        val item = when (kind) {
+            MediaKind.AUDIO -> audioHistory.find(entry)
+            MediaKind.VIDEO -> videoHistory.find(entry)
+            else -> null
+        } ?: return null
+        val verb = if (kind == MediaKind.AUDIO) "听完" else "看完"
+        if (item.completed) return "已$verb" to true
+        if (item.seconds <= 0) return null
+        return "${if (kind == MediaKind.AUDIO) "听到" else "看到"} ${formatAudioTime(item.seconds)}" to false
+    }
+
+    private fun favoriteTag(entry: PanEntry) = "favorite:${entry.gid}:${entry.messageId}:${entry.fileId}"
+
+    private fun paintFavorite(icon: ImageView, starred: Boolean) {
+        icon.setImageResource(if (starred) R.drawable.ic_star_filled else R.drawable.ic_star)
+        icon.contentDescription = if (starred) "取消收藏" else "收藏"
+    }
+
+    private fun toggleFavorite(entry: PanEntry): Boolean {
+        if (!hasVerifiedAccount()) return false
+        val starred = favorites.toggle(entry)
+        if (screen == Screen.FAVORITES && folders.isEmpty()) {
+            content.removeAllViews()
+            renderFavorites()
+        } else {
+            content.findViewWithTag<ImageView>(favoriteTag(entry))?.let { paintFavorite(it, starred) }
+        }
+        toast(if (starred) "已加入收藏" else "已取消收藏")
+        return starred
+    }
+
+    private fun currentPlaybackListKey(): String {
+        val parent = folders.lastOrNull()
+        val listScreen = if (showingHomeDirectory) Screen.BROWSE else screen
+        return if (parent == null) "$listScreen:$gid"
+        else "${parent.gid}:${parent.messageId}:${parent.fileId}"
+    }
+
+    private fun selectPlayback(entry: PanEntry, entries: List<PanEntry>, listKey: String? = null) {
+        val kind = PanApi.kindOf(entry)
+        pendingQueue = QueueSelection(entry, entries.filter { PanApi.kindOf(it) == kind }, listKey)
+    }
+
+    private fun extendPlaybackQueue(entries: List<PanEntry>) {
+        val anchor = PlaybackQueueState.anchor ?: return
+        if (PlaybackQueueState.listKey != currentPlaybackListKey() || entries.none { sameEntry(it, anchor) }) return
+        val kind = PanApi.kindOf(anchor)
+        PlaybackQueueState.entries = entries.filter { PanApi.kindOf(it) == kind }
+    }
+
+    private fun currentAudioEntry(player: Player): PanEntry? {
+        if (!ownsAudio(player)) return null
+        val item = player.currentMediaItem ?: return null
+        val extras = item.mediaMetadata.extras ?: return null
+        return PanEntry(
+            extras.getString("gid").orEmpty(), extras.getString("message").orEmpty(),
+            extras.getString("owner").orEmpty(), item.mediaId, item.mediaMetadata.title?.toString().orEmpty(),
+            extras.getString("path").orEmpty(), extras.getString("size").orEmpty(), false,
+        )
+    }
+
+    private fun siblingOf(entry: PanEntry, delta: Int): PanEntry? {
+        val index = PlaybackQueueState.entries.indexOfFirst { sameEntry(it, entry) }
+        return if (index >= 0) PlaybackQueueState.entries.getOrNull(index + delta) else null
+    }
+
+    private fun renderCourseSwitch() {
+        val anchor = PlaybackQueueState.anchor
+        val index = if (anchor == null) -1 else PlaybackQueueState.entries.indexOfFirst { sameEntry(it, anchor) }
+        if (anchor == null || index < 0 || folders.isEmpty() || courseEntries.none { sameEntry(it, anchor) }) {
+            courseSwitch.visibility = View.GONE
+            return
+        }
+        courseSwitch.visibility = View.VISIBLE
+        btnPrev.isEnabled = siblingOf(anchor, -1) != null
+        btnNext.isEnabled = siblingOf(anchor, 1) != null
+        btnPrev.alpha = if (btnPrev.isEnabled) 1f else 0.4f
+        btnNext.alpha = if (btnNext.isEnabled) 1f else 0.4f
+        courseHint.text = "第 ${index + 1} / ${PlaybackQueueState.entries.size} 节"
+        btnPrev.setOnClickListener { playSibling(anchor, -1) }
+        btnNext.setOnClickListener { playSibling(anchor, 1) }
+    }
+
+    private fun playSibling(
+        entry: PanEntry,
+        delta: Int,
+        automatic: Boolean = false,
+        route: PlaybackRoute = PlaybackRoute.AUDIO,
+        videoState: VideoPlaybackPage.Snapshot? = null,
+    ) {
+        if (!ready || !hasVerifiedAccount() || isFinishing || isDestroyed) return
+        val target = siblingOf(entry, delta) ?: return
+        when (PanApi.kindOf(target)) {
+            MediaKind.AUDIO -> resolveAudio(target, route, openPlayer = !automatic)
+            MediaKind.VIDEO -> {
+                startVideo(
+                    target, audioOnly = videoState?.audioOnly == true,
+                    fullscreen = videoState?.fullscreen == true,
+                )
+            }
+            else -> Unit
+        }
+    }
+
+    private fun sameEntry(first: PanEntry, second: PanEntry): Boolean =
+        first.gid == second.gid && first.messageId == second.messageId && first.fileId == second.fileId
+
+    private fun formatOf(entry: PanEntry): String =
+        if (entry.directory) "目录" else entry.name.substringAfterLast('.', "文件").uppercase()
 
     private fun renderAudioHistory() {
         historyPanel.removeAllViews()
-        if (!recent || folders.isNotEmpty() || gid.isEmpty()) return
-        val items = audioHistory.recent(gid)
-        val latest = items.firstOrNull { !it.completed }
+        if (!hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
+        val items = audioHistory.recentAcrossGroups()
+        val videos = videoHistory.recentAcrossGroups()
+        val all = (items + videos).sortedByDescending { it.updatedAt }
+        val historyQueue = all.take(10).map { it.entry }
+        val latest = all.firstOrNull { !it.completed }
         if (latest != null) {
-            historyPanel.addView(button("继续收听 · ${latest.positionText} · ${latest.entry.name}") {
-                resolveAudio(latest.entry)
-            }.apply {
-                maxLines = 2
-                setOnLongClickListener {
-                    resolveAudio(latest.entry, PlaybackRoute.WEB_AUDIO)
-                    true
-                }
+            val card = layoutInflater.inflate(R.layout.view_now_card, historyPanel, false)
+            card.findViewById<ImageView>(R.id.nowCover).setColorFilter(color(R.color.surface))
+            card.findViewById<ImageView>(R.id.nowPlay).setColorFilter(color(R.color.accentInk))
+            val isVideo = PanApi.kindOf(latest.entry) == MediaKind.VIDEO
+            card.findViewById<ImageView>(R.id.nowCover).setImageResource(if (isVideo) R.drawable.ic_video else R.drawable.ic_music)
+            card.findViewById<TextView>(R.id.nowKicker).text = if (isVideo) "继续观看" else "继续收听"
+            card.findViewById<TextView>(R.id.nowTitle).text = latest.entry.name
+            card.findViewById<TextView>(R.id.nowProgress).text =
+                if (latest.duration > 0) "${formatAudioTime(latest.seconds)} / ${formatAudioTime(latest.duration)}"
+                else "${if (isVideo) "看到" else "听到"} ${formatAudioTime(latest.seconds)}"
+            card.findViewById<TextView>(R.id.nowRest).text =
+                if (latest.remainingText.isNotEmpty()) "剩余 ${latest.remainingText}" else "点击续播"
+            setBar(card.findViewById(R.id.nowBar), latest.progressPercent, latest.duration > 0)
+            card.setOnClickListener { openEntry(latest.entry, (historyQueue + latest.entry).distinct()) }
+            if (!isVideo) card.setOnLongClickListener {
+                selectPlayback(latest.entry, (historyQueue + latest.entry).distinct())
+                resolveAudio(latest.entry, PlaybackRoute.WEB_AUDIO)
+                true
+            }
+            historyPanel.addView(card)
+        }
+        val done = all.count { it.completed }
+        val summary = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(2), 0, dp(8))
+        }
+        fun stat(number: Int, label: String, highlight: Boolean) {
+            summary.addView(TextView(this).apply {
+                text = number.toString()
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(color(if (highlight) R.color.accent else R.color.ink2))
+            })
+            summary.addView(TextView(this).apply {
+                text = " $label"
+                textSize = 10.5f
+                setTextColor(color(R.color.ink3))
+                setPadding(0, 0, dp(10), 0)
             })
         }
-        val playbackItems = (items.map { it to false } + videoHistory.recent(gid).map { it to true })
-            .sortedByDescending { (item, _) -> item.updatedAt }
-            .take(10)
-        if (playbackItems.isNotEmpty()) {
-            historyPanel.addView(button("最近播放") {
-                val labels = playbackItems.map { (item, isVideo) ->
-                    val format = if (isVideo) "MP4" else "MP3"
-                    val position = if (isVideo && item.completed) "已看完" else item.positionText
-                    "$format · $position · ${item.entry.name}"
+        stat(all.size, "已播", true)
+        stat(all.size - done, "未听完", false)
+        stat(done, "已听完", false)
+        historyPanel.addView(summary)
+        val playbackItems = all.take(10)
+        if (playbackItems.isEmpty()) return
+        historyPanel.addView(TextView(this).apply {
+            text = "最近播放"
+            textSize = 11.5f
+            setTextColor(color(R.color.ink2))
+            setPadding(0, dp(4), 0, dp(6))
+        })
+        val strip = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(-1, -2)
+        }
+        val stripContent = row().apply { layoutParams = FrameLayout.LayoutParams(-2, -2) }
+        strip.addView(stripContent)
+        for (item in playbackItems) {
+            val isVideo = PanApi.kindOf(item.entry) == MediaKind.VIDEO
+            val card = layoutInflater.inflate(R.layout.view_rec_card, stripContent, false)
+            card.findViewById<ImageView>(R.id.recIcon).apply {
+                setImageResource(if (isVideo) R.drawable.ic_video else R.drawable.ic_music)
+                setColorFilter(color(if (isVideo) R.color.ink2 else R.color.accentInk))
+            }
+            card.findViewById<TextView>(R.id.recLib).text = formatOf(item.entry)
+            card.findViewById<TextView>(R.id.recName).text = item.entry.name
+            card.findViewById<TextView>(R.id.recMeta).text = when {
+                item.completed -> if (isVideo) "已看完" else "已听完"
+                item.seconds > 0 -> "${if (isVideo) "看到" else "听到"} ${formatAudioTime(item.seconds)}"
+                else -> "未播放"
+            }
+            setBar(card.findViewById(R.id.recBar), item.progressPercent, item.duration > 0)
+            card.findViewById<View>(R.id.recFill).setBackgroundColor(
+                color(if (item.completed) R.color.ok else R.color.accent),
+            )
+            card.setOnClickListener {
+                openEntry(item.entry, historyQueue)
+            }
+            stripContent.addView(card)
+        }
+        historyPanel.addView(strip)
+    }
+
+    private fun setBar(bar: LinearLayout, percent: Int, visible: Boolean) {
+        bar.visibility = if (visible) View.VISIBLE else View.GONE
+        if (!visible) return
+        bar.getChildAt(0).layoutParams = LinearLayout.LayoutParams(0, -1, percent.coerceAtLeast(1).toFloat())
+        bar.getChildAt(1).layoutParams = LinearLayout.LayoutParams(0, -1, (100 - percent).coerceAtLeast(1).toFloat())
+    }
+
+    @Suppress("DEPRECATION")
+    private fun renderFavorites() {
+        status.text = ""
+        val page = layoutInflater.inflate(R.layout.view_favorites_page, content, false)
+        val list = page.findViewById<LinearLayout>(R.id.favList)
+        val items = favorites.all()
+        page.findViewById<TextView>(R.id.favCount).text = "共 ${items.size} 项 · 跨库混排"
+        page.findViewById<TextView>(R.id.favEmpty).visibility =
+            if (items.isEmpty()) View.VISIBLE else View.GONE
+        addCourseRows(list, items)
+        page.findViewById<TextView>(R.id.favGoBrowse).setOnClickListener {
+            showScreen(Screen.BROWSE)
+        }
+        content.addView(page)
+        renderCourseSwitch()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun renderSettings() {
+        status.text = ""
+        val page = layoutInflater.inflate(R.layout.view_settings_page, content, false)
+        page.findViewById<TextView>(R.id.setGroupValue).text =
+            shareSources().size.takeIf { it > 0 }?.let { "已关联 $it 项" } ?: "未关联"
+        page.findViewById<View>(R.id.setGroupRow).setOnClickListener { discoverGroups() }
+        page.findViewById<View>(R.id.setLoginRow).setOnClickListener { showWeb(PanApi.login) }
+        page.findViewById<TextView>(R.id.setClearValue).text =
+            "${audioHistory.recent(gid).size + videoHistory.recent(gid).size} 条"
+        page.findViewById<View>(R.id.setClearRow).setOnClickListener { confirmClearHistory() }
+        val version = runCatching {
+            packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+        }.getOrDefault("")
+        page.findViewById<TextView>(R.id.setAbout).text =
+            "${getString(R.string.app_name)} $version · $packageName"
+        content.addView(page)
+        renderCourseSwitch()
+    }
+
+    private fun confirmClearHistory() {
+        AlertDialog.Builder(this)
+            .setTitle("清除播放记录")
+            .setMessage("将清除本机的最近播放、继续收听与视频续播点，不影响网盘文件。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("清除") { _, _ ->
+                audioHistory.clear()
+                videoHistory.clear()
+                val progress = getSharedPreferences("video_progress", MODE_PRIVATE)
+                val editor = progress.edit()
+                val prefix = AccountScope.prefix()
+                progress.all.keys.filter { it.startsWith(prefix) }.forEach { editor.remove(it) }
+                editor.apply()
+                toast("播放记录已清除")
+                refresh()
+            }
+            .show()
+    }
+
+    private fun setTabActive(tab: TextView, active: Boolean) {
+        tab.setBackgroundResource(if (active) R.drawable.bg_chip_on else R.drawable.bg_chip)
+        tab.setTextColor(color(if (active) R.color.surface else R.color.ink2))
+    }
+
+    private fun color(id: Int) = resources.getColor(id, theme)
+
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+    private fun headAction(value: String, action: () -> Unit): TextView = TextView(this).apply {
+        text = value
+        gravity = Gravity.CENTER
+        textSize = 11.5f
+        setTextColor(color(R.color.ink2))
+        setBackgroundResource(R.drawable.bg_chip)
+        setPadding(dp(10), dp(10), dp(10), dp(10))
+        layoutParams = LinearLayout.LayoutParams(-1, -2)
+        isClickable = true
+        setOnClickListener { action() }
+    }
+
+    private fun resolveAudio(
+        entry: PanEntry,
+        route: PlaybackRoute = PlaybackRoute.AUDIO,
+        openPlayer: Boolean = true,
+    ) {
+        if (!ready || !hasVerifiedAccount()) {
+            status.text = "请确认网盘登录后重试。"
+            return
+        }
+        if (route == PlaybackRoute.AUDIO) {
+            controller?.let { player ->
+                if (currentAudioEntry(player)?.let { sameEntry(it, entry) } == true &&
+                    player.playerError == null && player.playbackState != Player.STATE_ENDED &&
+                    player.playbackState != Player.STATE_IDLE
+                ) {
+                    cancelPendingAudioRequest()
+                    confirmPlayback(entry)
+                    player.play()
+                    if (openPlayer) showPlayback(player)
+                    return
                 }
-                AlertDialog.Builder(this)
-                    .setTitle("最近播放")
-                    .setItems(labels.toTypedArray()) { _, which ->
-                        val (item, isVideo) = playbackItems[which]
-                        if (isVideo) startVideo(item.entry) else resolveAudio(item.entry)
-                    }
-                    .setNegativeButton("关闭", null)
-                    .show()
-            })
+            }
+        }
+        pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
+        dispatchedAudioEntry = null
+        val id = ++audioRequestId
+        val token = AudioPlayRequestGate.begin()
+        audioPlayToken = token
+        pendingAudioEntry = entry
+        updateAudioRequestMessage("正在打开 ${entry.name}…")
+        web.evaluateJavascript(
+            "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
+        ) { result ->
+            if (id != audioRequestId || isDestroyed) return@evaluateJavascript
+            if (!AudioPlayRequestGate.isCurrent(token)) {
+                cancelPendingAudioRequest()
+                return@evaluateJavascript
+            }
+            val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
+            if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
+                requestMediaLink(entry, viewer, route, openPlayer = openPlayer)
+            } else {
+                load(PanApi.viewer(), lane = RequestLane.AUDIO) { json ->
+                    val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
+                    check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
+                    requestMediaLink(entry, uk, route, openPlayer = openPlayer)
+                }
+            }
         }
     }
 
-    private fun resolveAudio(entry: PanEntry, route: PlaybackRoute = PlaybackRoute.AUDIO) {
-        if (!ready) {
-            status.text = "网盘页面尚未就绪，请刷新后重试。"
+    private fun requestMediaLink(
+        entry: PanEntry,
+        viewer: String,
+        route: PlaybackRoute,
+        webResumeSeconds: Int? = null,
+        openPlayer: Boolean = true,
+    ) {
+        if (viewer != verifiedAccount) {
+            verifyAndRefresh()
+            return
+        }
+        load(
+            PanApi.mediaLinkRequest(), post = true, form = PanApi.mediaLinkBody(entry, viewer),
+            lane = RequestLane.AUDIO,
+        ) { json ->
+            val uri = PanApi.parseMediaLink(json, entry)
+            when (route) {
+                PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri, openPlayer)
+                PlaybackRoute.WEB_AUDIO -> {
+                    pendingAudioEntry = null
+                    audioPlayToken = null
+                    confirmPlayback(entry)
+                    updateAudioRequestMessage(null)
+                    controller?.pause()
+                    playAudio(entry, uri, webResumeSeconds)
+                }
+            }
+        }
+    }
+
+    private fun openPdf(entry: PanEntry) {
+        if (!ready || !hasVerifiedAccount()) {
+            status.text = "请确认网盘登录后重试。"
             return
         }
         val id = ++requestId
@@ -354,82 +1650,237 @@ class MainActivity : Activity() {
             if (id != requestId || isDestroyed) return@evaluateJavascript
             val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
             if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
-                requestMediaLink(entry, viewer, route)
+                requestPdfLink(entry, viewer)
             } else {
                 load(PanApi.viewer()) { json ->
                     val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
                     check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
-                    requestMediaLink(entry, uk, route)
+                    requestPdfLink(entry, uk)
                 }
             }
         }
     }
 
-    private fun requestMediaLink(entry: PanEntry, viewer: String, route: PlaybackRoute) {
+    private fun requestPdfLink(entry: PanEntry, viewer: String) {
+        if (viewer != verifiedAccount) {
+            verifyAndRefresh()
+            return
+        }
         load(PanApi.mediaLinkRequest(), post = true, form = PanApi.mediaLinkBody(entry, viewer)) { json ->
-            val uri = PanApi.parseMediaLink(json, entry)
-            when (route) {
-                PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri)
-                PlaybackRoute.WEB_AUDIO -> {
-                    controller?.pause()
-                    playAudio(entry, uri)
-                }
+            if (!activityVisible) return@load
+            val link = PanApi.parseMediaLink(json, entry)
+            pdfLoading?.dismiss()
+            pdfLoading = AlertDialog.Builder(this)
+                .setTitle(entry.name)
+                .setMessage("正在下载文档…")
+                .setCancelable(false)
+                .setNegativeButton("取消") { _, _ -> pdfFetcher.cancel() }
+                .show()
+            pdfFetcher.start(link) { result ->
+                pdfLoading?.dismiss()
+                pdfLoading = null
+                result.mapCatching { file ->
+                    try {
+                        if (activityVisible) startPdfReader(entry, file) else PdfCache.discard(file)
+                    } catch (error: Exception) {
+                        PdfCache.discard(file)
+                        throw error
+                    }
+                }.onFailure { status.text = it.message ?: "文档打开失败，请重试。" }
             }
         }
     }
 
-    private fun startBackgroundAudio(entry: PanEntry, uri: Uri) {
+    private fun startPdfReader(entry: PanEntry, file: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        // 渲染服务是 isolatedProcess，与 App 不同 UID，按包名显式授予读取权限
+        grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        startActivity(Intent(this, PdfReaderActivity::class.java).apply {
+            putExtra(PdfReaderActivity.EXTRA_URI, uri.toString())
+            putExtra(PdfReaderActivity.EXTRA_TITLE, entry.name)
+            putExtra(PdfReaderActivity.EXTRA_FILE, file.absolutePath)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        })
+        status.text = ""
+    }
+
+    private fun startBackgroundAudio(entry: PanEntry, uri: Uri, openPlayer: Boolean) {
         val player = controller
         if (player == null || !player.isConnected) {
-            status.text = "后台播放器尚未就绪，请稍后重试。"
+            failAudioRequest("后台播放器尚未就绪，请稍后重试。")
+            return
+        }
+        val token = audioPlayToken ?: return
+        if (!AudioPlayRequestGate.isCurrent(token)) {
+            cancelPendingAudioRequest()
             return
         }
         val args = Bundle().apply {
+            putLong("requestToken", token)
+            putString("account", verifiedAccount)
             putString("uri", uri.toString())
             putString("gid", entry.gid)
             putString("message", entry.messageId)
             putString("owner", entry.owner)
             putString("file", entry.fileId)
             putString("name", entry.name)
+            putString("path", entry.path)
+            putString("size", entry.size)
         }
-        val id = requestId
+        val id = audioRequestId
+        dispatchedAudioEntry = entry
         val result = player.sendCustomCommand(AudioPlaybackService.PLAY_FILE, args)
         result.addListener({
-            if (!isDestroyed && !isFinishing && id == requestId) {
-                if (runCatching { result.get().resultCode }.getOrNull() == SessionResult.RESULT_SUCCESS) {
+            if (!isDestroyed && !isFinishing && id == audioRequestId) {
+                dispatchedAudioEntry = null
+                if (!AudioPlayRequestGate.isCurrent(token)) {
+                    cancelPendingAudioRequest()
+                } else if (runCatching { result.get().resultCode }.getOrNull() == SessionResult.RESULT_SUCCESS) {
+                    pendingAudioEntry = null
+                    audioPlayToken = null
+                    confirmPlayback(entry)
+                    updateAudioRequestMessage(null)
                     status.text = "已打开后台播放"
-                    showPlayback(player, entry.name)
+                    if (openPlayer) pendingAudioPage = id to entry
+                    updateNowPlaying()
                 } else {
-                    status.text = "后台播放器启动失败，请重试。也可长按 MP3 使用网页播放。"
+                    failAudioRequest("后台播放器启动失败，请重试。")
                 }
             }
         }, uiExecutor)
     }
 
+    private fun renewBackgroundAudio(player: MediaController) {
+        if (!ready || !hasVerifiedAccount() || player.playerError?.isExpiredMediaLink() != true) return
+        val item = player.currentMediaItem ?: return
+        val metadata = item.mediaMetadata
+        val extras = metadata.extras ?: return
+        val id = extras.getString("playbackId") ?: return
+        if (extras.getString("account") != verifiedAccount || extras.getBoolean("renewed") ||
+            id == renewedPlaybackId || id == renewingPlaybackId
+        ) return
+        val entry = PanEntry(
+            extras.getString("gid").orEmpty(), extras.getString("message").orEmpty(),
+            extras.getString("owner").orEmpty(), item.mediaId, metadata.title?.toString().orEmpty(),
+            "", "", false,
+        )
+        renewingPlaybackId = id
+        fun finishRenewal() {
+            renewingPlaybackId = null
+            renewedPlaybackId = id
+        }
+        val account = verifiedAccount
+        load(
+            PanApi.mediaLinkRequest(), post = true, form = PanApi.mediaLinkBody(entry, account),
+            lane = RequestLane.RENEWAL,
+            onFailure = ::finishRenewal,
+        ) { json ->
+            val link = PanApi.parseMediaLink(json, entry)
+            finishRenewal()
+            player.sendCustomCommand(AudioPlaybackService.RENEW_FILE, Bundle().apply {
+                putString("playbackId", id)
+                putString("uri", link.toString())
+            })
+        }
+    }
+
+    private fun cancelPendingAudioRequest() {
+        audioPlayToken?.let(AudioPlayRequestGate::cancel)
+        audioPlayToken = null
+        dispatchedAudioEntry = null
+        audioRequestId++
+        pendingAudioEntry = null
+        pendingAudioPage = null
+        updateAudioRequestMessage(null)
+    }
+
+    private fun failAudioRequest(message: String) {
+        pendingQueue = null
+        audioPlayToken = null
+        pendingAudioEntry = null
+        val active = controller?.let(::currentAudioEntry)
+        if (active != null && PlaybackQueueState.entries.any { sameEntry(it, active) }) {
+            PlaybackQueueState.anchor = active
+            renderCourseSwitch()
+        }
+        updateAudioRequestMessage(message)
+    }
+
+    private fun updateAudioRequestMessage(message: String?) {
+        audioRequestMessage = message
+        if (message != null) status.text = message
+        refreshAudioPageMessage?.invoke()
+    }
+
     @OptIn(UnstableApi::class)
-    private fun showPlayback(player: MediaController, title: String? = null) {
-        if (playbackDialog?.isShowing == true) return
+    private fun showPlayback(player: MediaController) {
+        if (audioPage != null || !ownsAudio(player) || native.visibility != View.VISIBLE) return
         val message = label("", 14f)
+        val track = label(player.mediaMetadata.title?.toString() ?: "当前播放", 24f).apply {
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(16), 0, dp(8))
+        }
         val controls = PlayerControlView(this).apply {
             this.player = player
             showTimeoutMs = 0
+            setShowPreviousButton(false)
+            setShowNextButton(false)
+        }
+        val previous = button("上一节") { currentAudioEntry(player)?.let { playSibling(it, -1) } }
+        val next = button("下一节") { currentAudioEntry(player)?.let { playSibling(it, 1) } }
+        val favorite = Button(this).apply {
+            isAllCaps = false
+            setOnClickListener {
+                currentAudioEntry(player)?.let { text = if (toggleFavorite(it)) "取消收藏" else "收藏" }
+            }
         }
         val panel = column().apply {
-            setPadding(dp(16), dp(12), dp(16), 0)
+            setPadding(dp(24), dp(16), dp(24), dp(24))
+            addView(headAction("⌄ 收起播放器") { closeAudioPage() })
+            addView(ImageView(this@MainActivity).apply {
+                setImageResource(R.drawable.ic_music)
+                setColorFilter(color(R.color.accentInk))
+                setBackgroundResource(R.drawable.bg_fmt_audio)
+                setPadding(dp(27), dp(27), dp(27), dp(27))
+            }, LinearLayout.LayoutParams(dp(96), dp(96)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(36)
+                bottomMargin = dp(20)
+            })
+            addView(track)
             addView(message)
             addView(controls)
-        }
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(title ?: player.mediaMetadata.title ?: "当前播放")
-            .setView(panel)
-            .setPositiveButton("返回列表", null)
-            .setNegativeButton("停止播放") { _, _ ->
+            addView(row().apply {
+                listOf(previous, favorite, next).forEach {
+                    addView(it, LinearLayout.LayoutParams(0, -2, 1f))
+                }
+            })
+            addView(button("停止播放") {
+                pendingQueue = null
+                PlaybackQueueState.anchor = null
+                PlaybackQueueState.entries = emptyList()
+                PlaybackQueueState.listKey = null
+                renderCourseSwitch()
+                cancelPendingAudioRequest()
                 player.sendCustomCommand(AudioPlaybackService.CLEAR_FILE, Bundle.EMPTY)
-            }
-            .create()
+                closeAudioPage()
+            })
+        }
+        val page = ScrollView(this).apply {
+            setBackgroundColor(color(R.color.bg))
+            isClickable = true
+            isFillViewport = true
+            if (Build.VERSION.SDK_INT >= 28) accessibilityPaneTitle = "音频播放器"
+            addView(panel)
+        }
         fun updateMessage() {
+            val current = currentAudioEntry(player)
+            previous.isEnabled = current?.let { siblingOf(it, -1) != null } == true
+            next.isEnabled = current?.let { siblingOf(it, 1) != null } == true
+            favorite.isEnabled = current != null
+            favorite.text = if (current?.let(favorites::has) == true) "取消收藏" else "收藏"
             val error = player.playerError
-            message.text = when {
+            message.text = audioRequestMessage ?: when {
                 error != null -> "播放失败（${playbackError(error)}）。可长按 MP3 使用网页播放。"
                 player.playbackState == Player.STATE_BUFFERING -> "正在缓冲…"
                 player.playbackState == Player.STATE_ENDED -> "播放结束"
@@ -438,48 +1889,124 @@ class MainActivity : Activity() {
             }
         }
         val listener = object : Player.Listener {
-            override fun onEvents(player: Player, events: Player.Events) = updateMessage()
+            override fun onEvents(player: Player, events: Player.Events) {
+                if (ownsAudio(player)) {
+                    track.text = player.mediaMetadata.title ?: "当前播放"
+                    updateMessage()
+                } else closeAudioPage()
+            }
         }
         player.addListener(listener)
         updateMessage()
-        playbackDialog = dialog
-        dialog.setOnDismissListener {
+        refreshAudioPageMessage = ::updateMessage
+        audioPage = page
+        releaseAudioPage = {
             player.removeListener(listener)
             controls.player = null
-            playbackDialog = null
-            if (!isDestroyed) renderAudioHistory()
         }
-        dialog.show()
+        native.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        (native.parent as ViewGroup).addView(page, FrameLayout.LayoutParams(-1, -1))
         controls.show()
     }
 
-    private fun startVideo(entry: PanEntry) {
-        controller?.pause()
-        showWeb(PanApi.video(entry)) {
-            resolveVideo(entry)
+    private fun closeAudioPage() {
+        val page = audioPage ?: return
+        audioPage = null
+        refreshAudioPageMessage = null
+        releaseAudioPage?.invoke()
+        releaseAudioPage = null
+        (page.parent as? ViewGroup)?.removeView(page)
+        native.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
+        if (!isDestroyed && !isFinishing) {
+            updateNowPlaying()
+            renderAudioHistory()
         }
     }
 
-    private fun resolveVideo(entry: PanEntry) {
-        videoResolver.start(web, entry) { result ->
+    private fun startVideo(
+        entry: PanEntry,
+        positionMs: Long? = null,
+        playWhenReady: Boolean = true,
+        retryOnExpiredLink: Boolean = true,
+        audioOnly: Boolean = false,
+        fullscreen: Boolean = false,
+        orientationBeforeFullscreen: Int = videoPage?.orientationBeforeFullscreen ?: requestedOrientation,
+    ) {
+        if (!activityVisible || !ready || !hasVerifiedAccount()) return
+        videoToRestore = null
+        val account = verifiedAccount
+        pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
+        loadingVideo = VideoPlaybackPage.Snapshot(
+            entry, account, positionMs, playWhenReady, audioOnly, fullscreen, orientationBeforeFullscreen,
+        )
+        cancelPendingAudioRequest()
+        controller?.pause()
+        videoLoading?.dismiss()
+        val loading = AlertDialog.Builder(this)
+            .setMessage("正在获取视频播放清单…")
+            .setNegativeButton("取消") { dialog, _ -> dialog.cancel() }
+            .create()
+        loading.setOnCancelListener {
+            if (videoLoading === loading) {
+                videoLoading = null
+                loadingVideo = null
+                pendingQueue = null
+                videoResolver.cancel()
+            }
+        }
+        videoLoading = loading
+        loading.show()
+        videoResolver.start(entry, web.settings.userAgentString) { result ->
+            videoLoading = null
+            loadingVideo = null
+            loading.dismiss()
             if (isDestroyed || isFinishing) return@start
             result.onSuccess { stream ->
-                showApp()
+                confirmPlayback(entry)
+                val previousPage = videoPage
                 videoPage = VideoPlaybackPage(
-                    this, entry, stream, videoHistory,
-                    onRetry = { startVideo(entry) },
-                    onWeb = { showWeb(PanApi.video(entry)) },
-                    onClose = {
-                        videoPage = null
-                        if (!isDestroyed) renderAudioHistory()
+                    this, entry, stream,
+                    account = account,
+                    history = AudioHistory(getSharedPreferences("video_history", MODE_PRIVATE), account),
+                    startPositionMs = positionMs,
+                    playWhenReady = playWhenReady,
+                    retryOnExpiredLink = retryOnExpiredLink,
+                    startAudioOnly = audioOnly,
+                    startFullscreen = fullscreen,
+                    orientationBeforeFullscreen = orientationBeforeFullscreen,
+                    onRetry = { snapshot, automatic ->
+                        if (videoLoading == null) startVideo(
+                            entry, snapshot.positionMs, snapshot.playWhenReady, retryOnExpiredLink = !automatic,
+                            audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
+                        )
+                    },
+                    hasPrevious = siblingOf(entry, -1) != null,
+                    hasNext = siblingOf(entry, 1) != null,
+                    onSwitch = { delta, snapshot -> playSibling(entry, delta, videoState = snapshot) },
+                    onEnded = { snapshot ->
+                        if (videoLoading == null) playSibling(entry, 1, automatic = true, videoState = snapshot)
+                    },
+                    isFavorite = favorites.has(entry),
+                    onFavorite = { account == verifiedAccount && toggleFavorite(entry) },
+                    onClose = { closed ->
+                        if (videoPage === closed) {
+                            videoPage = null
+                            if (!isDestroyed) renderAudioHistory()
+                        }
                     },
                 )
+                previousPage?.close(keepOrientation = fullscreen)
             }.onFailure {
                 AlertDialog.Builder(this)
                     .setTitle("无法原生播放")
                     .setMessage((it as? IllegalStateException)?.message ?: "读取视频播放清单失败。")
-                    .setPositiveButton("继续使用百度播放器", null)
-                    .setNeutralButton("重试") { _, _ -> startVideo(entry) }
+                    .setPositiveButton("关闭", null)
+                    .setNeutralButton("重试") { _, _ ->
+                        startVideo(
+                            entry, positionMs, playWhenReady, audioOnly = audioOnly, fullscreen = fullscreen,
+                            orientationBeforeFullscreen = orientationBeforeFullscreen,
+                        )
+                    }
                     .show()
             }
         }
@@ -489,10 +2016,16 @@ class MainActivity : Activity() {
         val response = generateSequence(error.cause) { it.cause }
             .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
             .firstOrNull()
-        return response?.let { "HTTP ${it.responseCode}" } ?: error.errorCodeName
+        // 文档 §9 / §12：地址约 8 小时过期，403 不该只显示一个 HTTP 码
+        return when (response?.responseCode) {
+            401, 403 -> "播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）"
+            404 -> "文件地址已失效，请重新打开"
+            else -> response?.let { "HTTP ${it.responseCode}" } ?: error.errorCodeName
+        }
     }
 
-    private fun playAudio(entry: PanEntry, uri: Uri) {
+    private fun playAudio(entry: PanEntry, uri: Uri, resumeSeconds: Int?) {
+        val account = verifiedAccount
         val source = JSONObject.quote(uri.toString())
         val controls = AudioControls(this, entry.name) { playing ->
             val action = if (playing) "a.play().catch(() => {})" else "a.pause()"
@@ -502,22 +2035,46 @@ class MainActivity : Activity() {
             )
         }
         audioControls = controls
-        val previous = audioHistory.find(entry)
-        val startAt = previous?.takeUnless { it.completed }?.seconds ?: 0
+        val playbackHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE), verifiedAccount)
+        val previous = playbackHistory.find(entry)
+        val startAt = resumeSeconds ?: previous?.takeUnless { it.completed }?.seconds ?: 0
         var lastSavedSeconds = startAt
         var lastSavedAt = SystemClock.elapsedRealtime()
         var lastCompleted = previous?.completed == true
-        fun saveProgress(seconds: Int, completed: Boolean) {
+        fun saveProgress(seconds: Int, completed: Boolean, duration: Int = 0) {
             if (seconds <= 0 || (seconds < startAt && !completed)) return
             if (seconds == lastSavedSeconds && completed == lastCompleted) return
-            audioHistory.save(entry, seconds, completed)
+            playbackHistory.save(entry, seconds, completed, duration)
             lastSavedSeconds = seconds
             lastSavedAt = SystemClock.elapsedRealtime()
             lastCompleted = completed
         }
-        val dialog = AlertDialog.Builder(this)
+        fun switchWebAudio(dialog: AlertDialog, delta: Int, automatic: Boolean = false) {
+            if (!activityVisible || siblingOf(entry, delta) == null) return
+            dialog.dismiss()
+            playSibling(entry, delta, automatic, PlaybackRoute.WEB_AUDIO)
+        }
+        lateinit var dialog: AlertDialog
+        val actions = row().apply {
+            val previous = button("上一节") { switchWebAudio(dialog, -1) }.apply {
+                isEnabled = siblingOf(entry, -1) != null
+            }
+            val next = button("下一节") { switchWebAudio(dialog, 1) }.apply {
+                isEnabled = siblingOf(entry, 1) != null
+            }
+            val favorite = Button(this@MainActivity).apply {
+                isAllCaps = false
+                text = if (favorites.has(entry)) "取消收藏" else "收藏"
+                setOnClickListener {
+                    if (account == verifiedAccount) text = if (toggleFavorite(entry)) "取消收藏" else "收藏"
+                }
+            }
+            listOf(previous, favorite, next).forEach { addView(it, LinearLayout.LayoutParams(0, -2, 1f)) }
+        }
+        dialog = AlertDialog.Builder(this)
             .setTitle(entry.name)
             .setMessage("正在缓冲…")
+            .setView(actions)
             .setPositiveButton("暂停", null)
             .setNegativeButton("关闭", null)
             .create()
@@ -532,7 +2089,7 @@ class MainActivity : Activity() {
                   const a = window.__groupPlayerAudio;
                   if (!a) return null;
                   const position = a.readyState >= 2 && !a.seeking
-                    ? [Math.floor(a.currentTime), a.ended] : null;
+                    ? [Math.floor(a.currentTime), a.ended, Math.floor(a.duration || 0)] : null;
                   a.pause();
                   a.removeAttribute('src');
                   a.load();
@@ -542,7 +2099,7 @@ class MainActivity : Activity() {
                 """.trimIndent(),
             ) { result ->
                 val position = result?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
-                if (position != null) saveProgress(position.optInt(0), position.optBoolean(1))
+                if (position != null) saveProgress(position.optInt(0), position.optBoolean(1), position.optInt(2))
                 if (!isDestroyed) renderAudioHistory()
             }
         }
@@ -577,12 +2134,18 @@ class MainActivity : Activity() {
         fun pollAudio() {
             if (!dialog.isShowing || isDestroyed) return
             web.evaluateJavascript(
-                "(() => { const a = window.__groupPlayerAudio; return a ? [a.error?.code || 0, a.readyState, a.paused, a.ended, Math.floor(a.currentTime)] : null; })()",
+                "(() => { const a = window.__groupPlayerAudio; return a ? [a.error?.code || 0, a.readyState, a.paused, a.ended, Math.floor(a.currentTime), Math.floor(a.duration || 0)] : null; })()",
             ) { result ->
                 if (!dialog.isShowing || isDestroyed) return@evaluateJavascript
                 val state = result?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
                 val error = state?.optInt(0) ?: 0
                 val ready = (state?.optInt(1) ?: 0) >= 2
+                if ((error == 2 || error == 4) && resumeSeconds == null && hasVerifiedAccount() && account == verifiedAccount) {
+                    val position = maxOf(startAt, lastSavedSeconds, state?.optInt(4) ?: 0)
+                    dialog.dismiss()
+                    requestMediaLink(entry, account, PlaybackRoute.WEB_AUDIO, webResumeSeconds = position)
+                    return@evaluateJavascript
+                }
                 if (error != 0 || (!ready && SystemClock.elapsedRealtime() >= deadline)) {
                     dialog.setMessage(if (error != 0) "音频读取失败（$error）。关闭后可重试。" else "音频缓冲超时。")
                     toggle.isEnabled = false
@@ -592,7 +2155,11 @@ class MainActivity : Activity() {
                         val ended = state.optBoolean(3)
                         val seconds = state.optInt(4)
                         if (ended || paused || SystemClock.elapsedRealtime() - lastSavedAt >= 5_000) {
-                            saveProgress(seconds, ended)
+                            saveProgress(seconds, ended, state.optInt(5))
+                        }
+                        if (ended && activityVisible && siblingOf(entry, 1) != null) {
+                            switchWebAudio(dialog, 1, automatic = true)
+                            return@evaluateJavascript
                         }
                         controls.update(!paused && !ended, seconds)
                         toggle.isEnabled = true
@@ -608,17 +2175,55 @@ class MainActivity : Activity() {
         pollAudio()
     }
 
+    private fun apiError(url: String, errno: Int, json: JSONObject): String {
+        val path = Uri.parse(url).path.orEmpty()
+        val showMsg = json.optString("show_msg").trim().take(60)
+        val hint = when (errno) {
+            -20 -> if (showMsg.isEmpty()) "百度网盘拒绝了此次请求。请在网盘页面确认该共享仍可访问，或稍后重试"
+                else "百度网盘拒绝了此次请求"
+            -6 -> "登录态已失效，请重新登录百度网盘后再试"
+            -9 -> "请求过于频繁，请稍等片刻再试"
+            else -> "网盘请求失败，请查看网盘提示或稍后重试"
+        }
+        return "$hint（错误码 $errno · 接口 $path）${if (showMsg.isEmpty()) "" else " · 网盘提示：$showMsg"}"
+    }
+
     private fun load(
         url: String,
         post: Boolean = false,
         form: String? = null,
+        statusHint: String? = null,
+        lane: RequestLane = RequestLane.LIST,
+        onCancelled: () -> Unit = {},
         onFailure: () -> Unit = {},
         onResult: (JSONObject) -> Unit,
     ) {
-        val id = ++requestId
-        status.text = "正在读取…"
+        if (!ready || !hasVerifiedAccount()) {
+            onCancelled()
+            return
+        }
+        val id = when (lane) {
+            RequestLane.LIST -> ++requestId
+            RequestLane.AUDIO -> ++audioRequestId
+            RequestLane.RENEWAL -> ++renewalRequestId
+        }
+        val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
+        fun isCurrent() = !isDestroyed && id == when (lane) {
+            RequestLane.LIST -> requestId
+            RequestLane.AUDIO -> audioRequestId
+            RequestLane.RENEWAL -> renewalRequestId
+        } && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
+        fun showError(message: String?) {
+            val text = message ?: "网盘请求失败，请重试。"
+            when (lane) {
+                RequestLane.LIST -> status.text = text
+                RequestLane.AUDIO -> failAudioRequest(text)
+                RequestLane.RENEWAL -> Unit
+            }
+        }
+        if (lane == RequestLane.LIST) status.text = statusHint ?: "正在读取…"
         val deadline = SystemClock.elapsedRealtime() + 20_000
-        val key = "__groupPlayerResult$id"
+        val key = "__groupPlayer${lane.name}$id"
         val target = JSONObject.quote(url)
         val bodyOption = form?.let { ", body: ${JSONObject.quote(it)}" }.orEmpty()
         val method = if (post) "POST" else "GET"
@@ -630,9 +2235,10 @@ class MainActivity : Activity() {
         val script = """
             (() => {
               if (location.origin !== 'https://pan.baidu.com') return false;
-              const result = { ready: false };
+              const controller = new AbortController();
+              const result = { ready: false, controller };
               window.$key = result;
-              fetch($target, { method: '$method', credentials: 'same-origin', headers: $headers$bodyOption })
+              fetch($target, { method: '$method', credentials: 'same-origin', cache: 'no-store', signal: controller.signal, headers: $headers$bodyOption })
                 .then(async response => {
                   result.status = response.status;
                   result.body = await response.text();
@@ -643,18 +2249,34 @@ class MainActivity : Activity() {
             })()
         """.trimIndent()
 
+        fun cancelRequest() {
+            if (!isDestroyed) web.evaluateJavascript(
+                "window.$key?.controller.abort(); delete window.$key;", null,
+            )
+            if (playToken != null && audioPlayToken == playToken && !AudioPlayRequestGate.isCurrent(playToken)) {
+                cancelPendingAudioRequest()
+            }
+            onCancelled()
+        }
+
         fun poll() {
-            if (id != requestId || isDestroyed) return
+            if (!isCurrent()) {
+                cancelRequest()
+                return
+            }
             web.evaluateJavascript(
                 "(() => { const r = window.$key; if (!r || !r.ready) return null; delete window.$key; return r; })()",
             ) { raw ->
-                if (id != requestId || isDestroyed) return@evaluateJavascript
+                if (!isCurrent()) {
+                    cancelRequest()
+                    return@evaluateJavascript
+                }
                 if (raw == null || raw == "null") {
                     if (SystemClock.elapsedRealtime() < deadline) {
                         web.postDelayed({ poll() }, 200)
                     } else {
-                        web.evaluateJavascript("delete window.$key", null)
-                        status.text = "请求超时，请重试。"
+                        cancelRequest()
+                        showError("请求超时，请重试。")
                         onFailure()
                     }
                     return@evaluateJavascript
@@ -667,68 +2289,138 @@ class MainActivity : Activity() {
                     check(body.trimStart().startsWith("{")) { "网盘未返回列表数据，请重新登录后刷新。" }
                     val json = JSONObject(body)
                     val errno = json.getInt("errno")
-                    check(errno == 0) { "网盘返回错误（$errno）。请确认已登录并有该群的访问权限。" }
+                    if (errno == -6) {
+                        invalidateAccount()
+                        refresh()
+                        val message = apiError(url, errno, json)
+                        status.text = message
+                        if (lane == RequestLane.AUDIO) updateAudioRequestMessage(message)
+                        return@evaluateJavascript
+                    }
+                    check(errno == 0) { apiError(url, errno, json) }
                     onResult(json)
                 }.onFailure {
-                    status.text = if (it is IllegalStateException) it.message else "网盘响应格式有变化，请刷新重试。"
+                    showError(if (it is IllegalStateException) it.message else "网盘响应格式有变化，请刷新重试。")
                     onFailure()
                 }
             }
         }
 
         web.evaluateJavascript(script) { started ->
-            if (id != requestId || isDestroyed) return@evaluateJavascript
+            if (!isCurrent()) {
+                cancelRequest()
+                return@evaluateJavascript
+            }
             if (started == "true") poll()
             else {
-                status.text = "网盘页面尚未就绪，请登录后刷新。"
+                showError("网盘页面尚未就绪，请登录后刷新。")
                 onFailure()
             }
         }
     }
 
-    private fun showWeb(url: String, beforeLoad: () -> Unit = {}) {
-        videoResolver.cancel()
-        requestId++
+    private fun showWeb(url: String) {
+        loginPending = url == PanApi.login
+        if (url != PanApi.CONTACTS) pickingSource = false
+        val sameDocument = ready && web.url?.substringBefore('#') == url.substringBefore('#')
+        if (!sameDocument) ready = false
+        invalidateAccount()
+        addSourceButton.visibility = if (pickingSource) View.VISIBLE else View.GONE
         native.visibility = View.GONE
         (native.tag as View).visibility = View.VISIBLE
-        beforeLoad()
         web.loadUrl(url)
+        if (sameDocument) verifyAndRefresh()
     }
 
     private fun showApp() {
+        pickingSource = false
+        loginPending = false
         videoResolver.cancel()
         (native.tag as View).visibility = View.GONE
         native.visibility = View.VISIBLE
-        if (web.url != PanApi.CONTACTS) {
+        if (ready && web.url?.substringBefore('#') == PanApi.CONTACTS.substringBefore('#')) {
+            if (web.url != PanApi.CONTACTS) web.loadUrl(PanApi.CONTACTS)
+            verifyAndRefresh()
+        } else {
             ready = false
+            invalidateAccount()
             web.loadUrl(PanApi.CONTACTS)
-            status.text = "正在进入网盘通讯录…"
-        } else refresh()
+            refresh()
+        }
     }
 
     @Deprecated("Android back button compatibility")
     override fun onBackPressed() {
         when {
+            audioPage != null -> closeAudioPage()
             native.visibility == View.GONE -> showApp()
             folders.isNotEmpty() -> {
                 folders.removeAt(folders.lastIndex)
                 refresh()
             }
+            screen != Screen.HOME -> showScreen(Screen.HOME)
             else -> super.onBackPressed()
         }
     }
 
+    private fun restoreVideoIfReady() {
+        val snapshot = videoToRestore ?: return
+        if (!activityVisible || !ready || !hasVerifiedAccount()) return
+        videoToRestore = null
+        if (snapshot.account != verifiedAccount) {
+            pendingQueue = null
+            return
+        }
+        startVideo(
+            snapshot.entry, snapshot.positionMs, snapshot.playWhenReady,
+            audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
+            orientationBeforeFullscreen = snapshot.orientationBeforeFullscreen,
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onRetainNonConfigurationInstance(): Any? {
+        val snapshot = loadingVideo ?: stoppedVideo ?: videoPage?.snapshot() ?: videoToRestore
+        val entry = snapshot?.entry ?: dispatchedAudioEntry
+        val selection = pendingQueue?.takeIf { entry != null && sameEntry(it.entry, entry) }
+        if (snapshot == null && selection == null) return null
+        return RetainedPlayback(snapshot, selection)
+    }
+
+    override fun onStart() {
+        super.onStart()
+        activityVisible = true
+        stoppedVideo = null
+        if (videoToRestore == null && videoPage == null && videoLoading == null) videoToRestore = loadingVideo
+        nowPlaying.post(nowPlayingTicker)
+        restoreVideoIfReady()
+    }
+
     override fun onStop() {
+        activityVisible = false
+        nowPlaying.removeCallbacks(nowPlayingTicker)
+        if (pdfLoading != null) {
+            pdfFetcher.cancel()
+            pdfLoading?.dismiss()
+            pdfLoading = null
+        }
+        stoppedVideo = videoPage?.snapshot()
         videoPage?.pause()
         videoResolver.cancel()
+        videoLoading?.dismiss()
+        videoLoading = null
         super.onStop()
     }
 
     override fun onDestroy() {
         requestId++
+        audioPlayToken?.let(AudioPlayRequestGate::cancel)
+        audioRequestId++
         videoResolver.close()
         videoPage?.close()
-        playbackDialog?.dismiss()
+        pdfFetcher.close()
+        pdfLoading?.dismiss()
+        closeAudioPage()
         controllerFuture?.let(MediaController::releaseFuture)
         controller = null
         audioControls?.close()
@@ -752,4 +2444,11 @@ class MainActivity : Activity() {
         isAllCaps = false
         setOnClickListener { action() }
     }
+}
+
+// The playback service and its UI run in the same process. Keep the queue when Android recreates the UI.
+private object PlaybackQueueState {
+    var anchor: PanEntry? = null
+    var entries: List<PanEntry> = emptyList()
+    var listKey: String? = null
 }

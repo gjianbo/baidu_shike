@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/courseSwitch"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="8dp"
+    android:background="@drawable/bg_switch"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:padding="8dp"
+    android:visibility="gone">
+
+    <TextView
+        android:id="@+id/btnPrev"
+        style="@style/HeadAction"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:drawableStart="@drawable/ic_chevron_left"
+        android:drawablePadding="2dp"
+        android:text="上一节"
+        android:textColor="@color/accentInk" />
+
+    <TextView
+        android:id="@+id/courseHint"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:singleLine="true"
+        android:textColor="@color/ink3"
+        android:textSize="10.5sp" />
+
+    <TextView
+        android:id="@+id/btnNext"
+        style="@style/HeadAction"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:drawableEnd="@drawable/ic_chevron_right"
+        android:drawablePadding="2dp"
+        android:text="下一节"
+        android:textColor="@color/accentInk" />
+</LinearLayout>
