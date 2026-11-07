@@ -45,6 +45,7 @@ class MainActivity : Activity() {
     private lateinit var title: TextView
     private lateinit var historyPanel: LinearLayout
     private lateinit var audioHistory: AudioHistory
+    private lateinit var videoHistory: AudioHistory
     private var audioControls: AudioControls? = null
     private var playbackDialog: AlertDialog? = null
     private val videoResolver = VideoStreamResolver()
@@ -66,6 +67,7 @@ class MainActivity : Activity() {
         window.statusBarColor = Color.rgb(42, 31, 25)
         window.navigationBarColor = Color.rgb(42, 31, 25)
         audioHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE))
+        videoHistory = AudioHistory(getSharedPreferences("video_history", MODE_PRIVATE))
         gid = getPreferences(MODE_PRIVATE).getString("group_id", "").orEmpty()
         val frame = FrameLayout(this)
         native = column().apply {
@@ -317,12 +319,21 @@ class MainActivity : Activity() {
                 }
             })
         }
-        if (items.isNotEmpty()) {
+        val playbackItems = (items.map { it to false } + videoHistory.recent(gid).map { it to true })
+            .sortedByDescending { (item, _) -> item.updatedAt }
+            .take(10)
+        if (playbackItems.isNotEmpty()) {
             historyPanel.addView(button("最近播放") {
+                val labels = playbackItems.map { (item, isVideo) ->
+                    val format = if (isVideo) "MP4" else "MP3"
+                    val position = if (isVideo && item.completed) "已看完" else item.positionText
+                    "$format · $position · ${item.entry.name}"
+                }
                 AlertDialog.Builder(this)
                     .setTitle("最近播放")
-                    .setItems(items.take(10).map { "${it.positionText} · ${it.entry.name}" }.toTypedArray()) { _, which ->
-                        resolveAudio(items[which].entry)
+                    .setItems(labels.toTypedArray()) { _, which ->
+                        val (item, isVideo) = playbackItems[which]
+                        if (isVideo) startVideo(item.entry) else resolveAudio(item.entry)
                     }
                     .setNegativeButton("关闭", null)
                     .show()
@@ -455,10 +466,13 @@ class MainActivity : Activity() {
             result.onSuccess { stream ->
                 showApp()
                 videoPage = VideoPlaybackPage(
-                    this, entry, stream,
+                    this, entry, stream, videoHistory,
                     onRetry = { startVideo(entry) },
                     onWeb = { showWeb(PanApi.video(entry)) },
-                    onClose = { videoPage = null },
+                    onClose = {
+                        videoPage = null
+                        if (!isDestroyed) renderAudioHistory()
+                    },
                 )
             }.onFailure {
                 AlertDialog.Builder(this)

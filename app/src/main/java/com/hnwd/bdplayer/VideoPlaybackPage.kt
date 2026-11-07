@@ -29,8 +29,9 @@ import androidx.media3.ui.PlayerView
 @OptIn(UnstableApi::class)
 internal class VideoPlaybackPage(
     private val activity: Activity,
-    entry: PanEntry,
+    private val entry: PanEntry,
     stream: VideoStream,
+    private val history: AudioHistory,
     onRetry: () -> Unit,
     onWeb: () -> Unit,
     onClose: () -> Unit,
@@ -112,6 +113,7 @@ internal class VideoPlaybackPage(
                 if (playbackState == Player.STATE_READY) readyToSave = true
                 if (playbackState == Player.STATE_ENDED) {
                     progress.edit().remove(progressKey).apply()
+                    history.save(entry, (player.currentPosition / 1000).toInt(), completed = true)
                     readyToSave = false
                 }
                 if (player.playerError != null) return
@@ -145,7 +147,9 @@ internal class VideoPlaybackPage(
 
     private fun saveProgress() {
         if (!readyToSave) return
-        progress.edit().putLong(progressKey, player.currentPosition).apply()
+        val position = player.currentPosition
+        progress.edit().putLong(progressKey, position).apply()
+        history.save(entry, (position / 1000).toInt(), completed = false)
     }
 
     @Suppress("DEPRECATION")
