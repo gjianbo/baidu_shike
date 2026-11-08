@@ -1,0 +1,115 @@
+name: Build Android APKs
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish an existing tag (optional, e.g. v0.1.20)'
+        type: string
+        required: false
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || github.sha }}
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.3.0'
+
+      - name: Install Android SDK
+        run: |
+          sdkmanager --channel=3 --licenses < <(yes) > /dev/null
+          sdkmanager --channel=3 "platforms;android-37.0" "build-tools;35.0.0" "build-tools;37.0.0"
+
+      - name: Build Debug and signed Release
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BDPLAYER_KEYSTORE_BASE64 }}
+          BDPLAYER_STORE_PASSWORD: ${{ secrets.BDPLAYER_STORE_PASSWORD }}
+          BDPLAYER_KEY_ALIAS: ${{ secrets.BDPLAYER_KEY_ALIAS }}
+          BDPLAYER_KEY_PASSWORD: ${{ secrets.BDPLAYER_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$BDPLAYER_STORE_PASSWORD" || -z "$BDPLAYER_KEY_ALIAS" || -z "$BDPLAYER_KEY_PASSWORD" ]]; then
+            echo "::error::Configure all four Android signing secrets before building."
+            exit 1
+          fi
+
+          umask 077
+          BDPLAYER_KEYSTORE="$(mktemp "$RUNNER_TEMP/baidu-shike.XXXXXX")"
+          export BDPLAYER_KEYSTORE
+          trap 'rm -f -- "$BDPLAYER_KEYSTORE"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$BDPLAYER_KEYSTORE"
+          unset KEYSTORE_BASE64
+          gradle --no-daemon :app:lintDebug :app:assembleDebug :app:assembleRelease
+
+      - name: Verify and name APKs
+        run: |
+          release_dir=app/build/outputs/apk/release
+          debug_dir=app/build/outputs/apk/debug
+          version="$(jq -er '.elements[0].versionName' "$release_dir/output-metadata.json")"
+          debug_version="$(jq -er '.elements[0].versionName' "$debug_dir/output-metadata.json")"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$debug_version" ]]; then
+            echo "::error::APK versions do not match or are invalid."
+            exit 1
+          fi
+          if [[ -n "$RELEASE_TAG" && "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::The Git tag must match the Android versionName (v$version)."
+            exit 1
+          fi
+
+          apksigner="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          "$apksigner" verify "$release_dir/app-release.apk"
+          "$apksigner" verify "$debug_dir/app-debug.apk"
+          mkdir -p dist
+          cp "$release_dir/app-release.apk" "dist/baidu-shike-$version-release.apk"
+          cp "$debug_dir/app-debug.apk" "dist/baidu-shike-$version-debug.apk"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-apks
+          path: dist/*.apk
+          if-no-files-found: error
+
+  publish:
+    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: android-apks
+          path: dist
+
+      - name: Publish APKs to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          gh release create --verify-tag --title "拾课 $RELEASE_TAG" --generate-notes -- "$RELEASE_TAG" dist/*.apk

@@ -55,8 +55,9 @@ gradle :app:assembleRelease
 | `BDPLAYER_KEY_ALIAS` | 签名密钥别名 |
 | `BDPLAYER_KEY_PASSWORD` | 签名密钥密码 |
 
-- 在 **Actions → Build Android APKs → Run workflow** 手动打包，两个 APK 会出现在本次运行的 **Artifacts** 中。
+- 推送到 `main` 或在 **Actions → Build Android APKs → Run workflow** 手动打包，两个 APK 会出现在本次运行的 **Artifacts** 中。
 - 推送与 `app/build.gradle` 中 `versionName` 一致的标签（例如 `v0.1.20`）后，工作流会构建、校验签名，并把 Debug 与 Release APK 发布到 **Releases** 的 **Assets**。
+- 如果标签已存在且尚未发布，可在 **Run workflow** 中选择 `main`，填写 `release_tag`。工作流会从该标签构建并发布 APK。
 
 请先提交并推送含工作流的版本，再对该提交打标签。
 
