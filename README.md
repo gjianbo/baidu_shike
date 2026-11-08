@@ -12,7 +12,7 @@
 
 ## 安装与使用
 
-支持 **Android 10（API 29）及以上**。如 GitHub 的 **Releases** 页面已提供安装包，日常使用请选择签名的 Release APK。也可以按下文从源码构建。
+支持 **Android 10（API 29）及以上**。如 GitHub 的 **Releases** 页面已提供安装包，日常使用请选择签名的 Release APK。
 
 1. 打开「设置」，在「百度网盘」一栏完成登录。
 2. 点「已关联的群组」，勾选要浏览的群组。
@@ -25,43 +25,3 @@
 在「设置 → 备份与恢复」中点「立即备份」。JSON 文件保存在手机的 **下载 / 拾课备份**，成功后会显示完整路径。「从文件恢复」会尝试打开同一个目录，也可以浏览其他位置选取旧版导出的 JSON。
 
 Debug 和 Release 的签名不同。切换版本时，先备份并确认文件已写入共享下载目录，再卸载当前版本并安装另一版本。随后可从该目录恢复，并登录原百度网盘账号。备份文件包含本地记录和偏好，登录凭据、播放地址和媒体文件不在其中。
-
-## 从源码构建
-
-项目使用 Kotlin、Android Views 和 AndroidX Media3。已验证的构建环境为 **JDK 17、Gradle 9.3.0 和 Android SDK Platform 37**。仓库未包含 Gradle Wrapper，请使用本机 Gradle，或用 Android Studio 打开项目。通过 `ANDROID_HOME` 或 `local.properties` 中的 `sdk.dir` 指定 SDK。
-
-```sh
-gradle :app:assembleDebug
-```
-
-Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
-
-构建签名正式包前，通过本机环境变量配置 `BDPLAYER_KEYSTORE`、`BDPLAYER_STORE_PASSWORD`、`BDPLAYER_KEY_ALIAS` 和 `BDPLAYER_KEY_PASSWORD`。请把密钥库和签名凭据保存在仓库之外。
-
-```sh
-gradle :app:assembleRelease
-```
-
-签名后的 Release APK 输出到 `app/build/outputs/apk/release/app-release.apk`。
-
-## GitHub Actions 打包
-
-在仓库的 **Settings → Secrets and variables → Actions** 配置以下仓库 Secrets。请使用之前正式版的签名密钥，以便用户覆盖升级。
-
-| Secret | 内容 |
-| --- | --- |
-| `BDPLAYER_KEYSTORE_BASE64` | 正式签名密钥库文件的 Base64 内容 |
-| `BDPLAYER_STORE_PASSWORD` | 密钥库密码 |
-| `BDPLAYER_KEY_ALIAS` | 签名密钥别名 |
-| `BDPLAYER_KEY_PASSWORD` | 签名密钥密码 |
-
-- 推送到 `main` 或在 **Actions → Build Android APKs → Run workflow** 手动打包，两个 APK 会出现在本次运行的 **Artifacts** 中。
-- 推送与 `app/build.gradle` 中 `versionName` 一致的标签（例如 `v0.1.20`）后，工作流会构建、校验签名，并把 Debug 与 Release APK 发布到 **Releases** 的 **Assets**。
-- 如果标签已存在且尚未发布，可在 **Run workflow** 中选择 `main`，填写 `release_tag`。工作流会从该标签构建并发布 APK。
-
-请先提交并推送含工作流的版本，再对该提交打标签。
-
-```sh
-git tag v0.1.20
-git push origin v0.1.20
-```
