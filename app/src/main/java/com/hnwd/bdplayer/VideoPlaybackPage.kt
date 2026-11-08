@@ -1,6 +1,7 @@
 package com.hnwd.bdplayer
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ComponentName
 import android.content.pm.ActivityInfo
@@ -9,15 +10,19 @@ import android.net.Uri
 import android.os.Build
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
 import android.window.OnBackInvokedDispatcher
-import android.widget.Button
+import android.widget.BaseAdapter
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.PopupMenu
 import android.widget.TextView
+import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
@@ -25,6 +30,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.ByteArrayDataSource
@@ -54,8 +60,13 @@ internal class VideoPlaybackPage(
     startFullscreen: Boolean,
     val orientationBeforeFullscreen: Int,
     onRetry: (Snapshot, Boolean) -> Unit,
-    hasPrevious: Boolean,
-    hasNext: Boolean,
+    courses: List<PanEntry>,
+    currentCourse: Int,
+    courseSortLabel: String?,
+    onSortCourses: (View, (List<PanEntry>, String) -> Unit) -> Unit,
+    canLoadMoreCourses: () -> Boolean,
+    onLoadMoreCourses: ((List<PanEntry>?) -> Unit) -> Unit,
+    onSelectCourse: (PanEntry, Snapshot) -> Unit,
     onSwitch: (Int, Snapshot) -> Unit,
     onEnded: (Snapshot) -> Unit,
     isFavorite: Boolean,
@@ -67,11 +78,16 @@ internal class VideoPlaybackPage(
         @Deprecated("Used for Android versions before predictive back")
         override fun onBackPressed() = handleBack()
     }
-    private val player = ExoPlayer.Builder(activity)
+    private val player: ExoPlayer = ExoPlayer.Builder(activity)
         .setSeekBackIncrementMs(10_000)
         .setSeekForwardIncrementMs(10_000)
         .build()
-    private val video = PlayerView(activity).apply { this.player = this@VideoPlaybackPage.player }
+        .apply { setPlaybackParameters(PlaybackParameters(PlaybackSpeed.video(activity))) }
+    private val video = (activity.layoutInflater.inflate(R.layout.view_video_player, null) as PlayerView).apply {
+        this.player = this@VideoPlaybackPage.player
+        controllerShowTimeoutMs = 0
+        controllerHideOnTouch = false
+    }
     private val progress = activity.getSharedPreferences("video_progress", Activity.MODE_PRIVATE)
     private val progressKey = AccountScope.key("${entry.gid}:${entry.messageId}:${entry.fileId}")
     private var readyToSave = false
@@ -177,44 +193,223 @@ internal class VideoPlaybackPage(
         favorite.setOnClickListener { paintFavorite(onFavorite()) }
         paintFavorite(isFavorite)
         val previous = iconButton(R.drawable.ic_skip_prev, "上一节", padding = 14) {
-            if (hasPrevious) onSwitch(-1, snapshot())
-        }.apply {
-            isEnabled = hasPrevious
-            alpha = if (hasPrevious) 1f else 0.35f
+            onSwitch(-1, snapshot())
         }
         val next = iconButton(R.drawable.ic_skip_next, "下一节", padding = 14) {
-            if (hasNext) onSwitch(1, snapshot())
-        }.apply {
-            isEnabled = hasNext
-            alpha = if (hasNext) 1f else 0.35f
+            onSwitch(1, snapshot())
         }
+        val fullscreen = iconButton(R.drawable.ic_fullscreen, "横屏全屏") { updateFullscreen(!immersive) }
+        val speed = button("") {}
+        fun paintSpeed() {
+            val value = player.playbackParameters.speed
+            speed.text = PlaybackSpeed.label(value)
+            speed.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(value)}"
+        }
+        paintSpeed()
+        speed.setOnClickListener {
+            val menu = PopupMenu(dialog.context, speed, Gravity.END)
+            PlaybackSpeed.values.forEachIndexed { index, value ->
+                menu.menu.add(0, index, index, PlaybackSpeed.spoken(value))
+                    .setChecked(value == player.playbackParameters.speed)
+            }
+            menu.menu.setGroupCheckable(0, true, true)
+            menu.setOnMenuItemClickListener { item ->
+                val value = PlaybackSpeed.values[item.itemId]
+                player.setPlaybackParameters(PlaybackParameters(value))
+                PlaybackSpeed.setVideo(activity, value)
+                paintSpeed()
+                true
+            }
+            video.controllerShowTimeoutMs = 0
+            menu.setOnDismissListener { video.controllerShowTimeoutMs = if (immersive) 3_000 else 0 }
+            menu.show()
+        }
+        val playPause = iconButton(R.drawable.ic_play, "播放") {
+            if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) player.pause()
+            else {
+                if (player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition()
+                player.play()
+            }
+        }.apply { setBackgroundResource(R.drawable.bg_play_accent) }
+        fun paintPlayPause() {
+            val playing = player.playWhenReady && player.playbackState != Player.STATE_ENDED
+            playPause.setImageResource(if (playing) R.drawable.ic_pause else R.drawable.ic_play)
+            playPause.contentDescription = if (playing) "暂停" else "播放"
+            playPause.setColorFilter(ContextCompat.getColor(activity, R.color.onAccent))
+        }
+        paintPlayPause()
+        val actions = LinearLayout(activity).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            fun transport(button: View) {
+                addView(button, LinearLayout.LayoutParams(0, dp(48), 1f))
+            }
+            transport(previous)
+            transport(iconButton(R.drawable.ic_replay10, "后退 10 秒") { player.seekBack() })
+            addView(playPause, LinearLayout.LayoutParams(dp(44), dp(44)))
+            transport(iconButton(R.drawable.ic_forward10, "前进 10 秒") { player.seekForward() })
+            transport(next)
+            addView(speed, LinearLayout.LayoutParams(dp(56), dp(44)))
+            addView(fullscreen, LinearLayout.LayoutParams(dp(44), dp(44)))
+        }
+        val actionsContainer = video.findViewById<FrameLayout>(R.id.videoActions)
+        actionsContainer.addView(actions, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        actionsContainer.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
+            val width = right - left
+            if (width > 0 && width != oldRight - oldLeft) {
+                actions.layoutParams = actions.layoutParams.apply { this.width = minOf(width, dp(480)) }
+            }
+        }
+        var courseDialog: AlertDialog? = null
+        var listedCourses = courses
+        var selectedCourse = currentCourse
+        var loadingCourses = false
+        val courseHeading = TextView(activity).apply {
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val moreCourses = button("加载更多") {}
+        val sortCourses = button(courseSortLabel.orEmpty()) {}.apply {
+            visibility = if (courseSortLabel == null) View.GONE else View.VISIBLE
+            contentDescription = courseSortLabel?.let { "课程排序，当前 ${it.substringBefore(' ')}" }
+        }
+        val courseRows = ListView(activity).apply {
+            divider = null
+            isNestedScrollingEnabled = true
+            setPadding(dp(8), 0, dp(8), dp(8))
+            clipToPadding = false
+        }
+        val coursePanel = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(0xFF15151D.toInt())
+            addView(LinearLayout(activity).apply {
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(dp(16), 0, dp(12), 0)
+                addView(courseHeading, LinearLayout.LayoutParams(0, -1, 1f))
+                addView(moreCourses, LinearLayout.LayoutParams(-2, dp(40)))
+                addView(sortCourses, LinearLayout.LayoutParams(-2, dp(40)))
+            }, LinearLayout.LayoutParams(-1, dp(52)))
+            addView(courseRows, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        val portraitCourses = FrameLayout(activity).apply {
+            addView(coursePanel, FrameLayout.LayoutParams(-1, -1))
+        }
+        val courseAdapter = object : BaseAdapter() {
+            override fun getCount() = listedCourses.size
+            override fun getItem(position: Int) = listedCourses[position]
+            override fun getItemId(position: Int) = position.toLong()
+
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val current = position == selectedCourse
+                return ((convertView as? TextView) ?: TextView(activity).apply {
+                    minHeight = dp(52)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(12), dp(8), dp(12), dp(8))
+                    textSize = 14f
+                    maxLines = 2
+                    ellipsize = android.text.TextUtils.TruncateAt.END
+                }).apply {
+                    text = "${position + 1}.  ${getItem(position).name}"
+                    setTextColor(if (current) 0xFFD4D8FF.toInt() else 0xFFE5E5EF.toInt())
+                    setBackgroundColor(if (current) 0xFF292B46.toInt() else Color.TRANSPARENT)
+                    contentDescription = if (current) "当前课程，$text" else text
+                }
+            }
+        }
+        courseRows.adapter = courseAdapter
+        courseRows.setOnItemClickListener { _, _, position, _ ->
+            if (position != selectedCourse) {
+                courseDialog?.dismiss()
+                onSelectCourse(listedCourses[position], snapshot())
+            }
+        }
+        var refreshArrange: (() -> Unit)? = null
+        fun paintCourseList() {
+            val more = canLoadMoreCourses()
+            courseHeading.text = if (more) "课程列表 · 已加载 ${listedCourses.size} 节"
+            else "课程列表 · ${listedCourses.size} 节"
+            moreCourses.visibility = if (more) View.VISIBLE else View.GONE
+            moreCourses.isEnabled = !loadingCourses
+            moreCourses.text = if (loadingCourses) "正在加载…" else "加载更多"
+            previous.isEnabled = selectedCourse > 0
+            previous.alpha = if (previous.isEnabled) 1f else 0.35f
+            next.isEnabled = selectedCourse in 0 until listedCourses.lastIndex
+            next.alpha = if (next.isEnabled) 1f else 0.35f
+            courseAdapter.notifyDataSetChanged()
+            refreshArrange?.invoke()
+        }
+        fun replaceCourses(updated: List<PanEntry>) {
+            listedCourses = updated
+            selectedCourse = updated.indexOfFirst {
+                it.gid == entry.gid && it.messageId == entry.messageId && it.fileId == entry.fileId
+            }
+        }
+        sortCourses.setOnClickListener { anchor ->
+            onSortCourses(anchor) { updated, label ->
+                if (dialog.isShowing) {
+                    replaceCourses(updated)
+                    sortCourses.text = label
+                    sortCourses.contentDescription = "课程排序，当前 ${label.substringBefore(' ')}"
+                    paintCourseList()
+                    if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
+                }
+            }
+        }
+        moreCourses.setOnClickListener {
+            loadingCourses = true
+            paintCourseList()
+            onLoadMoreCourses { updated ->
+                loadingCourses = false
+                if (!dialog.isShowing) return@onLoadMoreCourses
+                if (updated != null) {
+                    replaceCourses(updated)
+                } else {
+                    Toast.makeText(activity, "加载失败，请重试", Toast.LENGTH_SHORT).show()
+                }
+                paintCourseList()
+            }
+        }
+        paintCourseList()
+        if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
+        val courseButton = iconButton(R.drawable.ic_layers, "课程列表") {
+            val holder = FrameLayout(activity)
+            portraitCourses.removeView(coursePanel)
+            val rows = listedCourses.size.coerceIn(1, 6)
+            val dialogHeight = minOf(
+                (video.height * 0.72f).toInt(),
+                dp(52) + dp(52) * rows + dp(24),
+            )
+            holder.addView(coursePanel, FrameLayout.LayoutParams(-1, dialogHeight))
+            video.controllerShowTimeoutMs = 0
+            val sheet = AlertDialog.Builder(dialog.context)
+                .setView(holder)
+                .setNegativeButton("关闭", null)
+                .create()
+            courseDialog = sheet
+            sheet.setOnDismissListener {
+                courseDialog = null
+                holder.removeView(coursePanel)
+                portraitCourses.addView(coursePanel, FrameLayout.LayoutParams(-1, -1))
+                video.controllerShowTimeoutMs = if (immersive) 3_000 else 0
+            }
+            sheet.show()
+            sheet.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(0xFFBFC6FF.toInt())
+            if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
+        }.apply { visibility = View.GONE }
         val topBar = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.BLACK)
-            setPadding(dp(4), dp(4), dp(4), dp(2))
+            setBackgroundColor(0xD9111118.toInt())
+            setPadding(dp(6), dp(4), dp(6), dp(4))
             addView(
-                iconButton(R.drawable.ic_arrow_back, "返回") { close() },
+                iconButton(R.drawable.ic_arrow_back, "返回") { handleBack() },
                 LinearLayout.LayoutParams(dp(44), dp(44)),
             )
             addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(
-                audioOnly,
-                LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(2) },
-            )
-            addView(
-                iconButton(R.drawable.ic_fullscreen, "横屏全屏") { updateFullscreen(true) },
-                LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(2) },
-            )
-        }
-        val bottomBar = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setBackgroundColor(Color.BLACK)
-            setPadding(0, dp(4), 0, dp(8))
-            addView(previous, LinearLayout.LayoutParams(dp(56), dp(56)))
-            addView(favorite, LinearLayout.LayoutParams(dp(56), dp(56)).apply { marginStart = dp(18) })
-            addView(next, LinearLayout.LayoutParams(dp(56), dp(56)).apply { marginStart = dp(18) })
+            addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(audioOnly, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(courseButton, LinearLayout.LayoutParams(dp(44), dp(44)))
         }
         val playbackStatus = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -227,20 +422,7 @@ internal class VideoPlaybackPage(
             addView(video, FrameLayout.LayoutParams(-1, -1))
             addView(playbackStatus, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
         }
-        updateFullscreen = { enabled ->
-            immersive = enabled
-            val visibility = if (enabled) View.GONE else View.VISIBLE
-            topBar.visibility = visibility
-            bottomBar.visibility = visibility
-            video.setFullscreenButtonState(enabled)
-            activity.requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            else orientationBeforeFullscreen
-            updateSystemBars()
-            video.showController()
-        }
-        video.setFullscreenButtonClickListener { updateFullscreen(it) }
-        dialog.setContentView(LinearLayout(activity).apply {
-            orientation = LinearLayout.VERTICAL
+        val root = FrameLayout(activity).apply {
             setBackgroundColor(Color.BLACK)
             if (Build.VERSION.SDK_INT >= 30) {
                 setOnApplyWindowInsetsListener { view, insets ->
@@ -249,10 +431,63 @@ internal class VideoPlaybackPage(
                     insets
                 }
             }
-            addView(topBar)
-            addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-            addView(bottomBar)
+            addView(content, FrameLayout.LayoutParams(-1, -1).apply { topMargin = dp(52) })
+            addView(portraitCourses, FrameLayout.LayoutParams(-1, -1))
+            addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
+        }
+        val videoFrame = video.findViewById<View>(androidx.media3.ui.R.id.exo_content_frame)
+        fun arrangePlayer() {
+            val top = if (immersive) 0 else dp(52)
+            val controlsHeight = dp(98)
+            val availableWidth = root.width - root.paddingLeft - root.paddingRight
+            val availableHeight = root.height - root.paddingTop - root.paddingBottom - top
+            val landscape = immersive || availableWidth > availableHeight + top
+            val inlineCourses = !landscape && listedCourses.isNotEmpty()
+            val stageHeight = if (inlineCourses && availableWidth > 0 && availableHeight > 0) {
+                minOf(availableWidth * 9 / 16 + controlsHeight, (availableHeight * 0.58f).toInt())
+            } else -1
+            val stage = content.layoutParams as FrameLayout.LayoutParams
+            if (stage.height != stageHeight || stage.topMargin != top) {
+                stage.height = stageHeight
+                stage.topMargin = top
+                content.layoutParams = stage
+            }
+            val frame = videoFrame.layoutParams as FrameLayout.LayoutParams
+            val margin = if (inlineCourses) controlsHeight else 0
+            if (frame.bottomMargin != margin) {
+                frame.bottomMargin = margin
+                videoFrame.layoutParams = frame
+            }
+            val list = portraitCourses.layoutParams as FrameLayout.LayoutParams
+            val showInline = inlineCourses && stageHeight > 0
+            val listTop = if (showInline) top + stageHeight else 0
+            if (list.topMargin != listTop) {
+                list.topMargin = listTop
+                portraitCourses.layoutParams = list
+            }
+            portraitCourses.visibility = if (showInline) View.VISIBLE else View.GONE
+            courseButton.visibility = if (landscape && listedCourses.isNotEmpty()) View.VISIBLE else View.GONE
+        }
+        refreshArrange = { arrangePlayer() }
+        root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> arrangePlayer() }
+        arrangePlayer()
+        video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
+            topBar.visibility = if (immersive) visibility else View.VISIBLE
         })
+        updateFullscreen = { enabled ->
+            immersive = enabled
+            arrangePlayer()
+            fullscreen.setImageResource(if (enabled) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
+            fullscreen.contentDescription = if (enabled) "退出全屏" else "横屏全屏"
+            video.controllerHideOnTouch = enabled
+            video.controllerShowTimeoutMs = if (enabled) 3_000 else 0
+            activity.requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else orientationBeforeFullscreen
+            updateSystemBars()
+            video.showController()
+            topBar.visibility = View.VISIBLE
+        }
+        dialog.setContentView(root)
         val checkpoint = object : Runnable {
             override fun run() {
                 saveProgress()
@@ -260,6 +495,7 @@ internal class VideoPlaybackPage(
             }
         }
         dialog.setOnDismissListener {
+            courseDialog?.dismiss()
             stopAudioSession()
             if (immersive && !keepOrientationOnClose && !activity.isDestroyed && !activity.isFinishing) {
                 activity.requestedOrientation = orientationBeforeFullscreen
@@ -274,6 +510,12 @@ internal class VideoPlaybackPage(
         player.setHandleAudioBecomingNoisy(true)
         player.addListener(object : Player.Listener {
             private var rendered = false
+
+            override fun onEvents(player: Player, events: Player.Events) {
+                if (events.containsAny(Player.EVENT_PLAY_WHEN_READY_CHANGED, Player.EVENT_PLAYBACK_STATE_CHANGED)) {
+                    paintPlayPause()
+                }
+            }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 video.removeCallbacks(checkpoint)
@@ -304,7 +546,7 @@ internal class VideoPlaybackPage(
                     progress.edit().remove(progressKey).apply()
                     history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
                     readyToSave = false
-                    if (hasNext) video.post { if (dialog.isShowing) onEnded(snapshot()) }
+                    if (next.isEnabled) video.post { if (dialog.isShowing) onEnded(snapshot()) }
                 }
                 if (player.playerError != null) return
                 message.visibility = if (listening || !rendered || playbackState == Player.STATE_BUFFERING) {
@@ -439,7 +681,7 @@ internal fun PlaybackException.isExpiredMediaLink(): Boolean =
         .any { it.responseCode == 401 || it.responseCode == 403 }
 
 @OptIn(UnstableApi::class)
-private class HlsManifestDataSource(
+internal class HlsManifestDataSource(
     private val stream: VideoStream,
     private val http: DataSource.Factory,
 ) : DataSource {

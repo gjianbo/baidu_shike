@@ -1,23 +1,66 @@
-# 群组播放
+# 拾课
 
-Android 验证版，包名 `com.hnwd.bdplayer`，支持 Android 10（API 29）及以上。
+拾课是一款面向百度网盘群文件库的 Android 播放器。登录百度网盘后，可以浏览已加入群组的课程，在线听音频、看视频和阅读 PDF，并从上次的进度继续。
 
-## 构建调试包
+## 功能
 
-使用 JDK 17、Gradle 8.14+ 和 Android SDK 37（compileSdk 37，需 SDK extension ≥ 19）。在 Android Studio 打开项目根目录，或设置 `ANDROID_HOME` 后运行：
+- **群文件库**：关联多个群组，查看最近更新，按目录浏览或收藏课程。
+- **音频与视频**：支持倍速和续播。音频可后台播放，视频支持竖屏、横屏全屏和「只听声音」。
+- **课程排序**：在播放器的课程列表中切换名称升序或降序。选择按目录保存，上一节、下一节和自动连播使用同一顺序。
+- **在线取址**：音频优先使用 HLS，取不到清单或播放失败时回退到原文件直链。直链取址遇到百度网盘验证码时，可在弹窗中手动验证。
+- **手动备份**：将群组来源、收藏、播放进度和偏好导出为本机 JSON 文件。
+
+## 安装与使用
+
+支持 **Android 10（API 29）及以上**。如 GitHub 的 **Releases** 页面已提供安装包，日常使用请选择签名的 Release APK。也可以按下文从源码构建。
+
+1. 打开「设置」，在「百度网盘」一栏完成登录。
+2. 点「已关联的群组」，勾选要浏览的群组。
+3. 在「最近」或「目录」中打开课程。音视频播放器的课程列表标题旁可以切换排序，视频横屏时先打开课程列表面板。
+
+拾课只访问当前百度网盘账号有权限查看的内容。播放和取址依赖百度网盘的服务与登录状态。
+
+## 备份与恢复
+
+在「设置 → 备份与恢复」中点「立即备份」。JSON 文件保存在手机的 **下载 / 拾课备份**，成功后会显示完整路径。「从文件恢复」会尝试打开同一个目录，也可以浏览其他位置选取旧版导出的 JSON。
+
+Debug 和 Release 的签名不同。切换版本时，先备份并确认文件已写入共享下载目录，再卸载当前版本并安装另一版本。随后可从该目录恢复，并登录原百度网盘账号。备份文件包含本地记录和偏好，登录凭据、播放地址和媒体文件不在其中。
+
+## 从源码构建
+
+项目使用 Kotlin、Android Views 和 AndroidX Media3。已验证的构建环境为 **JDK 17、Gradle 9.3.0 和 Android SDK Platform 37**。仓库未包含 Gradle Wrapper，请使用本机 Gradle，或用 Android Studio 打开项目。通过 `ANDROID_HOME` 或 `local.properties` 中的 `sdk.dir` 指定 SDK。
 
 ```sh
 gradle :app:assembleDebug
 ```
 
-调试包位于 `app/build/outputs/apk/debug/app-debug.apk`。
+Debug APK 输出到 `app/build/outputs/apk/debug/app-debug.apk`。
 
-## 真机验证
+构建签名正式包前，通过本机环境变量配置 `BDPLAYER_KEYSTORE`、`BDPLAYER_STORE_PASSWORD`、`BDPLAYER_KEY_ALIAS` 和 `BDPLAYER_KEY_PASSWORD`。请把密钥库和签名凭据保存在仓库之外。
 
-1. 打开「登录」，在百度页面完成登录，回到网盘后点「返回 App」。
-2. 打开「设置群 ID」，输入要访问的群的数字 ID。若手上有 `session_id`，使用 `04_` 后面的部分。
-3. 查看「最近更新」，再切到「群目录」并逐级进入目录。点击 MP4，验证同一会话下的百度网页播放器能否播放。
+```sh
+gradle :app:assembleRelease
+```
 
-最近更新和群根目录先显示首批结果。子目录支持通过「加载下一页」请求后续内容，实际多页行为需真机验证。
+签名后的 Release APK 输出到 `app/build/outputs/apk/release/app-release.apk`。
 
-点击 MP3 可在线播放。最近更新首页显示「继续收听」和「最近播放」。音频播放时会向系统发布媒体控件，可在通知栏和允许显示媒体控件的锁屏上暂停或继续。
+## GitHub Actions 打包
+
+在仓库的 **Settings → Secrets and variables → Actions** 配置以下仓库 Secrets。请使用之前正式版的签名密钥，以便用户覆盖升级。
+
+| Secret | 内容 |
+| --- | --- |
+| `BDPLAYER_KEYSTORE_BASE64` | 正式签名密钥库文件的 Base64 内容 |
+| `BDPLAYER_STORE_PASSWORD` | 密钥库密码 |
+| `BDPLAYER_KEY_ALIAS` | 签名密钥别名 |
+| `BDPLAYER_KEY_PASSWORD` | 签名密钥密码 |
+
+- 在 **Actions → Build Android APKs → Run workflow** 手动打包，两个 APK 会出现在本次运行的 **Artifacts** 中。
+- 推送与 `app/build.gradle` 中 `versionName` 一致的标签（例如 `v0.1.20`）后，工作流会构建、校验签名，并把 Debug 与 Release APK 发布到 **Releases** 的 **Assets**。
+
+请先提交并推送含工作流的版本，再对该提交打标签。
+
+```sh
+git tag v0.1.20
+git push origin v0.1.20
+```

@@ -49,34 +49,33 @@
             android:src="@drawable/ic_refresh" />
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/appTitle"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="2dp"
-        android:letterSpacing="-0.02"
-        android:maxLines="2"
-        android:paddingLeft="18dp"
-        android:paddingRight="18dp"
-        android:text="最近"
-        android:textColor="@color/ink"
-        android:textSize="30sp"
-        android:textStyle="bold" />
-
     <LinearLayout
-        android:id="@+id/headerMeta"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingLeft="18dp"
-        android:paddingRight="18dp">
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp">
+
+        <TextView
+            android:id="@+id/appTitle"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:letterSpacing="-0.02"
+            android:maxLines="2"
+            android:text="最近"
+            android:textColor="@color/ink"
+            android:textSize="30sp"
+            android:textStyle="bold" />
 
         <LinearLayout
             android:id="@+id/btnBrowse"
             android:layout_width="wrap_content"
-            android:layout_height="34dp"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:layout_marginStart="8dp"
             android:background="@drawable/bg_source_chip"
             android:clickable="true"
             android:focusable="true"
@@ -88,7 +87,7 @@
             <ImageView
                 android:layout_width="16dp"
                 android:layout_height="16dp"
-                android:contentDescription="群组"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_folder" />
 
             <TextView
@@ -96,7 +95,8 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
-                android:maxWidth="150dp"
+                android:maxWidth="116dp"
+                android:ellipsize="end"
                 android:singleLine="true"
                 android:text="选择群组"
                 android:textColor="@color/ink2"
@@ -107,20 +107,20 @@
                 android:layout_width="14dp"
                 android:layout_height="14dp"
                 android:layout_marginStart="2dp"
-                android:contentDescription="切换"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_chevron_down" />
         </LinearLayout>
-
-        <TextView
-            android:id="@+id/appSub"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
-            android:layout_weight="1"
-            android:maxLines="2"
-            android:textColor="@color/ink3"
-            android:textSize="11.5sp" />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/appSub"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="18dp"
+        android:paddingEnd="18dp"
+        android:maxLines="2"
+        android:textColor="@color/ink3"
+        android:textSize="11.5sp" />
 
     <HorizontalScrollView
         android:id="@+id/crumbsScroll"
@@ -141,110 +141,6 @@
             android:orientation="horizontal" />
     </HorizontalScrollView>
 
-    <LinearLayout
-        android:id="@+id/historyPanel"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:paddingLeft="18dp"
-        android:paddingRight="18dp"
-        android:paddingTop="6dp" />
-
-    <LinearLayout
-        android:id="@+id/sectionRow"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:paddingLeft="18dp"
-        android:paddingRight="18dp">
-
-        <TextView
-            android:id="@+id/sectionTitle"
-            style="@style/SectionTitle"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="新内容" />
-
-        <TextView
-            android:id="@+id/filterCount"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:textColor="@color/ink3"
-            android:textSize="11.5sp" />
-
-        <TextView
-            android:id="@+id/sortButton"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:layout_marginStart="10dp"
-            android:background="@drawable/bg_source_chip"
-            android:clickable="true"
-            android:drawableStart="@drawable/ic_sort"
-            android:drawablePadding="4dp"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:paddingLeft="10dp"
-            android:paddingRight="10dp"
-            android:text="名称升序"
-            android:textColor="@color/ink2"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            android:visibility="gone" />
-    </LinearLayout>
-
-    <HorizontalScrollView
-        android:id="@+id/filterBar"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:clipToPadding="false"
-        android:paddingLeft="18dp"
-        android:paddingRight="18dp"
-        android:scrollbars="none"
-        android:visibility="gone">
-
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal">
-
-            <LinearLayout
-                android:id="@+id/mediaFilters"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal" />
-
-            <TextView
-                android:id="@+id/chipAll"
-                style="@style/Chip"
-                android:layout_width="wrap_content"
-                android:layout_height="36dp"
-                android:visibility="gone" />
-
-            <TextView
-                android:id="@+id/chipUnheard"
-                style="@style/Chip"
-                android:layout_width="wrap_content"
-                android:layout_height="36dp"
-                android:layout_marginStart="8dp" />
-        </LinearLayout>
-    </HorizontalScrollView>
-
-    <TextView
-        android:id="@+id/status"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingLeft="18dp"
-        android:paddingRight="18dp"
-        android:paddingTop="4dp"
-        android:paddingBottom="2dp"
-        android:textColor="@color/ink3"
-        android:textSize="10.5sp" />
-
     <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -258,14 +154,124 @@
             android:scrollbars="none">
 
             <LinearLayout
-                android:id="@+id/content"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingLeft="18dp"
-                android:paddingTop="2dp"
-                android:paddingRight="18dp"
-                android:paddingBottom="84dp" />
+                android:orientation="vertical">
+
+                <LinearLayout
+                    android:id="@+id/historyPanel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingLeft="18dp"
+                    android:paddingRight="18dp"
+                    android:paddingTop="6dp" />
+
+                <LinearLayout
+                    android:id="@+id/sectionRow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingLeft="18dp"
+                    android:paddingRight="18dp">
+
+                    <TextView
+                        android:id="@+id/sectionTitle"
+                        style="@style/SectionTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="群内更新" />
+
+                    <TextView
+                        android:id="@+id/filterCount"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="@color/ink3"
+                        android:textSize="11.5sp" />
+
+                    <TextView
+                        android:id="@+id/sortButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:layout_marginStart="10dp"
+                        android:background="@drawable/bg_source_chip"
+                        android:clickable="true"
+                        android:drawableStart="@drawable/ic_sort"
+                        android:drawablePadding="4dp"
+                        android:focusable="true"
+                        android:gravity="center_vertical"
+                        android:paddingLeft="10dp"
+                        android:paddingRight="10dp"
+                        android:text="名称升序"
+                        android:textColor="@color/ink2"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:visibility="gone" />
+                </LinearLayout>
+
+                <HorizontalScrollView
+                    android:id="@+id/filterBar"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:clipToPadding="false"
+                    android:paddingLeft="18dp"
+                    android:paddingRight="18dp"
+                    android:scrollbars="none"
+                    android:visibility="gone">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <LinearLayout
+                            android:id="@+id/mediaFilters"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal" />
+
+                        <TextView
+                            android:id="@+id/chipAll"
+                            style="@style/Chip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/chipUnheard"
+                            style="@style/Chip"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:layout_marginStart="8dp" />
+                    </LinearLayout>
+                </HorizontalScrollView>
+
+                <TextView
+                    android:id="@+id/status"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:paddingLeft="18dp"
+                    android:paddingRight="18dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="2dp"
+                    android:textColor="@color/ink3"
+                    android:textSize="10.5sp" />
+
+                <LinearLayout
+                    android:id="@+id/content"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:paddingLeft="18dp"
+                    android:paddingTop="2dp"
+                    android:paddingRight="18dp"
+                    android:paddingBottom="84dp" />
+            </LinearLayout>
         </ScrollView>
 
         <include

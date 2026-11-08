@@ -311,15 +311,8 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
-                    android:text="本地 JSON · 自动快照 3 份 · 不含登录态" />
+                    android:text="手动备份 · 下载 / 拾课备份" />
             </LinearLayout>
-
-            <TextView
-                android:id="@+id/setBackupValue"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="@color/ink3"
-                android:textSize="11.5sp" />
 
             <ImageView
                 android:layout_width="18dp"

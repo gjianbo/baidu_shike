@@ -1,7 +1,11 @@
 package com.hnwd.bdplayer
 
+import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.Environment
+import android.provider.DocumentsContract
+import android.provider.MediaStore
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -19,9 +23,43 @@ internal object BackupStore {
     private const val DIR = "backups"
     private const val MAX = 3
     const val PREFS_SETTINGS = "app_settings"
+    private const val DOWNLOAD_FOLDER = "拾课备份"
+    private val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER"
+    val restoreFolder: Uri = DocumentsContract.buildDocumentUri(
+        "com.android.externalstorage.documents", "primary:$relativePath",
+    )
+
+    fun saveToDownloads(context: Context, payload: JSONObject): String {
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.CHINA).format(Date())
+        val name = "拾课备份-$stamp.json"
+        val resolver = context.contentResolver
+        val uri = checkNotNull(resolver.insert(
+            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "application/json")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "$relativePath/")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            },
+        )) { "无法创建备份文件" }
+        try {
+            checkNotNull(resolver.openOutputStream(uri, "w")) { "无法写入备份文件" }
+                .bufferedWriter(Charsets.UTF_8).use { it.write(payload.toString(2)) }
+            check(resolver.update(uri, ContentValues().apply {
+                put(MediaStore.MediaColumns.IS_PENDING, 0)
+            }, null, null) == 1) { "无法完成备份" }
+        } catch (error: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw error
+        }
+        val savedName = runCatching {
+            resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+                ?.use { if (it.moveToFirst()) it.getString(0) else null }
+        }.getOrNull() ?: name
+        return "下载/$DOWNLOAD_FOLDER/$savedName"
+    }
 
     data class Snapshot(
-        val file: File,
         val time: Long,
         val kind: String,
         val payload: JSONObject,
@@ -31,29 +69,13 @@ internal object BackupStore {
     private fun prefs(context: Context, name: String) =
         context.getSharedPreferences(name, Context.MODE_PRIVATE)
 
-    private fun dir(context: Context): File =
-        File(context.filesDir, DIR).apply { mkdirs() }
-
-    fun ensureInitial(context: Context) {
-        if (list(context).isEmpty()) capture(context, "auto")
-    }
-
-    fun capture(context: Context, kind: String): File? = runCatching {
-        val payload = build(context).put("kind", kind)
-        val file = File(dir(context), "snap-${System.currentTimeMillis()}-$kind.json")
-        file.writeText(payload.toString(2))
-        trim(context)
-        file
-    }.getOrNull()
-
     fun list(context: Context): List<Snapshot> {
-        val files = dir(context).listFiles { file -> file.name.endsWith(".json") } ?: return emptyList()
+        val files = File(context.filesDir, DIR).listFiles { file -> file.name.endsWith(".json") } ?: return emptyList()
         return files.mapNotNull { file ->
             runCatching {
                 val payload = JSONObject(file.readText())
                 val time = payload.optLong("createdMillis", file.lastModified())
                 Snapshot(
-                    file = file,
                     time = time,
                     kind = payload.optString("kind", if (file.name.contains("-manual")) "manual" else "auto"),
                     payload = payload,
@@ -61,13 +83,6 @@ internal object BackupStore {
                 )
             }.getOrNull()
         }.sortedByDescending { it.time }.take(MAX)
-    }
-
-    fun count(context: Context): Int = list(context).size
-
-    private fun trim(context: Context) {
-        val files = dir(context).listFiles { file -> file.name.endsWith(".json") } ?: return
-        files.sortedByDescending { it.lastModified() }.drop(MAX).forEach { it.delete() }
     }
 
     fun summary(payload: JSONObject): String {
@@ -128,6 +143,7 @@ internal object BackupStore {
             .put("audioHistory", stringMap(audio))
             .put("videoHistory", stringMap(video))
             .put("videoProgress", longMap(progress))
+            .put("playbackOrder", stringMap(prefs(context, "playback_order")))
             .put("prefs", JSONObject()
                 .put("appearance", settings.getString("appearance", ThemeStore.LIGHT))
                 .put("course_order", settings.getString("course_order", "ASCENDING")))
@@ -161,57 +177,97 @@ internal object BackupStore {
         return result
     }
 
-    fun valid(payload: JSONObject?): Boolean =
-        payload != null &&
-            payload.optInt("schemaVersion", -1) == SCHEMA &&
-            payload.optString("app", APP).let { it.isEmpty() || it == APP } &&
-            payload.optJSONObject("data") != null
+    fun valid(payload: JSONObject?): Boolean {
+        if (payload == null || payload.optInt("schemaVersion", -1) != SCHEMA) return false
+        if (payload.optString("app", APP).let { it.isNotEmpty() && it != APP }) return false
+        val data = payload.optJSONObject("data") ?: return false
+        val sources = data.optJSONArray("sources") ?: return false
+        val groupId = data.opt("groupId") as? String ?: return false
+        val favoritesJson = data.opt("favorites") as? String ?: return false
+        val favorites = runCatching { JSONArray(favoritesJson) }.getOrNull() ?: return false
+
+        val sourceIds = mutableSetOf<String>()
+        for (index in 0 until sources.length()) {
+            val source = sources.optJSONObject(index) ?: return false
+            val id = source.opt("id") as? String ?: return false
+            if (!id.matches(Regex("[0-9]{1,24}")) || source.opt("name") !is String) return false
+            if (!sourceIds.add(id)) return false
+        }
+        // Older exports can have a current group without a saved source entry.
+        if (groupId.isNotEmpty() && !groupId.matches(Regex("[0-9]{1,24}"))) return false
+        val favoriteFields = listOf("gid", "message", "owner", "file", "name")
+        return (0 until favorites.length()).all { index ->
+            val favorite = favorites.optJSONObject(index)
+            favorite != null && favoriteFields.all { favorite.opt(it) is String }
+        }
+    }
+
+    fun backupAccount(payload: JSONObject): String? =
+        payload.optJSONObject("data")?.optString("account")?.takeIf { it.matches(Regex("[0-9]{1,24}")) }
+
+    fun restoreAccount(payload: JSONObject): String? {
+        val backup = backupAccount(payload)
+        val current = AccountScope.current.ifBlank { null }
+        if (backup != null && current != null && backup != current) return null
+        return backup ?: current
+    }
 
     fun restore(context: Context, payload: JSONObject): Boolean {
         if (!valid(payload)) return false
         val data = payload.optJSONObject("data") ?: return false
+        val account = restoreAccount(payload) ?: return false
         val scope = prefs(context, "account_scope")
+        val stored = data.getJSONArray("sources")
         val sources = JSONArray()
-        data.optJSONArray("sources")?.let { stored ->
-            for (index in 0 until stored.length()) {
-                val item = stored.optJSONObject(index) ?: continue
-                if (item.optString("id").isEmpty()) continue
-                sources.put(
-                    JSONObject()
-                        .put("id", item.optString("id"))
-                        .put("name", item.optString("name"))
-                        .put("session", ""),
-                )
-            }
+        for (index in 0 until stored.length()) {
+            val item = stored.getJSONObject(index)
+            sources.put(
+                JSONObject()
+                    .put("id", item.getString("id"))
+                    .put("name", item.getString("name"))
+                    .put("session", ""),
+            )
         }
         scope.edit()
-            .putString(AccountScope.key("share_sources"), sources.toString())
-            .putString(AccountScope.key("group_id"), data.optString("groupId"))
+            .putString(AccountScope.key("share_sources", account), sources.toString())
+            .putString(AccountScope.key("group_id", account), data.getString("groupId"))
             .apply()
 
         prefs(context, "favorites").edit()
-            .putString(AccountScope.key("favorites"), data.optString("favorites", "[]"))
+            .putString(AccountScope.key("favorites", account), data.getString("favorites"))
             .apply()
 
-        mergeHistory(prefs(context, "audio_history"), data.optJSONObject("audioHistory"))
-        mergeHistory(prefs(context, "video_history"), data.optJSONObject("videoHistory"))
-        mergeProgress(prefs(context, "video_progress"), data.optJSONObject("videoProgress"))
+        mergeHistory(prefs(context, "audio_history"), data.optJSONObject("audioHistory"), account)
+        mergeHistory(prefs(context, "video_history"), data.optJSONObject("videoHistory"), account)
+        mergeProgress(prefs(context, "video_progress"), data.optJSONObject("videoProgress"), account)
 
-        val settings = data.optJSONObject("prefs") ?: JSONObject()
-        prefs(context, PREFS_SETTINGS).edit()
-            .putString("appearance", settings.optString("appearance", ThemeStore.LIGHT))
-            .putString("course_order", settings.optString("course_order", "ASCENDING"))
-            .apply()
+        data.optJSONObject("playbackOrder")?.let { orders ->
+            val editor = prefs(context, "playback_order").edit()
+            orders.keys().forEach { key ->
+                val order = orders.optString(key)
+                if (order == "ASCENDING" || order == "DESCENDING") {
+                    editor.putString(AccountScope.key(key, account), order)
+                }
+            }
+            editor.apply()
+        }
+
+        data.optJSONObject("prefs")?.let { settings ->
+            val editor = prefs(context, PREFS_SETTINGS).edit()
+            (settings.opt("appearance") as? String)?.let { editor.putString("appearance", it) }
+            (settings.opt("course_order") as? String)?.let { editor.putString("course_order", it) }
+            editor.apply()
+        }
         return true
     }
 
-    private fun mergeHistory(prefs: android.content.SharedPreferences, backup: JSONObject?) {
+    private fun mergeHistory(prefs: android.content.SharedPreferences, backup: JSONObject?, account: String) {
         if (backup == null) return
         val editor = prefs.edit()
         val keys = backup.keys()
         while (keys.hasNext()) {
             val suffix = keys.next()
-            val target = AccountScope.key(suffix)
+            val target = AccountScope.key(suffix, account)
             val current = runCatching { JSONArray(prefs.getString(target, "[]") ?: "[]") }.getOrDefault(JSONArray())
             val incoming = runCatching { JSONArray(backup.optString(suffix, "[]")) }.getOrDefault(JSONArray())
             val merged = LinkedHashMap<String, JSONObject>()
@@ -245,13 +301,13 @@ internal object BackupStore {
         editor.apply()
     }
 
-    private fun mergeProgress(prefs: android.content.SharedPreferences, backup: JSONObject?) {
+    private fun mergeProgress(prefs: android.content.SharedPreferences, backup: JSONObject?, account: String) {
         if (backup == null) return
         val editor = prefs.edit()
         val keys = backup.keys()
         while (keys.hasNext()) {
             val suffix = keys.next()
-            val target = AccountScope.key(suffix)
+            val target = AccountScope.key(suffix, account)
             val current = prefs.getLong(target, 0L)
             val incoming = backup.optLong(suffix, 0L)
             editor.putLong(target, maxOf(current, incoming))

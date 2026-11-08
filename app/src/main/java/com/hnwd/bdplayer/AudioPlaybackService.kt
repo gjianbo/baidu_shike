@@ -8,12 +8,15 @@ import android.os.Handler
 import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -27,6 +30,8 @@ import java.util.concurrent.atomic.AtomicLong
 @OptIn(UnstableApi::class)
 class AudioPlaybackService : MediaSessionService() {
     private lateinit var session: MediaSession
+    private lateinit var player: ExoPlayer
+    private val hlsHttp = DefaultHttpDataSource.Factory().setUserAgent(PanApi.DLINK_USER_AGENT)
     private var history: AudioHistory? = null
     private var playbackAccount = ""
     private var entry: PanEntry? = null
@@ -48,11 +53,12 @@ class AudioPlaybackService : MediaSessionService() {
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(PanApi.DLINK_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
-        val player = ExoPlayer.Builder(this)
+        player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(http))
             .build().apply {
             setAudioAttributes(AudioAttributes.DEFAULT, true)
             setHandleAudioBecomingNoisy(true)
+            setPlaybackParameters(PlaybackParameters(PlaybackSpeed.audio(this@AudioPlaybackService)))
             addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     handler.removeCallbacks(checkpoint)
@@ -137,7 +143,7 @@ class AudioPlaybackService : MediaSessionService() {
         val account = args.getString("account").orEmpty()
         if (account.isEmpty() || account != AccountScope.current) return SessionResult.RESULT_ERROR_BAD_VALUE
         val uri = Uri.parse(args.getString("uri").orEmpty())
-        if (!PanApi.isFileLink(uri)) return SessionResult.RESULT_ERROR_BAD_VALUE
+        val playlist = args.getByteArray("playlist")
         val next = PanEntry(
             args.getString("gid").orEmpty(), args.getString("message").orEmpty(),
             args.getString("owner").orEmpty(), args.getString("file").orEmpty(),
@@ -147,6 +153,7 @@ class AudioPlaybackService : MediaSessionService() {
         if (listOf(next.gid, next.messageId, next.fileId, next.name).any(String::isEmpty)) {
             return SessionResult.RESULT_ERROR_BAD_VALUE
         }
+        if (!isAudioSource(next, uri, playlist)) return SessionResult.RESULT_ERROR_BAD_VALUE
         clearFile()
         entry = next
         playbackAccount = account
@@ -154,46 +161,64 @@ class AudioPlaybackService : MediaSessionService() {
         history = playbackHistory
         val previous = playbackHistory.find(next)?.takeUnless { it.completed }
         lastSaved = previous?.let { it.seconds to false }
-        session.player.apply {
-            setMediaItem(
-                MediaItem.Builder().setUri(uri).setMediaId(next.fileId)
-                    .setMediaMetadata(
-                        MediaMetadata.Builder().setTitle(next.name)
-                            .setExtras(Bundle().apply {
-                                putString("account", account)
-                                putString("gid", next.gid)
-                                putString("message", next.messageId)
-                                putString("owner", next.owner)
-                                putString("path", next.path)
-                                putString("size", next.size)
-                                putString("playbackId", UUID.randomUUID().toString())
-                            }).build(),
-                    ).build(),
-                (previous?.seconds ?: 0) * 1000L,
-            )
-            prepare()
-            play()
-        }
+        val metadata = MediaMetadata.Builder().setTitle(next.name)
+            .setExtras(Bundle().apply {
+                putString("account", account)
+                putString("gid", next.gid)
+                putString("message", next.messageId)
+                putString("owner", next.owner)
+                putString("path", next.path)
+                putString("size", next.size)
+                putString("playbackId", UUID.randomUUID().toString())
+                putBoolean("hls", playlist != null)
+            }).build()
+        val item = MediaItem.Builder().setUri(uri).setMediaId(next.fileId)
+            .setMediaMetadata(metadata).build()
+        setAudioSource(item, uri, playlist, (previous?.seconds ?: 0) * 1000L)
+        player.prepare()
+        player.play()
         return SessionResult.RESULT_SUCCESS
     }
 
     private fun renewFile(args: Bundle): Int {
-        val player = session.player
         val item = player.currentMediaItem ?: return SessionResult.RESULT_ERROR_BAD_VALUE
         val extras = item.mediaMetadata.extras ?: return SessionResult.RESULT_ERROR_BAD_VALUE
+        val error = player.playerError ?: return SessionResult.RESULT_ERROR_BAD_VALUE
+        val wasHls = extras.getBoolean("hls")
         if (playbackAccount != AccountScope.current || extras.getString("playbackId") != args.getString("playbackId") ||
-            extras.getBoolean("renewed") || player.playerError?.isExpiredMediaLink() != true
+            extras.getBoolean("renewed") || (!wasHls && !error.isExpiredMediaLink())
         ) return SessionResult.RESULT_ERROR_BAD_VALUE
         val uri = Uri.parse(args.getString("uri").orEmpty())
         if (!PanApi.isFileLink(uri)) return SessionResult.RESULT_ERROR_BAD_VALUE
 
         val position = player.currentPosition
         val metadata = item.mediaMetadata.buildUpon()
-            .setExtras(Bundle(extras).apply { putBoolean("renewed", true) })
+            .setExtras(Bundle(extras).apply {
+                putBoolean("renewed", !wasHls)
+                putBoolean("hls", false)
+                if (wasHls) putString("playbackId", UUID.randomUUID().toString())
+            })
             .build()
         player.setMediaItem(item.buildUpon().setUri(uri).setMediaMetadata(metadata).build(), position)
         player.prepare()
         return SessionResult.RESULT_SUCCESS
+    }
+
+    private fun isAudioSource(entry: PanEntry, uri: Uri, playlist: ByteArray?): Boolean =
+        if (playlist == null) PanApi.isFileLink(uri)
+        else playlist.isNotEmpty() && uri == PanApi.audioPlaylist(entry)
+
+    private fun setAudioSource(item: MediaItem, uri: Uri, playlist: ByteArray?, position: Long) {
+        if (playlist == null) {
+            player.setMediaItem(item, position)
+        } else {
+            val stream = VideoStream(uri, playlist)
+            val source = HlsMediaSource.Factory { type ->
+                if (type == C.DATA_TYPE_MANIFEST) HlsManifestDataSource(stream, hlsHttp)
+                else hlsHttp.createDataSource()
+            }.createMediaSource(item)
+            player.setMediaSource(source, position)
+        }
     }
 
     private fun clearFile() {

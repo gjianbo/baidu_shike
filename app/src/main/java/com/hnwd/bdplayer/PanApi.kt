@@ -72,10 +72,10 @@ internal object PanApi {
         return api("/mbox/group/listshare", *query.toTypedArray())
     }
 
-    fun children(entry: PanEntry, page: Int) = api(
+    fun children(entry: PanEntry, page: Int, directoryId: String = entry.fileId) = api(
         "/mbox/msg/shareinfo",
         "gid" to entry.gid, "msg_id" to entry.messageId, "from_uk" to entry.owner,
-        "fs_id" to entry.fileId, "type" to "2", "page" to page.toString(),
+        "fs_id" to directoryId, "type" to "2", "page" to page.toString(),
         "num" to "100", "limit" to "100", "desc" to "1",
     )
 
@@ -89,6 +89,35 @@ internal object PanApi {
     )
 
     fun mediaLinkRequest() = api("/api/sharedownload", "sign" to "", "timestamp" to "")
+
+    fun mediaCaptchaRequest() = api(
+        "/api/getcaptcha", "prod" to "share", "channel" to "chunlei", "bdstoken" to "",
+    )
+
+    data class MediaCaptcha(val image: Uri, val token: String)
+
+    fun parseMediaCaptcha(json: JSONObject): MediaCaptcha? {
+        val rawImage = sequenceOf("vcode_img", "img")
+            .mapNotNull { json.opt(it) as? String }
+            .firstOrNull { it.isNotBlank() } ?: return null
+        val image = Uri.parse(
+            when {
+                rawImage.startsWith("//") -> "https:$rawImage"
+                rawImage.startsWith("/") -> "https://$HOST$rawImage"
+                rawImage.startsWith("http://") -> "https://" + rawImage.removePrefix("http://")
+                else -> rawImage
+            },
+        )
+        if (image.scheme != "https" || image.userInfo != null ||
+            image.port !in listOf(-1, 443) ||
+            image.host !in setOf(HOST, "passport.baidu.com", "wappass.baidu.com")
+        ) return null
+        val token = (json.opt("vcode_str") as? String)?.takeIf { it.isNotBlank() } ?: return null
+        return MediaCaptcha(image, token)
+    }
+
+    fun mediaCaptchaForm(captcha: MediaCaptcha, answer: String): String =
+        "vcode_input=${URLEncoder.encode(answer, "UTF-8")}&vcode_str=${URLEncoder.encode(captcha.token, "UTF-8")}"
 
     fun mediaLinkBody(entry: PanEntry, viewer: String): String {
         val extra = JSONObject().put("type", "group").put("gid", entry.gid)
@@ -119,10 +148,14 @@ internal object PanApi {
     fun readablePath(raw: String): String =
         if (raw.startsWith("%2F", ignoreCase = true)) Uri.decode(raw) else raw
 
-    fun videoPlaylist(entry: PanEntry): Uri = Uri.parse(api(
+    fun videoPlaylist(entry: PanEntry): Uri = playlist(entry, "M3U8_AUTO_480")
+
+    fun audioPlaylist(entry: PanEntry): Uri = playlist(entry, "M3U8_MP3_128")
+
+    private fun playlist(entry: PanEntry, streamType: String): Uri = Uri.parse(api(
         "/mbox/msg/streaming",
         "from_uk" to entry.owner, "to" to entry.gid, "msg_id" to entry.messageId,
-        "fs_id" to entry.fileId, "type" to "2", "stream_type" to "M3U8_AUTO_480",
+        "fs_id" to entry.fileId, "type" to "2", "stream_type" to streamType,
     ))
 
     fun parseRecent(json: JSONObject): List<PanEntry> {

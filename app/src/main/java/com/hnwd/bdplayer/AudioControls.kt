@@ -1,5 +1,6 @@
 package com.hnwd.bdplayer
 
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -11,7 +12,7 @@ import android.content.IntentFilter
 import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
-import android.os.Build
+import androidx.core.content.ContextCompat
 
 internal class AudioControls(
     private val context: Context,
@@ -34,11 +35,10 @@ internal class AudioControls(
     }
 
     init {
-        if (Build.VERSION.SDK_INT >= 33) {
-            context.registerReceiver(receiver, IntentFilter(command), Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            context.registerReceiver(receiver, IntentFilter(command), "${context.packageName}.CONTROL_AUDIO", null)
-        }
+        ContextCompat.registerReceiver(
+            context, receiver, IntentFilter(command), "${context.packageName}.CONTROL_AUDIO", null,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         notifications.createNotificationChannel(
             NotificationChannel(CHANNEL, "音频播放", NotificationManager.IMPORTANCE_LOW),
         )
@@ -50,6 +50,8 @@ internal class AudioControls(
         })
     }
 
+    // This MediaStyle notification has a MediaSession token and is exempt from POST_NOTIFICATIONS.
+    @SuppressLint("NotificationPermission")
     fun update(playing: Boolean, seconds: Int) {
         session.setPlaybackState(
             PlaybackState.Builder()

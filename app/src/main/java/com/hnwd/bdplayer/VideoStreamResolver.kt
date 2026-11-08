@@ -18,10 +18,9 @@ internal class VideoStreamResolver {
     private var worker: Future<*>? = null
     private var requestId = 0
 
-    fun start(entry: PanEntry, userAgent: String, onResult: (Result<VideoStream>) -> Unit) {
+    fun start(uri: Uri, userAgent: String, onResult: (Result<VideoStream>) -> Unit) {
         cancel()
         val id = requestId
-        val uri = PanApi.videoPlaylist(entry)
         val cookie = CookieManager.getInstance().getCookie(uri.toString())
         worker = executor.submit {
             val result = runCatching { fetch(uri, userAgent, cookie) }
@@ -34,7 +33,7 @@ internal class VideoStreamResolver {
         handler.postDelayed({
             if (id != requestId) return@postDelayed
             cancel()
-            onResult(Result.failure(IllegalStateException("获取视频播放清单超时。")))
+            onResult(Result.failure(IllegalStateException("获取播放清单超时。")))
         }, 15_000)
     }
 

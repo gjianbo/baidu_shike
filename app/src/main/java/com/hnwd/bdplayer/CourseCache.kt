@@ -38,6 +38,18 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         return result
     }
 
+    fun directoryContaining(entry: PanEntry): String? {
+        val prefix = AccountScope.prefix()
+        val directoryPrefix = "${prefix}dir:${entry.gid}:${entry.messageId}:"
+        val nested = preferences.all.keys.asSequence()
+            .filter { it.startsWith(directoryPrefix) }
+            .map { it.removePrefix(prefix).substringBeforeLast(':') }
+            .distinct()
+        return (nested + "roots:${entry.gid}").firstOrNull { key ->
+            readAll(key).any { idOf(it) == idOf(entry) }
+        }
+    }
+
     private fun write(
         key: String,
         page: Int,

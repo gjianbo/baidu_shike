@@ -81,7 +81,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="3dp"
-                        android:text="本机快照"
+                        android:text="下载 / 拾课备份"
                         android:textColor="@color/ink"
                         android:textSize="18sp"
                         android:textStyle="bold" />
@@ -91,7 +91,7 @@
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
                         android:lineSpacingMultiplier="1.5"
-                        android:text="收藏、进度、群组或外观变化后自动留一份，最多 3 份；误删或换机时可恢复。"
+                        android:text="手动备份会把 JSON 保存到这个文件夹。卸载应用后仍可从这里选择文件恢复。"
                         android:textColor="@color/ink3"
                         android:textSize="11sp" />
                 </LinearLayout>
@@ -148,19 +148,6 @@
                     android:textStyle="bold" />
 
                 <TextView
-                    android:id="@+id/backupExport"
-                    android:layout_width="0dp"
-                    android:layout_height="44dp"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_source_chip"
-                    android:gravity="center"
-                    android:text="导出 JSON"
-                    android:textColor="@color/ink2"
-                    android:textSize="12sp"
-                    android:textStyle="bold" />
-
-                <TextView
                     android:id="@+id/backupImport"
                     android:layout_width="0dp"
                     android:layout_height="44dp"
@@ -175,6 +162,7 @@
             </LinearLayout>
 
             <LinearLayout
+                android:id="@+id/backupLegacyHeading"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
@@ -185,7 +173,7 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="最近快照"
+                    android:text="旧版应用内快照"
                     android:textColor="@color/ink"
                     android:textSize="16sp"
                     android:textStyle="bold" />

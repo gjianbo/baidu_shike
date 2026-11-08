@@ -1,9 +1,10 @@
 package com.hnwd.bdplayer
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Typeface
-import android.net.Uri
 import android.os.Bundle
+import android.provider.DocumentsContract
 import android.view.Gravity
 import android.view.View
 import android.widget.ImageView
@@ -16,19 +17,16 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 class BackupActivity : AppCompatActivity() {
     private lateinit var includes: LinearLayout
     private lateinit var list: LinearLayout
     private lateinit var countView: TextView
 
-    private val exportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) writeExport(uri)
-    }
-    private val importLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+    private val importLauncher = registerForActivityResult(object : ActivityResultContracts.OpenDocument() {
+        override fun createIntent(context: Context, input: Array<String>): Intent =
+            super.createIntent(context, input).putExtra(DocumentsContract.EXTRA_INITIAL_URI, BackupStore.restoreFolder)
+    }) { uri ->
         if (uri != null) {
             val payload = BackupStore.read(this, uri)
             if (!BackupStore.valid(payload)) {
@@ -52,36 +50,21 @@ class BackupActivity : AppCompatActivity() {
         list = findViewById(R.id.backupList)
         countView = findViewById(R.id.backupCount)
         findViewById<View>(R.id.backupBack).setOnClickListener { finish() }
-        findViewById<View>(R.id.backupNow).setOnClickListener {
-            BackupStore.capture(this, "manual")
-            render()
-            toast("已写入本地快照 · 保留最近 3 份")
-        }
-        findViewById<View>(R.id.backupExport).setOnClickListener {
-            val stamp = SimpleDateFormat("yyyyMMdd-HHmm", Locale.CHINA).format(Date())
-            exportLauncher.launch("拾课备份-$stamp.json")
-        }
+        findViewById<View>(R.id.backupNow).setOnClickListener { button -> saveBackup(button) }
         findViewById<View>(R.id.backupImport).setOnClickListener {
-            importLauncher.launch(arrayOf("application/json", "text/json", "*/*"))
+            importLauncher.launch(arrayOf("*/*"))
         }
-        BackupStore.ensureInitial(this)
         render()
     }
 
     private fun render() {
         val snapshots = BackupStore.list(this)
-        countView.text = "${snapshots.size} / 3"
+        countView.text = "${snapshots.size} 份"
+        val visibility = if (snapshots.isEmpty()) View.GONE else View.VISIBLE
+        findViewById<View>(R.id.backupLegacyHeading).visibility = visibility
+        list.visibility = visibility
         renderIncludes()
         list.removeAllViews()
-        if (snapshots.isEmpty()) {
-            list.addView(TextView(this).apply {
-                text = "还没有快照。点「立即备份」写入第一份。"
-                textSize = 12f
-                setTextColor(getColor(R.color.ink3))
-                setPadding(dp(16), dp(18), dp(16), dp(18))
-            })
-            return
-        }
         snapshots.forEachIndexed { index, snapshot ->
             if (index > 0) list.addView(divider())
             list.addView(snapshotRow(snapshot))
@@ -205,11 +188,20 @@ class BackupActivity : AppCompatActivity() {
     }
 
     private fun confirmRestore(payload: JSONObject, label: String) {
+        if (BackupStore.restoreAccount(payload) == null) {
+            toast(if (BackupStore.backupAccount(payload) == null) {
+                "请先登录原百度网盘账号，再恢复这份旧备份"
+            } else {
+                "请切换到备份所属的百度网盘账号再恢复"
+            })
+            return
+        }
+        val loginHint = if (AccountScope.current.isEmpty()) "\n恢复后请登录备份所属的百度网盘账号。" else ""
         AlertDialog.Builder(this)
             .setTitle("恢复这份备份？")
             .setMessage(
                 "$label\n${BackupStore.summary(payload)}\n\n" +
-                    "将覆盖群组来源与收藏，并合并播放进度；登录态与播放地址不在备份内。",
+                    "将覆盖群组来源与收藏，并合并播放进度。$loginHint",
             )
             .setNegativeButton("取消", null)
             .setPositiveButton("恢复") { _, _ ->
@@ -223,12 +215,22 @@ class BackupActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun writeExport(uri: Uri) {
-        runCatching {
-            val payload = BackupStore.build(this)
-            contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(payload.toString(2)) }
-            toast("已导出 JSON")
-        }.onFailure { toast("导出失败：${it.message}") }
+    private fun saveBackup(button: View) {
+        button.isEnabled = false
+        Thread {
+            val result = runCatching { BackupStore.saveToDownloads(this, BackupStore.build(this)) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                button.isEnabled = true
+                result.onSuccess { path ->
+                    AlertDialog.Builder(this)
+                        .setTitle("备份已保存")
+                        .setMessage(path)
+                        .setPositiveButton("完成", null)
+                        .show()
+                }.onFailure { toast("备份失败，请检查手机存储空间后重试") }
+            }
+        }.start()
     }
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()

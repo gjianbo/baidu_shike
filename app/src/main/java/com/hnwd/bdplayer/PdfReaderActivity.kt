@@ -39,11 +39,13 @@ class PdfReaderActivity : AppCompatActivity() {
         // 渲染发生在 isolatedProcess 服务中，按包名显式授予读取权限
         grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
-        window.statusBarColor = getColor(R.color.bg)
-        window.navigationBarColor = getColor(R.color.bg)
+        val barColor = getColor(R.color.bg)
+        val darkIcons = androidx.core.graphics.ColorUtils.calculateLuminance(barColor) > 0.179
+        window.statusBarColor = barColor
+        window.navigationBarColor = barColor
         androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
-            isAppearanceLightStatusBars = true
-            isAppearanceLightNavigationBars = true
+            isAppearanceLightStatusBars = darkIcons
+            isAppearanceLightNavigationBars = darkIcons
         }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
