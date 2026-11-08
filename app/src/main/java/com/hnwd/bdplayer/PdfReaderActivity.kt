@@ -1,13 +1,15 @@
 package com.hnwd.bdplayer
 
 import android.content.Intent
-import android.graphics.Color
+import android.graphics.Typeface
 import android.net.Uri
 import android.os.Bundle
+import android.text.TextUtils
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -32,7 +34,7 @@ class PdfReaderActivity : AppCompatActivity() {
         val name = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         val uri = raw?.let { Uri.parse(it) }
         if (uri == null || tempFile?.let { PdfCache.retain(File(it)) } != true) {
-            Toast.makeText(this, "临时文档已失效，请从列表重新打开。", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "文档缓存已失效，请从列表重新打开。", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
@@ -47,46 +49,52 @@ class PdfReaderActivity : AppCompatActivity() {
             isAppearanceLightStatusBars = darkIcons
             isAppearanceLightNavigationBars = darkIcons
         }
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(barColor)
+            accessibilityPaneTitle = "文档阅读"
+        }
         fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(getColor(R.color.bg))
-            setPadding(dp(18), dp(10), dp(12), dp(10))
+            setPadding(dp(6), dp(4), dp(12), dp(4))
+        }
+        val back = ImageView(this).apply {
+            setImageResource(R.drawable.ic_arrow_back)
+            setColorFilter(getColor(R.color.ink2))
+            contentDescription = "返回"
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            setBackgroundResource(R.drawable.bg_icon_ripple)
+            setOnClickListener { finish() }
         }
         val titleView = TextView(this).apply {
             text = name
             setTextColor(getColor(R.color.ink))
-            textSize = 16f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            textSize = 15f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             maxLines = 2
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            ellipsize = TextUtils.TruncateAt.END
         }
-        val close = TextView(this).apply {
-            text = "关闭"
-            setTextColor(getColor(R.color.accentInk))
-            textSize = 12.5f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
-            gravity = Gravity.CENTER
-            setPadding(18, 12, 18, 12)
-            setOnClickListener { finish() }
-        }
-        bar.addView(titleView)
-        bar.addView(close)
+        bar.addView(back, LinearLayout.LayoutParams(dp(44), dp(44)))
+        bar.addView(titleView, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         val container = FrameLayout(this).apply { id = R.id.pdf_container }
         root.addView(
             bar,
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
         )
+        root.addView(View(this).apply {
+            setBackgroundColor(getColor(R.color.line))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)))
         root.addView(container, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val safe = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
             )
-            bar.setPadding(dp(18) + safe.left, dp(10) + safe.top, dp(12) + safe.right, dp(10))
-            container.setPadding(0, 0, 0, safe.bottom)
+            root.setPadding(safe.left, safe.top, safe.right, safe.bottom)
             insets
         }
 
@@ -106,12 +114,12 @@ class PdfReaderActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
-        // 退出即删；isFinishing 用于排除配置变更导致的重建
+        // 配置变更后阅读器仍在使用同一份缓存。
         if (isFinishing) {
             intent.getStringExtra(EXTRA_URI)?.let {
                 revokeUriPermission(Uri.parse(it), Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            tempFile?.let { PdfCache.discard(File(it)) }
+            tempFile?.let { PdfCache.release(File(it)) }
         }
         super.onDestroy()
     }

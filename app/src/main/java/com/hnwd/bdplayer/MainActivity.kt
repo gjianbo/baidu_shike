@@ -105,6 +105,7 @@ class MainActivity : AppCompatActivity() {
     private val videoResolver = VideoStreamResolver()
     private val audioResolver = VideoStreamResolver()
     private val pdfFetcher by lazy { PdfFileFetcher(this) }
+    private val mediaAddresses by lazy { MediaAddressCache(this) }
     private var pdfLoading: AlertDialog? = null
     private var mediaCaptchaDialog: Pair<RequestLane, AlertDialog>? = null
     private var videoLoading: AlertDialog? = null
@@ -188,6 +189,7 @@ class MainActivity : AppCompatActivity() {
     private var renewalRequestId = 0
     private var renewingPlaybackId: String? = null
     private var renewedPlaybackId: String? = null
+    private var invalidatedRenewedPlaybackId: String? = null
     private var checkingAccount = false
     private var homeDisplayedEntries: List<PanEntry> = emptyList()
     private var pendingHomeUpdate: List<PanEntry>? = null
@@ -547,6 +549,13 @@ class MainActivity : AppCompatActivity() {
         chipUnheard.text = "${if (mediaFilter == MediaFilter.AUDIO) "未听" else "未播完"} $unheardCount"
     }
 
+    private fun showAvailableMediaFilters(kinds: Set<MediaKind>) {
+        MediaFilter.entries.forEach { filter ->
+            val available = filter == MediaFilter.ALL || kinds.any(filter::includes)
+            mediaChips[filter.ordinal].visibility = if (available) View.VISIBLE else View.GONE
+        }
+    }
+
     private fun updateNav() {
         val screens = listOf(Screen.HOME, Screen.BROWSE, Screen.FAVORITES, Screen.SETTINGS)
         val active = screens.indexOf(screen)
@@ -854,6 +863,7 @@ class MainActivity : AppCompatActivity() {
         unheardCount = 0
         filterCount.text = ""
         content.removeAllViews()
+        showAvailableMediaFilters(emptySet())
         styleContent()
         val earlyParent = folders.lastOrNull()
         val earlyKey = if (screen == Screen.HOME && earlyParent == null && gid.isNotEmpty()) "recent:$gid" else ""
@@ -1137,13 +1147,7 @@ class MainActivity : AppCompatActivity() {
         content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
         sectionTitle.text = "群目录内容"
         val entries = courseCache.readAll(key)
-        if (entries.isNotEmpty()) {
-            addFilteredCourseRows(entries, sortable = true)
-        } else {
-            unheardCount = 0
-            filterCount.text = ""
-            updateFilterChips()
-        }
+        addFilteredCourseRows(entries, sortable = true)
         status.text = if (courseCache.readPage(key, 1) != null && entries.isEmpty()) "群目录暂无内容" else ""
     }
 
@@ -1395,6 +1399,12 @@ class MainActivity : AppCompatActivity() {
     private fun addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
         sortButton.visibility = if (sortable) View.VISIBLE else View.GONE
         sortButton.text = courseOrder.label
+        val kinds = entries.asSequence().filterNot { it.directory }.map(PanApi::kindOf).toSet()
+        showAvailableMediaFilters(kinds)
+        if (mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
+            mediaFilter = MediaFilter.ALL
+            unheardOnly = false
+        }
         val rows = column()
         fun renderRows() {
             val matching = entries.filter { mediaFilter.includes(PanApi.kindOf(it)) }
@@ -2031,6 +2041,14 @@ class MainActivity : AppCompatActivity() {
         audioResolver.cancel()
         dismissMediaCaptcha(RequestLane.AUDIO)
         updateAudioRequestMessage("正在打开 ${entry.name}…")
+        val key = mediaCacheKey(verifiedAccount, entry)
+        if (route == PlaybackRoute.AUDIO) {
+            val playlist = PanApi.audioPlaylist(entry)
+            mediaAddresses.playlist(key, playlist)?.let { stream ->
+                startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+                return
+            }
+        }
         if (route == PlaybackRoute.AUDIO) {
             audioResolver.start(PanApi.audioPlaylist(entry), web.settings.userAgentString) { result ->
                 if (id != audioRequestId || isDestroyed) return@start
@@ -2040,9 +2058,16 @@ class MainActivity : AppCompatActivity() {
                 }
                 val stream = result.getOrNull()
                 if (stream == null) resolveAudioFile(entry, route, openPlayer, id, token)
-                else startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+                else {
+                    mediaAddresses.savePlaylist(key, stream)
+                    startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+                }
             }
         } else {
+            mediaAddresses.link(key)?.let { uri ->
+                openAudioLink(entry, uri, route, openPlayer, null)
+                return
+            }
             resolveAudioFile(entry, route, openPlayer, id, token)
         }
     }
@@ -2086,28 +2111,64 @@ class MainActivity : AppCompatActivity() {
             verifyAndRefresh()
             return
         }
-        loadMediaLink(entry, viewer, lane = RequestLane.AUDIO) { json ->
-            val uri = PanApi.parseMediaLink(json, entry)
-            when (route) {
-                PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri, openPlayer)
-                PlaybackRoute.WEB_AUDIO -> {
-                    pendingAudioEntry = null
-                    audioPlayToken = null
-                    confirmPlayback(entry)
-                    updateAudioRequestMessage(null)
-                    controller?.pause()
-                    playAudio(entry, uri, webResumeSeconds)
-                }
+        if (route == PlaybackRoute.AUDIO) {
+            mediaAddresses.link(mediaCacheKey(viewer, entry))?.let { uri ->
+                openAudioLink(entry, uri, route, openPlayer, webResumeSeconds)
+                return
+            }
+        }
+        loadMediaLink(entry, viewer, lane = RequestLane.AUDIO) { uri ->
+            openAudioLink(entry, uri, route, openPlayer, webResumeSeconds)
+        }
+    }
+
+    private fun openAudioLink(
+        entry: PanEntry,
+        uri: Uri,
+        route: PlaybackRoute,
+        openPlayer: Boolean,
+        webResumeSeconds: Int?,
+    ) {
+        when (route) {
+            PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri, openPlayer)
+            PlaybackRoute.WEB_AUDIO -> {
+                pendingAudioEntry = null
+                audioPlayToken = null
+                confirmPlayback(entry)
+                updateAudioRequestMessage(null)
+                controller?.pause()
+                playAudio(entry, uri, webResumeSeconds)
             }
         }
     }
 
     private fun openPdf(entry: PanEntry) {
-        if (!ready || !hasVerifiedAccount()) {
+        if (!hasVerifiedAccount()) {
             status.text = "请确认网盘登录后重试。"
             return
         }
         val id = ++requestId
+        dismissMediaCaptcha(RequestLane.LIST)
+        if (pdfLoading != null) {
+            pdfFetcher.cancel()
+            pdfLoading?.dismiss()
+            pdfLoading = null
+        }
+        val account = verifiedAccount
+        val key = mediaCacheKey(account, entry)
+        PdfCache.find(this, key)?.let {
+            status.text = ""
+            startPdfReader(entry, it)
+            return
+        }
+        mediaAddresses.link(key)?.let {
+            downloadPdf(entry, account, key, it, fromCache = true)
+            return
+        }
+        if (!ready) {
+            status.text = "请确认网盘登录后重试。"
+            return
+        }
         status.text = "正在确认网盘账号…"
         web.evaluateJavascript(
             "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
@@ -2131,27 +2192,44 @@ class MainActivity : AppCompatActivity() {
             verifyAndRefresh()
             return
         }
-        loadMediaLink(entry, viewer) { json ->
-            if (!activityVisible) return@loadMediaLink
-            val link = PanApi.parseMediaLink(json, entry)
-            pdfLoading?.dismiss()
-            pdfLoading = AlertDialog.Builder(this)
-                .setTitle(entry.name)
-                .setMessage("正在下载文档…")
-                .setCancelable(false)
-                .setNegativeButton("取消") { _, _ -> pdfFetcher.cancel() }
-                .show()
-            pdfFetcher.start(link) { result ->
-                pdfLoading?.dismiss()
+        val key = mediaCacheKey(viewer, entry)
+        loadMediaLink(entry, viewer) { link ->
+            downloadPdf(entry, viewer, key, link, fromCache = false)
+        }
+    }
+
+    private fun downloadPdf(entry: PanEntry, account: String, key: String, link: Uri, fromCache: Boolean) {
+        if (!activityVisible || account != verifiedAccount) return
+        pdfLoading?.dismiss()
+        pdfLoading = AlertDialog.Builder(this)
+            .setTitle(entry.name)
+            .setMessage("正在下载文档…")
+            .setCancelable(false)
+            .setNegativeButton("取消") { _, _ ->
+                pdfFetcher.cancel()
                 pdfLoading = null
-                result.mapCatching { file ->
-                    try {
-                        if (activityVisible) startPdfReader(entry, file) else PdfCache.discard(file)
-                    } catch (error: Exception) {
-                        PdfCache.discard(file)
-                        throw error
+                status.text = ""
+            }
+            .show()
+        pdfFetcher.start(link) { result ->
+            pdfLoading?.dismiss()
+            pdfLoading = null
+            result.mapCatching { temp ->
+                try {
+                    val cached = PdfCache.publish(this, key, temp)
+                    if (activityVisible && account == verifiedAccount) startPdfReader(entry, cached)
+                } finally {
+                    PdfCache.discard(temp)
+                }
+            }.onFailure {
+                if (it is InvalidPdfLink) {
+                    mediaAddresses.clearLink(key)
+                    if (fromCache && ready && activityVisible && account == verifiedAccount) {
+                        requestPdfLink(entry, account)
+                        return@onFailure
                     }
-                }.onFailure { status.text = it.message ?: "文档打开失败，请重试。" }
+                }
+                status.text = it.message ?: "文档打开失败，请重试。"
             }
         }
     }
@@ -2221,34 +2299,42 @@ class MainActivity : AppCompatActivity() {
         val item = player.currentMediaItem ?: return
         val metadata = item.mediaMetadata
         val extras = metadata.extras ?: return
-        if (!extras.getBoolean("hls") && !error.isExpiredMediaLink()) return
+        val wasHls = extras.getBoolean("hls")
+        if (!wasHls && !error.isExpiredMediaLink()) return
         val id = extras.getString("playbackId") ?: return
-        if (extras.getString("account") != verifiedAccount || extras.getBoolean("renewed") ||
-            id == renewedPlaybackId || id == renewingPlaybackId
-        ) return
+        if (extras.getString("account") != verifiedAccount || id == renewingPlaybackId) return
         val entry = PanEntry(
             extras.getString("gid").orEmpty(), extras.getString("message").orEmpty(),
             extras.getString("owner").orEmpty(), item.mediaId, metadata.title?.toString().orEmpty(),
             "", "", false,
         )
+        val account = verifiedAccount
+        val key = mediaCacheKey(account, entry)
+        if (extras.getBoolean("renewed")) {
+            if (invalidatedRenewedPlaybackId != id) {
+                mediaAddresses.clearLink(key)
+                invalidatedRenewedPlaybackId = id
+            }
+            return
+        }
+        if (id == renewedPlaybackId) return
+        if (wasHls) mediaAddresses.clearPlaylist(key)
+        else mediaAddresses.clearLink(key)
         renewingPlaybackId = id
         fun finishRenewal() {
             renewingPlaybackId = null
             renewedPlaybackId = id
         }
-        val account = verifiedAccount
-        loadMediaLink(
-            entry, account,
-            lane = RequestLane.RENEWAL,
-            onFailure = ::finishRenewal,
-        ) { json ->
-            val link = PanApi.parseMediaLink(json, entry)
+        fun renew(link: Uri) {
             finishRenewal()
             player.sendCustomCommand(AudioPlaybackService.RENEW_FILE, Bundle().apply {
                 putString("playbackId", id)
                 putString("uri", link.toString())
             })
         }
+        val cachedLink = if (wasHls) mediaAddresses.link(key) else null
+        if (cachedLink != null) renew(cachedLink)
+        else loadMediaLink(entry, account, lane = RequestLane.RENEWAL, onFailure = ::finishRenewal, onResult = ::renew)
     }
 
     private fun cancelPendingAudioRequest() {
@@ -2734,6 +2820,8 @@ class MainActivity : AppCompatActivity() {
         if (!activityVisible || !ready || !hasVerifiedAccount()) return
         videoToRestore = null
         val account = verifiedAccount
+        val key = mediaCacheKey(account, entry)
+        val playlist = PanApi.videoPlaylist(entry)
         pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
         loadingVideo = VideoPlaybackPage.Snapshot(
             entry, account, positionMs, playWhenReady, audioOnly, fullscreen, orientationBeforeFullscreen,
@@ -2755,11 +2843,11 @@ class MainActivity : AppCompatActivity() {
         }
         videoLoading = loading
         loading.show()
-        videoResolver.start(PanApi.videoPlaylist(entry), web.settings.userAgentString) { result ->
+        fun openStream(result: Result<VideoStream>) {
             videoLoading = null
             loadingVideo = null
             loading.dismiss()
-            if (isDestroyed || isFinishing) return@start
+            if (isDestroyed || isFinishing || account != verifiedAccount) return
             result.onSuccess { stream ->
                 confirmPlayback(entry)
                 val previousPage = videoPage
@@ -2775,10 +2863,13 @@ class MainActivity : AppCompatActivity() {
                     startFullscreen = fullscreen,
                     orientationBeforeFullscreen = orientationBeforeFullscreen,
                     onRetry = { snapshot, automatic ->
-                        if (videoLoading == null) startVideo(
-                            entry, snapshot.positionMs, snapshot.playWhenReady, retryOnExpiredLink = !automatic,
-                            audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
-                        )
+                        if (videoLoading == null && account == verifiedAccount) {
+                            mediaAddresses.clearPlaylist(key)
+                            startVideo(
+                                entry, snapshot.positionMs, snapshot.playWhenReady, retryOnExpiredLink = !automatic,
+                                audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
+                            )
+                        }
                     },
                     courses = PlaybackQueueState.entries,
                     currentCourse = PlaybackQueueState.entries.indexOfFirst { sameEntry(it, entry) },
@@ -2827,6 +2918,16 @@ class MainActivity : AppCompatActivity() {
                         )
                     }
                     .show()
+            }
+        }
+        val cached = mediaAddresses.playlist(key, playlist)
+        if (cached != null) {
+            videoResolver.cancel()
+            openStream(Result.success(cached))
+        } else {
+            videoResolver.start(playlist, web.settings.userAgentString) { result ->
+                result.getOrNull()?.let { mediaAddresses.savePlaylist(key, it) }
+                openStream(result)
             }
         }
     }
@@ -2992,6 +3093,9 @@ class MainActivity : AppCompatActivity() {
                 val state = result?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
                 val error = state?.optInt(0) ?: 0
                 val ready = (state?.optInt(1) ?: 0) >= 2
+                if ((error == 2 || error == 4) && hasVerifiedAccount() && account == verifiedAccount) {
+                    mediaAddresses.clearLink(mediaCacheKey(account, entry))
+                }
                 if ((error == 2 || error == 4) && resumeSeconds == null && hasVerifiedAccount() && account == verifiedAccount) {
                     val position = maxOf(startAt, lastSavedSeconds, state?.optInt(4) ?: 0)
                     dialog.dismiss()
@@ -3032,7 +3136,7 @@ class MainActivity : AppCompatActivity() {
         viewer: String,
         lane: RequestLane = RequestLane.LIST,
         onFailure: () -> Unit = {},
-        onResult: (JSONObject) -> Unit,
+        onResult: (Uri) -> Unit,
     ) {
         val form = PanApi.mediaLinkBody(entry, viewer)
         fun stop(message: String) {
@@ -3072,8 +3176,11 @@ class MainActivity : AppCompatActivity() {
                         ) {}
                     }
                 },
-                onResult = onResult,
-            )
+            ) { json ->
+                val link = PanApi.parseMediaLink(json, entry)
+                mediaAddresses.saveLink(mediaCacheKey(viewer, entry), link)
+                onResult(link)
+            }
         }
         submit()
     }

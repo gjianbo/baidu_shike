@@ -678,7 +678,7 @@ internal class VideoPlaybackPage(
 internal fun PlaybackException.isExpiredMediaLink(): Boolean =
     generateSequence(cause) { it.cause }
         .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
-        .any { it.responseCode == 401 || it.responseCode == 403 }
+        .any { it.responseCode in setOf(401, 403, 404, 410) }
 
 @OptIn(UnstableApi::class)
 internal class HlsManifestDataSource(

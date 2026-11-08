@@ -11,19 +11,41 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import javax.net.ssl.HttpsURLConnection
 
-/**
- * PDF 的临时落盘位置。文档没有转码流，只有 sharedownload 的 dlink；
- * androidx.pdf 只接受 file:// / content://，所以必须先下载成文件。
- * 这里只写应用私有 cacheDir，退出即删，不写用户可见存储、不持久缓存。
- */
+/** PDF 存在应用私有缓存中，下载验证完成后才供阅读器复用。 */
 internal object PdfCache {
     // 与音频 dlink 播放、文档下载共用同一 UA（文档 §5.3 / §6.3）
     const val USER_AGENT = PanApi.DLINK_USER_AGENT
     const val MAX_BYTES = 80L * 1024 * 1024
 
     private const val ORPHAN_AGE_MS = 24 * 60 * 60 * 1000L
+    private const val CACHE_BYTES = 320L * 1024 * 1024
     private val activeFiles = mutableSetOf<File>()
     private fun dir(context: Context): File = File(context.cacheDir, "pdf")
+
+    @Synchronized
+    fun find(context: Context, key: String): File? =
+        File(dir(context), "$key.pdf").takeIf { it.isFile }?.also {
+            it.setLastModified(System.currentTimeMillis())
+        }
+
+    @Synchronized
+    fun publish(context: Context, key: String, temp: File): File {
+        val existing = find(context, key)
+        if (existing != null) {
+            discard(temp)
+            return existing
+        }
+        val cached = File(dir(context), "$key.pdf")
+        check(temp.renameTo(cached)) { "无法保存文档缓存，请重试。" }
+        activeFiles.remove(temp)
+        activeFiles.add(cached)
+        try {
+            prune(context)
+        } finally {
+            release(cached)
+        }
+        return cached
+    }
 
     @Synchronized
     fun target(context: Context): File {
@@ -41,20 +63,31 @@ internal object PdfCache {
 
     @Synchronized
     fun discard(file: File) {
-        activeFiles.remove(file)
+        release(file)
         file.delete()
+    }
+
+    @Synchronized
+    fun release(file: File) {
+        activeFiles.remove(file)
     }
 
     @Synchronized
     fun prune(context: Context) {
         val cutoff = System.currentTimeMillis() - ORPHAN_AGE_MS
-        dir(context).listFiles()?.forEach { file ->
-            if (file.isFile && file.extension == "pdf" && file !in activeFiles && file.lastModified() < cutoff) {
-                file.delete()
-            }
+        val files = dir(context).listFiles().orEmpty().filter { it.isFile && it.extension == "pdf" }
+        val cached = files.filterNot { it.name.startsWith("document-") }
+        files.filter { it.name.startsWith("document-") && it !in activeFiles && it.lastModified() < cutoff }
+            .forEach(File::delete)
+        var total = cached.filter { it in activeFiles }.sumOf(File::length)
+        cached.filterNot { it in activeFiles }.sortedByDescending(File::lastModified).forEach { file ->
+            if (total + file.length() <= CACHE_BYTES) total += file.length()
+            else file.delete()
         }
     }
 }
+
+internal class InvalidPdfLink(message: String) : IllegalStateException(message)
 
 internal class PdfFileFetcher(private val context: Context) {
     private val handler = Handler(Looper.getMainLooper())
@@ -96,6 +129,9 @@ internal class PdfFileFetcher(private val context: Context) {
             connection.setRequestProperty("User-Agent", PdfCache.USER_AGENT)
             connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             val code = connection.responseCode
+            if (code in setOf(400, 401, 403, 404, 410)) {
+                throw InvalidPdfLink("文档下载失败（HTTP $code），请重新打开。")
+            }
             check(code == HttpURLConnection.HTTP_OK) { "文档下载失败（HTTP $code），请重新打开。" }
             val declared = connection.getHeaderFieldLong("Content-Length", -1L)
             check(declared <= 0 || declared <= PdfCache.MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
@@ -112,12 +148,13 @@ internal class PdfFileFetcher(private val context: Context) {
                         output.write(buffer, 0, count)
                     }
                     check(total > 5) { "文档内容为空，请重新打开。" }
+                    check(declared <= 0 || total == declared) { "文档下载不完整，请重新打开。" }
                 }
             }
             file.inputStream().use { input ->
                 val head = ByteArray(5)
-                check(input.read(head) == 5 && String(head, Charsets.US_ASCII) == "%PDF-") {
-                    "下载内容不是有效的 PDF，可能登录已失效，请重新登录后重试。"
+                if (input.read(head) != 5 || String(head, Charsets.US_ASCII) != "%PDF-") {
+                    throw InvalidPdfLink("下载内容不是有效的 PDF，请重新打开。")
                 }
             }
             return file
