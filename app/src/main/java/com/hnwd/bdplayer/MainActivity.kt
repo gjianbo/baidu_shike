@@ -2405,12 +2405,19 @@ class MainActivity : AppCompatActivity() {
         if (audioPage != null || !ownsAudio(player) || native.visibility != View.VISIBLE) return
         val handler = Handler(Looper.getMainLooper())
         val titleView = TextView(this).apply {
-            textSize = 15f
+            textSize = 17f
             typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             setTextColor(color(R.color.ink))
             gravity = Gravity.START
             maxLines = 2
             setLineSpacing(0f, 1.08f)
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            isAccessibilityHeading = true
+        }
+        val source = TextView(this).apply {
+            textSize = 12f
+            setTextColor(color(R.color.accent))
+            maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
         }
         val message = TextView(this).apply {
@@ -2420,10 +2427,11 @@ class MainActivity : AppCompatActivity() {
             setPadding(0, dp(3), 0, 0)
         }
         val cover = ImageView(this).apply {
-            setImageResource(R.drawable.ic_music)
-            setColorFilter(color(R.color.heroText))
-            setBackgroundResource(R.drawable.bg_audio_cover)
-            setPadding(dp(14), dp(14), dp(14), dp(14))
+            setImageResource(R.drawable.ic_audio_wave)
+            setColorFilter(color(R.color.accent))
+            setBackgroundResource(R.drawable.bg_fmt_audio)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
         val seek = SeekBar(this).apply {
             max = 1000
@@ -2462,7 +2470,10 @@ class MainActivity : AppCompatActivity() {
         }
         val forward10 = icon(R.drawable.ic_forward10).apply { contentDescription = "前进 10 秒" }
         val next = icon(R.drawable.ic_skip_next).apply { contentDescription = "下一节" }
-        val speed = headAction("") {}
+        val speed = headAction("") {}.apply {
+            setPadding(dp(4), 0, dp(4), 0)
+            maxLines = 1
+        }
         speed.setOnClickListener {
             PopupMenu(this, speed, Gravity.END).apply {
                 PlaybackSpeed.values.forEachIndexed { index, value ->
@@ -2481,13 +2492,12 @@ class MainActivity : AppCompatActivity() {
         }
         val controls = row().apply {
             gravity = Gravity.CENTER
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(dp(62), 1))
             listOf(previous, back10, play, forward10, next).forEachIndexed { index, view ->
                 val params = if (index == 2) LinearLayout.LayoutParams(dp(48), dp(48))
                 else LinearLayout.LayoutParams(0, dp(46), 1f)
                 addView(view, params)
             }
-            addView(speed, LinearLayout.LayoutParams(dp(62), dp(44)))
+            addView(speed, LinearLayout.LayoutParams(dp(48), dp(44)))
         }
         val favorite = audioIconButton(R.drawable.ic_star, "收藏", color(R.color.ink3)) {}
         fun paintFavorite(starred: Boolean) {
@@ -2499,15 +2509,22 @@ class MainActivity : AppCompatActivity() {
             stopBackgroundAudio()
             closeAudioPage()
         }
-        val collapse = audioIconButton(R.drawable.ic_chevron_down, "收起播放器", color(R.color.ink2)) {
+        val back = audioIconButton(R.drawable.ic_arrow_back, "返回", color(R.color.ink2)) {
             closeAudioPage()
         }
-        val topBar = row().apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(collapse, LinearLayout.LayoutParams(dp(44), dp(44)))
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
-            addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
-            addView(stop, LinearLayout.LayoutParams(dp(44), dp(44)))
+        val topBar = FrameLayout(this).apply {
+            setPadding(dp(6), 0, dp(6), 0)
+            addView(back, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.CENTER_VERTICAL))
+            addView(TextView(this@MainActivity).apply {
+                text = "音频播放"
+                textSize = 15f
+                typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                setTextColor(color(R.color.ink))
+            }, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+            addView(row().apply {
+                addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
+                addView(stop, LinearLayout.LayoutParams(dp(44), dp(44)))
+            }, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL))
         }
         var loadingCourses = false
         var checkedPagination: Pair<PanEntry, String?>? = null
@@ -2527,37 +2544,63 @@ class MainActivity : AppCompatActivity() {
                 }
             },
         )
+        val header = column().apply {
+            setPadding(dp(20), dp(14), dp(20), dp(18))
+            addView(titleView)
+            addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
+            addView(message)
+            addView(cover, LinearLayout.LayoutParams(dp(68), dp(68)).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(16)
+            })
+        }
         val page = column().apply {
             setBackgroundColor(color(R.color.bg))
             isClickable = true
-            if (Build.VERSION.SDK_INT >= 28) accessibilityPaneTitle = "音频播放器"
+            accessibilityPaneTitle = "音频播放"
+            addView(topBar, LinearLayout.LayoutParams(-1, dp(52)))
+            addView(View(this@MainActivity).apply {
+                setBackgroundColor(color(R.color.line))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(-1, dp(1)))
+            addView(header)
             addView(column().apply {
-                setPadding(dp(14), dp(2), dp(14), dp(8))
-                addView(topBar)
-                addView(row().apply {
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(0, dp(2), 0, dp(2))
-                    addView(cover, LinearLayout.LayoutParams(dp(52), dp(52)))
-                    addView(column().apply {
-                        setPadding(dp(12), 0, 0, 0)
-                        addView(titleView)
-                        addView(message)
-                    }, LinearLayout.LayoutParams(0, -2, 1f))
-                })
+                setBackgroundResource(R.drawable.bg_audio_controls)
+                setPadding(dp(12), dp(6), dp(12), dp(8))
                 addView(seek, LinearLayout.LayoutParams(-1, -2))
                 addView(times)
                 addView(controls)
+            }, LinearLayout.LayoutParams(-1, -2).apply {
+                setMargins(dp(12), 0, dp(12), dp(12))
             })
             addView(courseList.view, LinearLayout.LayoutParams(-1, 0, 1f))
         }
+        var compactHeader = false
+        page.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
+            val compact = bottom - top < dp(440)
+            if (compact != compactHeader) {
+                compactHeader = compact
+                cover.visibility = if (compact) View.GONE else View.VISIBLE
+                header.setPadding(dp(20), dp(if (compact) 6 else 14), dp(20), dp(if (compact) 6 else 18))
+                titleView.maxLines = if (compact) 1 else 2
+            }
+        }
         var seeking = false
+        var displayedEntry: PanEntry? = null
         fun update() {
             if (audioPage !== page) return
             val entry = currentAudioEntry(player)
             val durationMs = player.duration
             val duration = if (durationMs > 0) (durationMs / 1000).toInt() else 0
             val position = (player.currentPosition / 1000).toInt().coerceAtLeast(0)
-            titleView.text = audioDisplayName(player.mediaMetadata.title ?: "当前播放")
+            val title = audioDisplayName(player.mediaMetadata.title ?: "当前播放")
+            if (titleView.text.toString() != title) titleView.text = title
+            if (source.text.isEmpty() || entry != displayedEntry) {
+                displayedEntry = entry
+                source.text = entry?.let {
+                    PanApi.readablePath(it.path).substringBeforeLast('/', "").substringAfterLast('/')
+                }.orEmpty().ifBlank { "音频课程" }
+            }
             if (!seeking) seek.progress = if (duration > 0) (position * 1000 / duration).coerceIn(0, 1000) else 0
             currentTime.text = formatAudioTime(position)
             totalTime.text = formatAudioTime(duration)
