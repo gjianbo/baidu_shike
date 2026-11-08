@@ -1,19 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="bg">#F7F6F3</color>
-    <color name="surface">#FFFFFF</color>
-    <color name="surface2">#F1F0EC</color>
-    <color name="surface3">#E9E7E1</color>
-    <color name="ink">#1C1B19</color>
-    <color name="ink2">#6B6862</color>
-    <color name="ink3">#9B978F</color>
-    <color name="line">#E5E2DB</color>
-    <color name="line2">#D6D2C9</color>
-    <color name="accent">#C2603C</color>
-    <color name="accentSoft">#FBEEE8</color>
-    <color name="accentInk">#8E4127</color>
-    <color name="ok">#5B7A4B</color>
-    <color name="okSoft">#EDF2E9</color>
-    <color name="barTrack">#E9E7E1</color>
+    <!-- 暖纸底 + 靛蓝主色 · 浅色 -->
+    <color name="bg">#F7F5EF</color>
+    <color name="surface">#FFFDF8</color>
+    <color name="surface2">#F2EFE7</color>
+    <color name="surface3">#ECE8DF</color>
+    <color name="ink">#1B1C20</color>
+    <color name="ink2">#5E5C66</color>
+    <color name="ink3">#75727C</color>
+    <color name="line">#DED9D0</color>
+    <color name="line2">#C9C3B8</color>
+    <color name="accent">#3B4CCB</color>
+    <color name="accentSoft">#DFE1FF</color>
+    <color name="accentInk">#2E3BB2</color>
+    <color name="onAccent">#FFFFFF</color>
+    <color name="ok">#2C6A4E</color>
+    <color name="okSoft">#C3EBD8</color>
+    <color name="barTrack">#DED9D0</color>
+
+    <!-- 固定靛蓝 hero -->
+    <color name="heroText">#FFFFFF</color>
+    <color name="heroPlayIcon">#2E3BB2</color>
+
+    <!-- 类型色 -->
+    <color name="star">#A05A00</color>
+    <color name="audioSoft">#E2E1F4</color>
+    <color name="folderSoft">#FFDEAA</color>
+    <color name="folderInk">#6A4500</color>
+    <color name="pdfSoft">#FFDAD6</color>
+    <color name="pdfInk">#93000A</color>
+    <color name="danger">#BA1A1A</color>
+    <color name="dangerSoft">#FFDAD6</color>
+    <color name="dangerInk">#410002</color>
+
+    <!-- 组件 -->
+    <color name="logoBg">#1B1C20</color>
+    <color name="logoInk">#FFFFFF</color>
+    <color name="navPill">#DFE1FF</color>
+    <color name="scrim">#661B1C20</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
     <color name="transparent">#00000000</color>
 </resources>

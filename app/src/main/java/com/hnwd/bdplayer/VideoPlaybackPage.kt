@@ -2,6 +2,7 @@ package com.hnwd.bdplayer
 
 import android.app.Activity
 import android.app.Dialog
+import android.content.ComponentName
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.net.Uri
@@ -14,12 +15,15 @@ import android.view.WindowManager
 import android.window.OnBackInvokedDispatcher
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.annotation.OptIn
+import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -31,7 +35,10 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerView
+import com.google.common.util.concurrent.ListenableFuture
 
 @OptIn(UnstableApi::class)
 internal class VideoPlaybackPage(
@@ -53,6 +60,7 @@ internal class VideoPlaybackPage(
     onEnded: (Snapshot) -> Unit,
     isFavorite: Boolean,
     onFavorite: () -> Boolean,
+    private val onClearBackgroundAudio: () -> Unit,
     onClose: (VideoPlaybackPage) -> Unit,
 ) {
     private val dialog = object : Dialog(activity, android.R.style.Theme_Material_NoActionBar) {
@@ -70,10 +78,45 @@ internal class VideoPlaybackPage(
     private var keepOrientationOnClose = false
     private var immersive = false
     private var listening = startAudioOnly
+    private var backgroundSession = false
+    private var audioControllerFuture: ListenableFuture<MediaController>? = null
     private lateinit var updateFullscreen: (Boolean) -> Unit
 
     private fun handleBack() {
         if (immersive) updateFullscreen(false) else close()
+    }
+
+    private fun ensureAudioSession() {
+        if (!listening || backgroundSession) return
+        if (player.mediaItemCount == 0 || !player.playWhenReady) return
+        backgroundSession = true
+        onClearBackgroundAudio()
+        VideoAudioSessionService.prepare(player)
+        val token = SessionToken(activity, ComponentName(activity, VideoAudioSessionService::class.java))
+        val future = MediaController.Builder(activity, token).buildAsync()
+        audioControllerFuture = future
+        future.addListener({
+            if (!runCatching { future.get() }.isSuccess) {
+                if (audioControllerFuture === future) {
+                    audioControllerFuture = null
+                    backgroundSession = false
+                    VideoAudioSessionService.stop(activity)
+                }
+            }
+        }, ContextCompat.getMainExecutor(activity))
+    }
+
+    private fun stopAudioSession() {
+        if (!backgroundSession) return
+        backgroundSession = false
+        audioControllerFuture?.let(MediaController::releaseFuture)
+        audioControllerFuture = null
+        VideoAudioSessionService.stop(activity)
+    }
+
+    fun pauseForBackground() {
+        if (listening && backgroundSession) return
+        pause()
     }
 
     init {
@@ -89,46 +132,96 @@ internal class VideoPlaybackPage(
         val title = TextView(activity).apply {
             text = entry.name
             setTextColor(Color.WHITE)
-            setPadding(dp(12), dp(8), dp(12), dp(4))
-            maxLines = 2
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(6), 0, dp(6), 0)
         }
-        val audioOnly = Button(activity).apply {
-            text = if (listening) "恢复画面" else "只听声音"
-            isAllCaps = false
+        val audioStateIcon = ImageView(activity).apply {
+            setImageResource(R.drawable.ic_headset)
+            setColorFilter(Color.WHITE)
+            alpha = 0.75f
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            visibility = if (listening) View.VISIBLE else View.GONE
+        }
+        val audioOnly = iconButton(R.drawable.ic_headset, if (listening) "恢复画面" else "只听声音", padding = 10) {}.apply {
             isEnabled = false
+            alpha = 0.35f
         }
         fun setListening(enabled: Boolean) {
             listening = enabled
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, listening).build()
-            audioOnly.text = if (listening) "恢复画面" else "只听声音"
+            audioOnly.contentDescription = if (listening) "恢复画面" else "只听声音"
+            audioOnly.setBackgroundResource(if (listening) R.drawable.bg_play_accent else R.drawable.bg_video_icon_ripple)
+            audioOnly.setColorFilter(if (listening) ContextCompat.getColor(activity, R.color.onAccent) else Color.WHITE)
+            audioStateIcon.visibility = if (listening) View.VISIBLE else View.GONE
             message.text = if (listening) "正在听声音" else "正在恢复画面…"
             message.visibility = View.VISIBLE
+            if (enabled) ensureAudioSession() else stopAudioSession()
         }
         audioOnly.setOnClickListener { setListening(!listening) }
         if (listening) setListening(true)
-        val favorite = Button(activity).apply {
-            isAllCaps = false
-            text = if (isFavorite) "取消收藏" else "收藏"
-            setOnClickListener { text = if (onFavorite()) "取消收藏" else "收藏" }
+        val favorite = iconButton(
+            if (isFavorite) R.drawable.ic_star_filled else R.drawable.ic_star,
+            if (isFavorite) "取消收藏" else "收藏",
+            padding = 14,
+        ) {}
+        fun paintFavorite(starred: Boolean) {
+            favorite.setImageResource(if (starred) R.drawable.ic_star_filled else R.drawable.ic_star)
+            favorite.setColorFilter(if (starred) Color.rgb(255, 200, 87) else Color.WHITE)
+            favorite.contentDescription = if (starred) "取消收藏" else "收藏"
         }
-        val courseActions = LinearLayout(activity).apply {
-            val previous = button("上一节") { onSwitch(-1, snapshot()) }.apply { isEnabled = hasPrevious }
-            val next = button("下一节") { onSwitch(1, snapshot()) }.apply { isEnabled = hasNext }
-            listOf(previous, favorite, next).forEach {
-                addView(it, LinearLayout.LayoutParams(0, -2, 1f))
-            }
+        favorite.setOnClickListener { paintFavorite(onFavorite()) }
+        paintFavorite(isFavorite)
+        val previous = iconButton(R.drawable.ic_skip_prev, "上一节", padding = 14) {
+            if (hasPrevious) onSwitch(-1, snapshot())
+        }.apply {
+            isEnabled = hasPrevious
+            alpha = if (hasPrevious) 1f else 0.35f
         }
-        val toolbar = LinearLayout(activity).apply {
-            addView(button("返回") { close() })
-            addView(button("横屏全屏") { updateFullscreen(true) })
-            addView(audioOnly)
+        val next = iconButton(R.drawable.ic_skip_next, "下一节", padding = 14) {
+            if (hasNext) onSwitch(1, snapshot())
+        }.apply {
+            isEnabled = hasNext
+            alpha = if (hasNext) 1f else 0.35f
+        }
+        val topBar = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(Color.BLACK)
+            setPadding(dp(4), dp(4), dp(4), dp(2))
+            addView(
+                iconButton(R.drawable.ic_arrow_back, "返回") { close() },
+                LinearLayout.LayoutParams(dp(44), dp(44)),
+            )
+            addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(
+                audioOnly,
+                LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(2) },
+            )
+            addView(
+                iconButton(R.drawable.ic_fullscreen, "横屏全屏") { updateFullscreen(true) },
+                LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(2) },
+            )
+        }
+        val bottomBar = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.BLACK)
+            setPadding(0, dp(4), 0, dp(8))
+            addView(previous, LinearLayout.LayoutParams(dp(56), dp(56)))
+            addView(favorite, LinearLayout.LayoutParams(dp(56), dp(56)).apply { marginStart = dp(18) })
+            addView(next, LinearLayout.LayoutParams(dp(56), dp(56)).apply { marginStart = dp(18) })
         }
         val playbackStatus = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            addView(message)
-            addView(retry)
+            addView(audioStateIcon, LinearLayout.LayoutParams(dp(52), dp(52)))
+            addView(message, LinearLayout.LayoutParams(-2, -2))
+            addView(retry, LinearLayout.LayoutParams(-2, -2))
         }
         val content = FrameLayout(activity).apply {
             addView(video, FrameLayout.LayoutParams(-1, -1))
@@ -137,9 +230,8 @@ internal class VideoPlaybackPage(
         updateFullscreen = { enabled ->
             immersive = enabled
             val visibility = if (enabled) View.GONE else View.VISIBLE
-            title.visibility = visibility
-            toolbar.visibility = visibility
-            courseActions.visibility = visibility
+            topBar.visibility = visibility
+            bottomBar.visibility = visibility
             video.setFullscreenButtonState(enabled)
             activity.requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
             else orientationBeforeFullscreen
@@ -157,10 +249,9 @@ internal class VideoPlaybackPage(
                     insets
                 }
             }
-            addView(title)
-            addView(toolbar)
+            addView(topBar)
             addView(content, LinearLayout.LayoutParams(-1, 0, 1f))
-            addView(courseActions)
+            addView(bottomBar)
         })
         val checkpoint = object : Runnable {
             override fun run() {
@@ -169,6 +260,7 @@ internal class VideoPlaybackPage(
             }
         }
         dialog.setOnDismissListener {
+            stopAudioSession()
             if (immersive && !keepOrientationOnClose && !activity.isDestroyed && !activity.isFinishing) {
                 activity.requestedOrientation = orientationBeforeFullscreen
             }
@@ -185,12 +277,15 @@ internal class VideoPlaybackPage(
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 video.removeCallbacks(checkpoint)
-                if (isPlaying) video.postDelayed(checkpoint, 5_000)
-                else if (player.playbackState != Player.STATE_ENDED) saveProgress()
+                if (isPlaying) {
+                    video.postDelayed(checkpoint, 5_000)
+                    ensureAudioSession()
+                } else if (player.playbackState != Player.STATE_ENDED) saveProgress()
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 audioOnly.isEnabled = tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)
+                audioOnly.alpha = if (audioOnly.isEnabled) 1f else 0.35f
                 if (!tracks.isEmpty && listening && !audioOnly.isEnabled) setListening(false)
             }
 
@@ -200,8 +295,12 @@ internal class VideoPlaybackPage(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_READY) readyToSave = true
+                if (playbackState == Player.STATE_READY) {
+                    readyToSave = true
+                    ensureAudioSession()
+                }
                 if (playbackState == Player.STATE_ENDED) {
+                    stopAudioSession()
                     progress.edit().remove(progressKey).apply()
                     history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
                     readyToSave = false
@@ -214,6 +313,7 @@ internal class VideoPlaybackPage(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                stopAudioSession()
                 message.text = "播放失败（${error.errorCodeName}）。"
                 message.visibility = View.VISIBLE
                 retry.visibility = View.VISIBLE
@@ -226,7 +326,17 @@ internal class VideoPlaybackPage(
         val source = HlsMediaSource.Factory { type ->
             if (type == C.DATA_TYPE_MANIFEST) HlsManifestDataSource(stream, http)
             else http.createDataSource()
-        }.createMediaSource(MediaItem.fromUri(stream.uri))
+        }.createMediaSource(
+            MediaItem.Builder()
+                .setUri(stream.uri)
+                .setMediaMetadata(
+                    MediaMetadata.Builder()
+                        .setTitle(entry.name)
+                        .setArtist("拾课")
+                        .build(),
+                )
+                .build(),
+        )
         dialog.show()
         dialog.window?.setLayout(-1, -1)
         dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -293,9 +403,30 @@ internal class VideoPlaybackPage(
         }
     }
 
-    private fun button(label: String, action: () -> Unit) = Button(activity).apply {
+    private fun iconButton(
+        iconRes: Int,
+        description: String,
+        padding: Int = 10,
+        action: () -> Unit,
+    ) = ImageView(activity).apply {
+        setImageResource(iconRes)
+        setColorFilter(Color.WHITE)
+        contentDescription = description
+        scaleType = ImageView.ScaleType.CENTER_INSIDE
+        setPadding(dp(padding), dp(padding), dp(padding), dp(padding))
+        setBackgroundResource(R.drawable.bg_video_icon_ripple)
+        isClickable = true
+        setOnClickListener { action() }
+    }
+
+    private fun button(label: String, action: () -> Unit) = TextView(activity).apply {
         text = label
-        isAllCaps = false
+        textSize = 12f
+        setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+        setBackgroundResource(R.drawable.bg_video_chip)
+        setPadding(dp(12), dp(9), dp(12), dp(9))
+        isClickable = true
         setOnClickListener { action() }
     }
 

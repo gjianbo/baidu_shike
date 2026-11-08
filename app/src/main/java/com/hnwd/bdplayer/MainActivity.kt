@@ -1,14 +1,15 @@
 package com.hnwd.bdplayer
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Intent
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
@@ -27,10 +28,15 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
+import androidx.appcompat.app.AlertDialog
+import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -51,17 +57,27 @@ import org.json.JSONObject
 import org.json.JSONTokener
 
 private const val CACHE_TTL_MS = 30 * 60 * 1000L
+private const val HOME_RECHECK_COOLDOWN_MS = 30 * 1000L
 
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
     private lateinit var web: WebView
     private lateinit var native: LinearLayout
     private lateinit var content: LinearLayout
+    private lateinit var contentScroll: ScrollView
     private lateinit var status: TextView
     private lateinit var title: TextView
     private lateinit var appSub: TextView
+    private lateinit var sourceName: TextView
+    private lateinit var headerMeta: View
+    private lateinit var refreshButton: View
+    private lateinit var sectionRow: View
+    private lateinit var sectionTitle: TextView
+    private lateinit var sortButton: TextView
+    private lateinit var crumbsScroll: View
+    private lateinit var crumbsRow: LinearLayout
     private lateinit var chipAll: TextView
     private lateinit var chipUnheard: TextView
-    private lateinit var filterBar: LinearLayout
+    private lateinit var filterBar: View
     private lateinit var filterCount: TextView
     private lateinit var navRoots: List<View>
     private lateinit var historyPanel: LinearLayout
@@ -87,6 +103,13 @@ class MainActivity : Activity() {
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
     private val uiExecutor = Executor { runOnUiThread(it) }
+    private val backupLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == RESULT_OK) {
+            ThemeStore.rememberScreen(this, screen.name)
+            ThemeStore.apply(this)
+            recreate()
+        }
+    }
 
     private enum class PlaybackRoute { AUDIO, WEB_AUDIO }
     private enum class MediaFilter(val label: String) {
@@ -157,6 +180,12 @@ class MainActivity : Activity() {
     private var renewingPlaybackId: String? = null
     private var renewedPlaybackId: String? = null
     private var checkingAccount = false
+    private var homeDisplayedEntries: List<PanEntry> = emptyList()
+    private var pendingHomeUpdate: List<PanEntry>? = null
+    private var pendingHomeUpdateNote = ""
+    private var homeCheckInFlight = false
+    private var homeCheckToken = 0
+    private var lastHomeCheckAt = 0L
 
     private fun hasVerifiedAccount() = verifiedAccount.isNotEmpty() && verifiedAccount == AccountScope.current
     private var observedGroup: Pair<String, String>? = null
@@ -167,17 +196,17 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        (lastNonConfigurationInstance as? RetainedPlayback)?.let {
+        (lastCustomNonConfigurationInstance as? RetainedPlayback)?.let {
             videoToRestore = it.video
             pendingQueue = it.selection
         }
-        val savedOrder = getPreferences(MODE_PRIVATE).getString("course_order", null)
+        val savedOrder = ThemeStore.courseOrder(this)
         courseOrder = CourseOrder.entries.firstOrNull { it.name == savedOrder } ?: CourseOrder.ASCENDING
-        window.statusBarColor = Color.rgb(247, 246, 243)
-        window.navigationBarColor = Color.rgb(247, 246, 243)
-        if (Build.VERSION.SDK_INT >= 26) {
-            window.decorView.systemUiVisibility = window.decorView.systemUiVisibility or
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        window.statusBarColor = color(R.color.bg)
+        window.navigationBarColor = color(R.color.bg)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !ThemeStore.isDark(this@MainActivity)
+            isAppearanceLightNavigationBars = !ThemeStore.isDark(this@MainActivity)
         }
         PdfCache.prune(this)
         AccountScope.init(this)
@@ -187,8 +216,8 @@ class MainActivity : Activity() {
         courseCache = CourseCache(getSharedPreferences("course_cache", MODE_PRIVATE))
         gid = getSharedPreferences("account_scope", MODE_PRIVATE)
             .getString(AccountScope.key("group_id"), "").orEmpty()
-        val frame = FrameLayout(this)
-        native = column().apply { setBackgroundColor(Color.rgb(247, 246, 243)) }
+        val frame = FrameLayout(this).apply { setBackgroundColor(color(R.color.bg)) }
+        native = column().apply { setBackgroundColor(color(R.color.bg)) }
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -252,11 +281,11 @@ class MainActivity : Activity() {
         frame.addView(web, FrameLayout.LayoutParams(-1, -1))
         frame.addView(native, FrameLayout.LayoutParams(-1, -1))
         val webControls = row().apply {
-            setBackgroundColor(Color.WHITE)
+            setBackgroundColor(color(R.color.surface))
             addView(button("返回 App") { showApp() })
             addView(button("通讯录") { openContacts() })
             addView(button("关联当前会话") { associateCurrentSession() }.also { addSourceButton = it })
-            addView(button("百度登录") { showWeb(PanApi.login) })
+            addView(button("百度登录") { showLoginDialog() })
             visibility = View.GONE
         }
         frame.addView(webControls, FrameLayout.LayoutParams(-1, dp(52)))
@@ -281,6 +310,13 @@ class MainActivity : Activity() {
         })
         title = shell.findViewById(R.id.appTitle)
         appSub = shell.findViewById(R.id.appSub)
+        sourceName = shell.findViewById(R.id.sourceName)
+        headerMeta = shell.findViewById(R.id.headerMeta)
+        sectionRow = shell.findViewById(R.id.sectionRow)
+        sectionTitle = shell.findViewById(R.id.sectionTitle)
+        sortButton = shell.findViewById(R.id.sortButton)
+        crumbsScroll = shell.findViewById(R.id.crumbsScroll)
+        crumbsRow = shell.findViewById(R.id.crumbsRow)
         chipAll = shell.findViewById(R.id.chipAll)
         chipUnheard = shell.findViewById(R.id.chipUnheard)
         filterBar = shell.findViewById(R.id.filterBar)
@@ -288,40 +324,48 @@ class MainActivity : Activity() {
         mediaChips = MediaFilter.entries.map { filter ->
             TextView(this).apply {
                 text = filter.label
-                textSize = 12f
+                textSize = 12.5f
+                typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-                minHeight = dp(40)
+                minHeight = dp(36)
+                setPadding(dp(14), 0, dp(14), 0)
+                setBackgroundResource(R.drawable.bg_chip)
+                setTextColor(color(R.color.ink2))
                 setOnClickListener {
                     mediaFilter = filter
+                    unheardOnly = false
                     updateFilterChips()
                     redrawFilteredRows?.invoke()
                 }
-                mediaFilters.addView(this, LinearLayout.LayoutParams(0, -2, 1f).apply {
-                    if (filter != MediaFilter.ALL) marginStart = dp(6)
+                mediaFilters.addView(this, LinearLayout.LayoutParams(-2, dp(36)).apply {
+                    if (filter != MediaFilter.ALL) marginStart = dp(8)
                 })
             }
         }
         filterCount = shell.findViewById(R.id.filterCount)
         navRoots = listOf(
             shell.findViewById(R.id.navHome),
-            shell.findViewById(R.id.navFavorites),
             shell.findViewById(R.id.navBrowse),
+            shell.findViewById(R.id.navFavorites),
             shell.findViewById(R.id.navSettings),
         )
         status = shell.findViewById(R.id.status)
         nowPlaying = shell.findViewById(R.id.miniPlayer)
         historyPanel = shell.findViewById(R.id.historyPanel)
         content = shell.findViewById(R.id.content)
+        contentScroll = shell.findViewById(R.id.contentScroll)
         courseSwitch = shell.findViewById(R.id.courseSwitch)
         btnPrev = shell.findViewById(R.id.btnPrev)
         btnNext = shell.findViewById(R.id.btnNext)
         courseHint = shell.findViewById(R.id.courseHint)
-        shell.findViewById<View>(R.id.btnBrowse).setOnClickListener { showScreen(Screen.BROWSE) }
-        shell.findViewById<View>(R.id.btnRefresh).setOnClickListener { if (ready) verifyAndRefresh(force = true) else showApp() }
+        shell.findViewById<View>(R.id.btnBrowse).setOnClickListener { chooseSource() }
+        refreshButton = shell.findViewById(R.id.btnRefresh)
+        refreshButton.setOnClickListener { if (ready) verifyAndRefresh(force = true) else showApp() }
+        sortButton.setOnClickListener { showCourseSort() }
         chipAll.setOnClickListener { setFilter(false) }
         chipUnheard.setOnClickListener { setFilter(true) }
         nowPlaying.setOnClickListener { controller?.let { showPlayback(it) } }
-        nowPlaying.findViewById<View>(R.id.miniExpand).setOnClickListener { controller?.let { showPlayback(it) } }
+        nowPlaying.findViewById<View>(R.id.miniClose).setOnClickListener { stopBackgroundAudio() }
         nowPlaying.findViewById<View>(R.id.miniPlay).setOnClickListener {
             controller?.let { player ->
                 if (!ownsAudio(player)) return@let
@@ -338,6 +382,13 @@ class MainActivity : Activity() {
                 }
             }
         }
+        ThemeStore.takePendingScreen(this)?.let { name ->
+            Screen.entries.firstOrNull { it.name == name }?.let { restored ->
+                screen = restored
+                recent = restored == Screen.HOME
+            }
+        }
+        BackupStore.ensureInitial(this)
         refresh()
         val token = SessionToken(this, ComponentName(this, AudioPlaybackService::class.java))
         controllerFuture = MediaController.Builder(this, token).buildAsync().also { future ->
@@ -415,6 +466,15 @@ class MainActivity : Activity() {
         nowPlaying.findViewById<TextView>(R.id.miniMeta).text =
             if (duration > 0) "${formatAudioTime(position)} / ${formatAudioTime(duration)}"
             else formatAudioTime(position)
+        val percent = if (duration > 0) (position * 100 / duration).coerceIn(0, 100) else 0
+        val progressBar = nowPlaying.findViewById<LinearLayout>(R.id.miniProgress)
+        progressBar.visibility = if (duration > 0) View.VISIBLE else View.GONE
+        if (duration > 0) {
+            nowPlaying.findViewById<View>(R.id.miniFill).layoutParams =
+                LinearLayout.LayoutParams(0, -1, percent.coerceAtLeast(1).toFloat())
+            nowPlaying.findViewById<View>(R.id.miniBarRest).layoutParams =
+                LinearLayout.LayoutParams(0, -1, (100 - percent).coerceAtLeast(1).toFloat())
+        }
         nowPlaying.findViewById<ImageView>(R.id.miniPlay).apply {
             val canPause = active.playWhenReady && active.playbackState != Player.STATE_ENDED
             setImageResource(if (canPause) R.drawable.ic_pause else R.drawable.ic_play)
@@ -422,7 +482,7 @@ class MainActivity : Activity() {
             setColorFilter(color(R.color.accentInk))
         }
         nowPlaying.findViewById<ImageView>(R.id.miniCover).setColorFilter(color(R.color.accentInk))
-        nowPlaying.findViewById<ImageView>(R.id.miniExpand).setColorFilter(color(R.color.ink2))
+        nowPlaying.findViewById<ImageView>(R.id.miniClose).setColorFilter(color(R.color.ink3))
         pendingAudioPage?.let { (id, entry) ->
             val item = active.currentMediaItem
             val extras = item?.mediaMetadata?.extras
@@ -465,27 +525,94 @@ class MainActivity : Activity() {
     }
 
     private fun updateNav() {
-        val active = when (screen) {
-            Screen.HOME -> 0
-            Screen.FAVORITES -> 1
-            Screen.BROWSE -> 2
-            Screen.SETTINGS -> 3
-        }
-        val titles = listOf("最近更新", "收藏", "目录", "设置")
-        val icons = listOf(R.drawable.ic_home, R.drawable.ic_star, R.drawable.ic_folder, R.drawable.ic_settings)
+        val screens = listOf(Screen.HOME, Screen.BROWSE, Screen.FAVORITES, Screen.SETTINGS)
+        val active = screens.indexOf(screen)
+        val titles = listOf("最近", "目录", "收藏", "设置")
+        val icons = listOf(R.drawable.ic_history, R.drawable.ic_folder, R.drawable.ic_star, R.drawable.ic_settings)
         navRoots.forEachIndexed { index, root ->
             val on = index == active
-            root.findViewById<View>(R.id.navIndicator)
-                .setBackgroundColor(color(if (on) R.color.accent else R.color.transparent))
+            root.findViewById<View>(R.id.navIndicator).setBackgroundResource(
+                if (on) R.drawable.bg_nav_pill_on else R.color.transparent,
+            )
             root.findViewById<ImageView>(R.id.navIcon).apply {
                 setImageResource(icons[index])
-                setColorFilter(color(if (on) R.color.accent else R.color.ink3))
+                setColorFilter(color(if (on) R.color.accentInk else R.color.ink3))
             }
             val label = root.findViewById<TextView>(R.id.navLabel)
             label.text = titles[index]
-            label.setTextColor(color(if (on) R.color.accent else R.color.ink3))
-            root.setOnClickListener { showScreen(Screen.entries[index]) }
+            label.setTextColor(color(if (on) R.color.ink else R.color.ink3))
+            label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+            root.setOnClickListener { showScreen(screens[index]) }
         }
+        sourceName.text = shareSources().firstOrNull { it.id == gid }?.name ?: "选择群组"
+        val browsing = screen == Screen.HOME || screen == Screen.BROWSE
+        headerMeta.visibility = if (browsing) View.VISIBLE else View.GONE
+        refreshButton.visibility = if (browsing) View.VISIBLE else View.GONE
+        title.setTextSize(if (screen == Screen.HOME) 30f else 26f)
+        crumbsScroll.visibility = if (screen == Screen.BROWSE) View.VISIBLE else View.GONE
+        sectionRow.visibility = if (browsing || folders.isNotEmpty()) View.VISIBLE else View.GONE
+        sectionTitle.text = when {
+            screen == Screen.HOME -> "新内容"
+            screen == Screen.BROWSE -> "文件"
+            else -> ""
+        }
+    }
+
+    private fun renderCrumbs() {
+        crumbsRow.removeAllViews()
+        fun addCrumb(label: String, current: Boolean, action: (() -> Unit)?) {
+            crumbsRow.addView(TextView(this).apply {
+                text = label
+                textSize = 11.5f
+                typeface = if (current) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                setTextColor(color(if (current) R.color.ink else R.color.ink2))
+                gravity = Gravity.CENTER
+                setPadding(dp(9), dp(6), dp(9), dp(6))
+                if (current) setBackgroundResource(R.drawable.bg_source_chip)
+                isClickable = action != null
+                setOnClickListener { action?.invoke() }
+            })
+        }
+        fun addSeparator() {
+            crumbsRow.addView(TextView(this).apply {
+                text = "›"
+                textSize = 13f
+                setTextColor(color(R.color.ink3))
+                setPadding(dp(2), 0, dp(2), 0)
+            })
+        }
+        addCrumb("根目录", folders.isEmpty()) {
+            if (folders.isNotEmpty()) {
+                folders.clear()
+                refresh()
+            }
+        }
+        folders.forEachIndexed { index, entry ->
+            addSeparator()
+            addCrumb(entry.name, index == folders.lastIndex) {
+                if (index < folders.lastIndex) {
+                    while (folders.size > index + 1) folders.removeAt(folders.size - 1)
+                    refresh()
+                }
+            }
+        }
+        crumbsScroll.visibility = if (screen == Screen.BROWSE) View.VISIBLE else View.GONE
+    }
+
+    private fun showThemeDialog() {
+        val modes = listOf(ThemeStore.SYSTEM, ThemeStore.LIGHT, ThemeStore.DARK)
+        val labels = modes.map { ThemeStore.label(it) }
+        val current = modes.indexOf(ThemeStore.mode(this)).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("外观")
+            .setSingleChoiceItems(labels.toTypedArray(), current) { dialog, index ->
+                dialog.dismiss()
+                BackupStore.capture(this, "auto")
+                ThemeStore.set(this, modes[index], screen.name)
+                findViewById<TextView>(R.id.setThemeValue)?.text = ThemeStore.label(modes[index])
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun isPlayed(entry: PanEntry): Boolean {
@@ -627,6 +754,7 @@ class MainActivity : Activity() {
             .putString(AccountScope.key("share_sources"), entries.toString())
             .putString(AccountScope.key("group_id"), activeGroup)
             .apply()
+        BackupStore.capture(this, "auto")
     }
 
     private fun openContacts() {
@@ -673,6 +801,9 @@ class MainActivity : Activity() {
 
     private fun activateGroup(group: String, returnFromWeb: Boolean = false) {
         gid = group
+        homeCheckToken++
+        homeCheckInFlight = false
+        lastHomeCheckAt = 0L
         getSharedPreferences("account_scope", MODE_PRIVATE).edit()
             .putString(AccountScope.key("group_id"), gid).apply()
         if (returnFromWeb) {
@@ -680,28 +811,63 @@ class MainActivity : Activity() {
             recent = true
             folders.clear()
             showApp()
-        } else showScreen(if (screen == Screen.BROWSE) Screen.BROWSE else Screen.HOME)
+        } else showScreen(if (screen == Screen.HOME) Screen.HOME else screen)
     }
 
     private fun refresh(force: Boolean = false) {
         requestId++
+        clearHomeUpdatePrompt()
+        homeDisplayedEntries = emptyList()
         redrawFilteredRows = null
         showingHomeDirectory = false
         unheardCount = 0
         filterCount.text = ""
         content.removeAllViews()
         styleContent()
+        val earlyParent = folders.lastOrNull()
+        val earlyKey = if (screen == Screen.HOME && earlyParent == null && gid.isNotEmpty()) "recent:$gid" else ""
+        val earlyCached = if (!hasVerifiedAccount() && (checkingAccount || !ready) && earlyKey.isNotEmpty()) {
+            courseCache.readAll(earlyKey)
+        } else {
+            emptyList()
+        }
+        if (earlyCached.isNotEmpty()) {
+            updateNowPlaying()
+            updateNav()
+            filterBar.visibility = View.VISIBLE
+            sectionRow.visibility = View.VISIBLE
+            renderAudioHistory(allowUnverified = true)
+            renderCourseSwitch()
+            title.text = "最近"
+            appSub.text = "最近更新与最近播放"
+            cacheNote = "缓存内容 · 上次同步 ${courseCache.syncLabel(earlyKey)}"
+            display(earlyCached)
+            status.text = "$cacheNote · 正在确认账号…"
+            if (web.url == null) web.loadUrl(PanApi.CONTACTS)
+            return
+        }
         if (!hasVerifiedAccount()) {
             historyPanel.removeAllViews()
             filterBar.visibility = View.GONE
-            title.text = getString(R.string.app_name)
-            appSub.text = ""
+            sectionRow.visibility = View.GONE
+            title.text = when (screen) {
+                Screen.FAVORITES -> "收藏"
+                Screen.SETTINGS -> "设置"
+                Screen.BROWSE -> "目录"
+                else -> "最近"
+            }
+            appSub.text = "连接百度网盘后查看群组内容"
             courseEntries.clear()
             renderCourseSwitch()
             updateNowPlaying()
             updateNav()
+            sectionRow.visibility = View.GONE
             status.text = if (checkingAccount || !ready) "正在连接网盘并确认账号…" else "无法确认网盘账号，请登录后刷新。"
-            content.addView(headAction("登录百度网盘") { showWeb(PanApi.login) })
+            if (screen == Screen.SETTINGS) {
+                renderSettings()
+                return
+            }
+            content.addView(headAction("登录百度网盘") { showLoginDialog() })
             if (web.url == null) web.loadUrl(PanApi.CONTACTS)
             return
         }
@@ -723,17 +889,19 @@ class MainActivity : Activity() {
         filterBar.visibility =
             if (parent != null || screen == Screen.HOME || screen == Screen.BROWSE) View.VISIBLE else View.GONE
         title.text = when (screen) {
-            Screen.FAVORITES -> parent?.name ?: "我的收藏"
+            Screen.FAVORITES -> parent?.name ?: "收藏"
             Screen.SETTINGS -> "设置"
-            else -> parent?.name ?: if (recent) "最近更新" else "群目录"
+            Screen.BROWSE -> parent?.name ?: "目录"
+            else -> parent?.name ?: "最近"
         }
         appSub.text = when {
-            parent != null -> "目录 · 第 ${folders.size} 级 · ${parent.name}"
-            screen == Screen.FAVORITES -> "同时跟的几节课 · 一步直达"
-            screen == Screen.SETTINGS -> "只保留自用必需项"
-            recent -> "${getString(R.string.app_name)} · 最近更新与最近播放"
-            else -> "${getString(R.string.app_name)} · 选择课程目录"
+            parent != null -> "第 ${folders.size} 级目录"
+            screen == Screen.FAVORITES -> "仅保存在本机"
+            screen == Screen.SETTINGS -> "外观、备份与本机数据"
+            screen == Screen.BROWSE -> "群组目录"
+            else -> "最近更新与最近播放"
         }
+        renderCrumbs()
         renderAudioHistory()
         renderCourseSwitch()
         if ((screen == Screen.HOME || screen == Screen.BROWSE) && parent == null) {
@@ -773,46 +941,154 @@ class MainActivity : Activity() {
                 else "正在连接百度网盘。如果列表无法加载，请先登录。"
                 if (web.url != PanApi.CONTACTS) web.loadUrl(PanApi.CONTACTS)
             }
-            cacheKey.isNotEmpty() && parent == null && !force && courseCache.isFresh(cacheKey, CACHE_TTL_MS) &&
-                (screen != Screen.BROWSE || courseCache.readPage(cacheKey, 1)?.nextCursor != null) -> {
-                if (homeRootKey != null && recentIsEmpty) {
-                    loadHomeDirectory(homeRootKey, force = false)
-                } else {
-                    status.text = "$cacheNote · 30 分钟内已检查"
-                    if (screen == Screen.BROWSE) renderRootMore(cacheKey)
-                }
+            cacheKey.isNotEmpty() && parent == null && !force && screen == Screen.BROWSE &&
+                courseCache.isFresh(cacheKey, CACHE_TTL_MS) &&
+                courseCache.readPage(cacheKey, 1)?.nextCursor != null -> {
+                status.text = "$cacheNote · 30 分钟内已检查"
+                renderRootMore(cacheKey)
             }
             parent != null -> loadChildren(parent, 1, cacheKey = cacheKey)
-            homeRootKey != null -> load(
-                PanApi.recent(gid),
-                statusHint = "正在检查最近更新…",
-                onFailure = {
-                    if (recentIsEmpty) {
-                        cacheFailure(homeRootKey)
-                    } else if (cached.isEmpty()) {
-                        content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
-                    } else cacheFailure(cacheKey)
-                },
-            ) { json ->
-                val fresh = PanApi.parseRecent(json)
-                val changed = courseCache.writeNewFirst(cacheKey, 1, fresh)
-                if (fresh.isEmpty()) {
-                    loadHomeDirectory(homeRootKey, force)
-                    return@load
-                }
-                showingHomeDirectory = false
-                cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
-                content.removeAllViews()
-                renderSourcePicker()
-                display(courseCache.readAll(cacheKey))
-                if (!changed) status.text = "$cacheNote · 无更新"
-                else if (json.getJSONObject("data").optBoolean("hasmore")) {
-                    status.text = "$cacheNote · 已显示首批记录"
+            homeRootKey != null -> {
+                if (!force && homeCheckInFlight) {
+                    status.text = if (cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else "正在检查最近更新…"
+                } else if (!force && System.currentTimeMillis() - lastHomeCheckAt < HOME_RECHECK_COOLDOWN_MS) {
+                    status.text = if (cacheNote.isNotEmpty()) "$cacheNote · 刚刚已检查" else ""
+                } else {
+                    startHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty)
                 }
             }
             else -> loadRoots(cacheKey)
         }
     }
+
+    private fun startHomeCheck(
+        force: Boolean,
+        cacheKey: String,
+        homeRootKey: String,
+        cached: List<PanEntry>,
+        recentIsEmpty: Boolean,
+    ) {
+        val checkToken = ++homeCheckToken
+        homeCheckInFlight = true
+        load(
+            PanApi.recent(gid),
+            statusHint = "正在检查最近更新…",
+            onCancelled = {
+                if (checkToken == homeCheckToken) homeCheckInFlight = false
+            },
+            onFailure = {
+                if (checkToken == homeCheckToken) homeCheckInFlight = false
+                if (recentIsEmpty) {
+                    cacheFailure(homeRootKey)
+                } else if (cached.isEmpty()) {
+                    content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
+                } else cacheFailure(cacheKey)
+            },
+        ) { json ->
+            applyHomeRecent(json, cacheKey, homeRootKey, force, checkToken)
+        }
+    }
+
+    private fun maybeCheckHomeInBackground() {
+        if (!ready || !hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
+        if (homeCheckInFlight || pendingHomeUpdate != null) return
+        if (System.currentTimeMillis() - lastHomeCheckAt < HOME_RECHECK_COOLDOWN_MS) return
+        val cacheKey = "recent:$gid"
+        val cached = courseCache.readAll(cacheKey)
+        if (cached.isEmpty()) return
+        val recentPage = courseCache.readPage(cacheKey, 1)
+        val recentIsEmpty = recentPage?.let { it.latestEmpty || it.entries.isEmpty() } == true
+        startHomeCheck(false, cacheKey, "roots:$gid", cached, recentIsEmpty)
+    }
+
+    private fun applyHomeRecent(
+        json: JSONObject,
+        cacheKey: String,
+        homeRootKey: String,
+        force: Boolean,
+        checkToken: Int,
+    ) {
+        if (checkToken == homeCheckToken) {
+            homeCheckInFlight = false
+            lastHomeCheckAt = System.currentTimeMillis()
+        }
+        clearHomeUpdatePrompt()
+        val previous = homeDisplayedEntries
+        val previousIds = previous.map(::entryKey).toHashSet()
+        val fresh = PanApi.parseRecent(json)
+        val changed = courseCache.writeNewFirst(cacheKey, 1, fresh)
+        if (fresh.isEmpty()) {
+            loadHomeDirectory(homeRootKey, force)
+            return
+        }
+        showingHomeDirectory = false
+        cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
+        val merged = courseCache.readAll(cacheKey)
+        val newEntries = if (previous.isNotEmpty()) {
+            fresh.filter { entryKey(it) !in previousIds }
+        } else {
+            emptyList()
+        }
+        val visibleNew = newEntries.filter(::matchesHomeFilter)
+        if (contentScroll.scrollY <= dp(6)) {
+            if (changed || previous.isEmpty()) {
+                content.removeAllViews()
+                renderSourcePicker()
+                display(merged)
+                contentScroll.scrollTo(0, 0)
+            }
+            status.text = when {
+                previous.isEmpty() -> cacheNote
+                visibleNew.isNotEmpty() -> "$cacheNote · 新增 ${visibleNew.size} 条"
+                newEntries.isNotEmpty() -> "$cacheNote · 有 ${newEntries.size} 条新内容被当前筛选隐藏"
+                !changed -> "$cacheNote · 无更新"
+                else -> cacheNote
+            }
+        } else if (visibleNew.isNotEmpty()) {
+            showHomeUpdatePrompt(visibleNew.size, merged, cacheNote)
+        } else {
+            status.text = if (!changed) "$cacheNote · 无更新" else cacheNote
+        }
+    }
+
+    private fun showHomeUpdatePrompt(count: Int, entries: List<PanEntry>, note: String) {
+        pendingHomeUpdate = entries
+        pendingHomeUpdateNote = note
+        status.text = "有 $count 条新内容，点此查看"
+        status.setTextColor(color(R.color.accentInk))
+        status.textSize = 11.5f
+        status.setTypeface(null, Typeface.BOLD)
+        status.isClickable = true
+        status.setOnClickListener { applyHomeUpdateNow() }
+    }
+
+    private fun applyHomeUpdateNow() {
+        val entries = pendingHomeUpdate ?: return
+        val note = pendingHomeUpdateNote
+        clearHomeUpdatePrompt()
+        content.removeAllViews()
+        renderSourcePicker()
+        display(entries)
+        contentScroll.post { contentScroll.scrollTo(0, 0) }
+        status.text = note
+    }
+
+    private fun clearHomeUpdatePrompt() {
+        pendingHomeUpdate = null
+        pendingHomeUpdateNote = ""
+        status.setOnClickListener(null)
+        status.isClickable = false
+        status.setTextColor(color(R.color.ink3))
+        status.textSize = 10.5f
+        status.setTypeface(null, Typeface.NORMAL)
+    }
+
+    private fun matchesHomeFilter(entry: PanEntry): Boolean {
+        if (!mediaFilter.includes(PanApi.kindOf(entry))) return false
+        return !unheardOnly || entry.directory || !isPlayed(entry)
+    }
+
+    private fun entryKey(entry: PanEntry): String = "${entry.gid}:${entry.messageId}:${entry.fileId}"
 
     private fun loadHomeDirectory(key: String, force: Boolean) {
         if (!showingHomeDirectory) renderHomeDirectory(key)
@@ -831,9 +1107,9 @@ class MainActivity : Activity() {
         renderSourcePicker()
         content.addView(label("近期没有更新，可以从群目录打开已有内容。", 13f))
         content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
+        sectionTitle.text = "群目录内容"
         val entries = courseCache.readAll(key)
         if (entries.isNotEmpty()) {
-            addGroupTitle("当前群目录")
             addFilteredCourseRows(entries, sortable = true)
         } else {
             unheardCount = 0
@@ -898,6 +1174,9 @@ class MainActivity : Activity() {
     private fun invalidateAccount() {
         accountProbeId++
         renewalRequestId++
+        homeCheckToken++
+        homeCheckInFlight = false
+        lastHomeCheckAt = 0L
         renewingPlaybackId = null
         cancelPendingAudioRequest()
         requestId++
@@ -1062,28 +1341,26 @@ class MainActivity : Activity() {
     }
 
     private fun renderSourcePicker() {
-        val sourceName = shareSources().firstOrNull { it.id == gid }?.name
-        content.addView(headAction(sourceName?.let { "$it ▾" } ?: "从网盘勾选群组") { chooseSource() })
+        sourceName.text = shareSources().firstOrNull { it.id == gid }?.name ?: "选择群组"
     }
 
     private fun display(entries: List<PanEntry>) {
+        if (screen == Screen.HOME && folders.isEmpty()) homeDisplayedEntries = entries
         status.text = if (entries.isEmpty()) "没有条目" else cacheNote
-        addGroupTitle(if (screen == Screen.HOME) "最近更新" else "当前目录")
+        sectionTitle.text = if (screen == Screen.HOME) "新内容" else "文件"
         addFilteredCourseRows(entries, sortable = screen == Screen.BROWSE)
     }
 
     private fun renderCourse() {
-        content.removeAllViews()
-        if (folders.isNotEmpty()) content.addView(headAction("← 返回上一级") {
-            folders.removeAt(folders.lastIndex)
-            refresh()
-        })
         status.text = if (courseEntries.isEmpty()) "没有条目" else cacheNote
-        addGroupTitle("当前目录 · 第 ${folders.size} 级")
+        sectionTitle.text = "文件"
+        content.removeAllViews()
         addFilteredCourseRows(courseEntries.toList(), sortable = true)
     }
 
     private fun addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
+        sortButton.visibility = if (sortable) View.VISIBLE else View.GONE
+        sortButton.text = courseOrder.label
         val rows = column()
         fun renderRows() {
             val matching = entries.filter { mediaFilter.includes(PanApi.kindOf(it)) }
@@ -1103,31 +1380,25 @@ class MainActivity : Activity() {
             addCourseRows(rows, ordered)
             renderCourseSwitch()
         }
-        if (sortable) content.addView(courseSortButton())
         content.addView(rows)
         redrawFilteredRows = ::renderRows
         renderRows()
     }
 
-    private fun courseSortButton(): TextView {
-        val sort = headAction("排序 · ${courseOrder.label}") {}
-        sort.setOnClickListener {
-            val options = CourseOrder.entries
-            AlertDialog.Builder(this)
-                .setTitle("课程排序")
-                .setSingleChoiceItems(options.map { it.label }.toTypedArray(), courseOrder.ordinal) { dialog, index ->
-                    courseOrder = options[index]
-                    getPreferences(MODE_PRIVATE).edit().putString("course_order", courseOrder.name).apply()
-                    dialog.dismiss()
-                    if (sort.parent === content) {
-                        sort.text = "排序 · ${courseOrder.label}"
-                        redrawFilteredRows?.invoke()
-                    }
-                }
-                .setNegativeButton("取消", null)
-                .show()
-        }
-        return sort
+    private fun showCourseSort() {
+        val options = CourseOrder.entries
+        AlertDialog.Builder(this)
+            .setTitle("排序")
+            .setSingleChoiceItems(options.map { it.label }.toTypedArray(), courseOrder.ordinal) { dialog, index ->
+                courseOrder = options[index]
+                ThemeStore.setCourseOrder(this, courseOrder.name)
+                BackupStore.capture(this, "auto")
+                sortButton.text = courseOrder.label
+                dialog.dismiss()
+                redrawFilteredRows?.invoke()
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun compareCourseNames(first: String, second: String): Int {
@@ -1154,13 +1425,7 @@ class MainActivity : Activity() {
     }
 
     private fun styleContent() {
-        if (folders.isNotEmpty() || screen == Screen.HOME || screen == Screen.BROWSE) {
-            content.setBackgroundResource(R.drawable.bg_card)
-            content.setPadding(dp(12), dp(4), dp(12), dp(8))
-        } else {
-            content.setBackgroundColor(color(R.color.transparent))
-            content.setPadding(0, 0, 0, dp(8))
-        }
+        content.setBackgroundColor(color(R.color.transparent))
     }
 
     private fun addGroupTitle(value: String) {
@@ -1203,12 +1468,17 @@ class MainActivity : Activity() {
             MediaKind.VIDEO -> {
                 fmt.setImageResource(R.drawable.ic_video)
                 fmt.setBackgroundResource(R.drawable.bg_fmt_video)
-                fmt.setColorFilter(color(R.color.ink2))
+                fmt.setColorFilter(color(R.color.accentInk))
+            }
+            MediaKind.PDF, MediaKind.DOCUMENT -> {
+                fmt.setImageResource(R.drawable.ic_file)
+                fmt.setBackgroundResource(R.drawable.bg_fmt_pdf)
+                fmt.setColorFilter(color(R.color.pdfInk))
             }
             else -> {
                 fmt.setImageResource(if (entry.directory) R.drawable.ic_folder else R.drawable.ic_file)
                 fmt.setBackgroundResource(R.drawable.bg_fmt_folder)
-                fmt.setColorFilter(color(R.color.ink2))
+                fmt.setColorFilter(color(R.color.folderInk))
             }
         }
         row.findViewById<TextView>(R.id.itemTitle).text = entry.name
@@ -1217,8 +1487,14 @@ class MainActivity : Activity() {
             .substringBeforeLast('/', "")
             .substringAfterLast('/')
         val size = entry.size.toLongOrNull()?.let { if (it >= 1024 * 1024) "${it / 1024 / 1024} MB" else "" }.orEmpty()
+        val kindName = when (kind) {
+            MediaKind.AUDIO -> "音频"
+            MediaKind.VIDEO -> "视频"
+            MediaKind.PDF, MediaKind.DOCUMENT -> "文档"
+            else -> if (entry.directory) "目录" else format.lowercase()
+        }
         row.findViewById<TextView>(R.id.itemMeta).text =
-            listOf(format.lowercase(), folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
+            listOf(kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
         val side = row.findViewById<ImageView>(R.id.itemSide)
         side.tag = favoriteTag(entry)
         paintFavorite(side, favorites.has(entry))
@@ -1290,6 +1566,7 @@ class MainActivity : Activity() {
     private fun toggleFavorite(entry: PanEntry): Boolean {
         if (!hasVerifiedAccount()) return false
         val starred = favorites.toggle(entry)
+        BackupStore.capture(this, "auto")
         if (screen == Screen.FAVORITES && folders.isEmpty()) {
             content.removeAllViews()
             renderFavorites()
@@ -1300,8 +1577,11 @@ class MainActivity : Activity() {
         return starred
     }
 
-    private fun currentPlaybackListKey(): String {
-        val parent = folders.lastOrNull()
+    private fun showLoginDialog() {
+        LoginDialog(this, web.settings.userAgentString) { showApp() }.show()
+    }
+
+    private fun currentPlaybackListKey(): String {        val parent = folders.lastOrNull()
         val listScreen = if (showingHomeDirectory) Screen.BROWSE else screen
         return if (parent == null) "$listScreen:$gid"
         else "${parent.gid}:${parent.messageId}:${parent.fileId}"
@@ -1379,67 +1659,26 @@ class MainActivity : Activity() {
     private fun formatOf(entry: PanEntry): String =
         if (entry.directory) "目录" else entry.name.substringAfterLast('.', "文件").uppercase()
 
-    private fun renderAudioHistory() {
+    private fun renderAudioHistory(allowUnverified: Boolean = false) {
         historyPanel.removeAllViews()
-        if (!hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
+        if ((!allowUnverified && !hasVerifiedAccount()) || screen != Screen.HOME || folders.isNotEmpty()) return
         val items = audioHistory.recentAcrossGroups()
         val videos = videoHistory.recentAcrossGroups()
         val all = (items + videos).sortedByDescending { it.updatedAt }
         val historyQueue = all.take(10).map { it.entry }
-        val latest = all.firstOrNull { !it.completed }
-        if (latest != null) {
-            val card = layoutInflater.inflate(R.layout.view_now_card, historyPanel, false)
-            card.findViewById<ImageView>(R.id.nowCover).setColorFilter(color(R.color.surface))
-            card.findViewById<ImageView>(R.id.nowPlay).setColorFilter(color(R.color.accentInk))
-            val isVideo = PanApi.kindOf(latest.entry) == MediaKind.VIDEO
-            card.findViewById<ImageView>(R.id.nowCover).setImageResource(if (isVideo) R.drawable.ic_video else R.drawable.ic_music)
-            card.findViewById<TextView>(R.id.nowKicker).text = if (isVideo) "继续观看" else "继续收听"
-            card.findViewById<TextView>(R.id.nowTitle).text = latest.entry.name
-            card.findViewById<TextView>(R.id.nowProgress).text =
-                if (latest.duration > 0) "${formatAudioTime(latest.seconds)} / ${formatAudioTime(latest.duration)}"
-                else "${if (isVideo) "看到" else "听到"} ${formatAudioTime(latest.seconds)}"
-            card.findViewById<TextView>(R.id.nowRest).text =
-                if (latest.remainingText.isNotEmpty()) "剩余 ${latest.remainingText}" else "点击续播"
-            setBar(card.findViewById(R.id.nowBar), latest.progressPercent, latest.duration > 0)
-            card.setOnClickListener { openEntry(latest.entry, (historyQueue + latest.entry).distinct()) }
-            if (!isVideo) card.setOnLongClickListener {
-                selectPlayback(latest.entry, (historyQueue + latest.entry).distinct())
-                resolveAudio(latest.entry, PlaybackRoute.WEB_AUDIO)
-                true
-            }
-            historyPanel.addView(card)
-        }
-        val done = all.count { it.completed }
-        val summary = row().apply {
+        val playbackItems = all.take(10)
+        if (playbackItems.isEmpty()) return
+        val header = row().apply {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, dp(2), 0, dp(8))
         }
-        fun stat(number: Int, label: String, highlight: Boolean) {
-            summary.addView(TextView(this).apply {
-                text = number.toString()
-                textSize = 12f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(color(if (highlight) R.color.accent else R.color.ink2))
-            })
-            summary.addView(TextView(this).apply {
-                text = " $label"
-                textSize = 10.5f
-                setTextColor(color(R.color.ink3))
-                setPadding(0, 0, dp(10), 0)
-            })
-        }
-        stat(all.size, "已播", true)
-        stat(all.size - done, "未听完", false)
-        stat(done, "已听完", false)
-        historyPanel.addView(summary)
-        val playbackItems = all.take(10)
-        if (playbackItems.isEmpty()) return
-        historyPanel.addView(TextView(this).apply {
+        header.addView(TextView(this).apply {
             text = "最近播放"
-            textSize = 11.5f
-            setTextColor(color(R.color.ink2))
-            setPadding(0, dp(4), 0, dp(6))
-        })
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(color(R.color.ink))
+        }, LinearLayout.LayoutParams(0, -2, 1f))
+        historyPanel.addView(header)
         val strip = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             layoutParams = LinearLayout.LayoutParams(-1, -2)
@@ -1451,7 +1690,8 @@ class MainActivity : Activity() {
             val card = layoutInflater.inflate(R.layout.view_rec_card, stripContent, false)
             card.findViewById<ImageView>(R.id.recIcon).apply {
                 setImageResource(if (isVideo) R.drawable.ic_video else R.drawable.ic_music)
-                setColorFilter(color(if (isVideo) R.color.ink2 else R.color.accentInk))
+                setBackgroundResource(if (isVideo) R.drawable.bg_fmt_video else R.drawable.bg_fmt_audio)
+                setColorFilter(color(R.color.accentInk))
             }
             card.findViewById<TextView>(R.id.recLib).text = formatOf(item.entry)
             card.findViewById<TextView>(R.id.recName).text = item.entry.name
@@ -1485,8 +1725,8 @@ class MainActivity : Activity() {
         val page = layoutInflater.inflate(R.layout.view_favorites_page, content, false)
         val list = page.findViewById<LinearLayout>(R.id.favList)
         val items = favorites.all()
-        page.findViewById<TextView>(R.id.favCount).text = "共 ${items.size} 项 · 跨库混排"
-        page.findViewById<TextView>(R.id.favEmpty).visibility =
+        page.findViewById<TextView>(R.id.favCount).text = "共 ${items.size} 项"
+        page.findViewById<View>(R.id.favEmpty).visibility =
             if (items.isEmpty()) View.VISIBLE else View.GONE
         addCourseRows(list, items)
         page.findViewById<TextView>(R.id.favGoBrowse).setOnClickListener {
@@ -1500,13 +1740,24 @@ class MainActivity : Activity() {
     private fun renderSettings() {
         status.text = ""
         val page = layoutInflater.inflate(R.layout.view_settings_page, content, false)
+        page.findViewById<TextView>(R.id.setAccountStatus).text = when {
+            checkingAccount || !ready -> "正在确认登录状态…"
+            hasVerifiedAccount() -> "已登录 · 账号状态正常"
+            else -> "未登录 · 点右侧重新登录"
+        }
+        page.findViewById<View>(R.id.setLoginRow).setOnClickListener { showLoginDialog() }
         page.findViewById<TextView>(R.id.setGroupValue).text =
-            shareSources().size.takeIf { it > 0 }?.let { "已关联 $it 项" } ?: "未关联"
+            shareSources().size.takeIf { it > 0 }?.let { "$it 个来源" } ?: "未关联"
         page.findViewById<View>(R.id.setGroupRow).setOnClickListener { discoverGroups() }
-        page.findViewById<View>(R.id.setLoginRow).setOnClickListener { showWeb(PanApi.login) }
         page.findViewById<TextView>(R.id.setClearValue).text =
             "${audioHistory.recent(gid).size + videoHistory.recent(gid).size} 条"
         page.findViewById<View>(R.id.setClearRow).setOnClickListener { confirmClearHistory() }
+        page.findViewById<TextView>(R.id.setThemeValue).text = ThemeStore.label(this)
+        page.findViewById<View>(R.id.setThemeRow).setOnClickListener { showThemeDialog() }
+        page.findViewById<TextView>(R.id.setBackupValue).text = "${BackupStore.count(this)} 份"
+        page.findViewById<View>(R.id.setBackupRow).setOnClickListener {
+            backupLauncher.launch(Intent(this, BackupActivity::class.java))
+        }
         val version = runCatching {
             packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
         }.getOrDefault("")
@@ -1537,12 +1788,24 @@ class MainActivity : Activity() {
 
     private fun setTabActive(tab: TextView, active: Boolean) {
         tab.setBackgroundResource(if (active) R.drawable.bg_chip_on else R.drawable.bg_chip)
-        tab.setTextColor(color(if (active) R.color.surface else R.color.ink2))
+        tab.setTextColor(color(if (active) R.color.accentInk else R.color.ink2))
     }
 
     private fun color(id: Int) = resources.getColor(id, theme)
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+    private fun audioIconButton(res: Int, description: String, tint: Int, action: () -> Unit) =
+        ImageView(this).apply {
+            setImageResource(res)
+            setColorFilter(tint)
+            contentDescription = description
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            setBackgroundResource(R.drawable.bg_icon_ripple)
+            isClickable = true
+            setOnClickListener { action() }
+        }
 
     private fun headAction(value: String, action: () -> Unit): TextView = TextView(this).apply {
         text = value
@@ -1740,7 +2003,6 @@ class MainActivity : Activity() {
                     audioPlayToken = null
                     confirmPlayback(entry)
                     updateAudioRequestMessage(null)
-                    status.text = "已打开后台播放"
                     if (openPlayer) pendingAudioPage = id to entry
                     updateNowPlaying()
                 } else {
@@ -1807,106 +2069,220 @@ class MainActivity : Activity() {
     }
 
     private fun updateAudioRequestMessage(message: String?) {
+        val previous = audioRequestMessage
         audioRequestMessage = message
-        if (message != null) status.text = message
+        when {
+            message != null -> status.text = message
+            previous != null && status.text == previous -> status.text = ""
+        }
         refreshAudioPageMessage?.invoke()
     }
 
     @OptIn(UnstableApi::class)
     private fun showPlayback(player: MediaController) {
         if (audioPage != null || !ownsAudio(player) || native.visibility != View.VISIBLE) return
-        val message = label("", 14f)
-        val track = label(player.mediaMetadata.title?.toString() ?: "当前播放", 24f).apply {
+        val handler = Handler(Looper.getMainLooper())
+        val titleView = TextView(this).apply {
+            textSize = 21f
             setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(16), 0, dp(8))
+            setTextColor(color(R.color.ink))
+            gravity = Gravity.CENTER
+            maxLines = 3
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(6), dp(14), dp(6), 0)
         }
-        val controls = PlayerControlView(this).apply {
-            this.player = player
-            showTimeoutMs = 0
-            setShowPreviousButton(false)
-            setShowNextButton(false)
+        val message = TextView(this).apply {
+            textSize = 12f
+            setTextColor(color(R.color.ink3))
+            gravity = Gravity.CENTER
+            setPadding(0, dp(6), 0, 0)
         }
-        val previous = button("上一节") { currentAudioEntry(player)?.let { playSibling(it, -1) } }
-        val next = button("下一节") { currentAudioEntry(player)?.let { playSibling(it, 1) } }
-        val favorite = Button(this).apply {
-            isAllCaps = false
-            setOnClickListener {
-                currentAudioEntry(player)?.let { text = if (toggleFavorite(it)) "取消收藏" else "收藏" }
+        val cover = ImageView(this).apply {
+            setImageResource(R.drawable.ic_music)
+            setColorFilter(color(R.color.heroText))
+            setBackgroundResource(R.drawable.bg_audio_cover)
+            setPadding(dp(90), dp(90), dp(90), dp(90))
+        }
+        val seek = SeekBar(this).apply {
+            max = 1000
+            progressTintList = ColorStateList.valueOf(color(R.color.accent))
+            progressBackgroundTintList = ColorStateList.valueOf(color(R.color.barTrack))
+            thumbTintList = ColorStateList.valueOf(color(R.color.accent))
+            setPadding(dp(2), dp(10), dp(2), dp(2))
+        }
+        val currentTime = TextView(this).apply {
+            textSize = 10.5f
+            setTextColor(color(R.color.ink3))
+        }
+        val totalTime = TextView(this).apply {
+            textSize = 10.5f
+            setTextColor(color(R.color.ink3))
+        }
+        val times = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(currentTime)
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(totalTime)
+        }
+        fun icon(res: Int): ImageView = ImageView(this).apply {
+            setImageResource(res)
+            setPadding(dp(13), dp(13), dp(13), dp(13))
+            setBackgroundResource(android.R.color.transparent)
+        }
+        val previous = icon(R.drawable.ic_skip_prev)
+        val back10 = icon(R.drawable.ic_replay10)
+        val play = ImageView(this).apply {
+            setBackgroundResource(R.drawable.bg_play_accent)
+            setPadding(dp(20), dp(20), dp(20), dp(20))
+            setImageResource(R.drawable.ic_play)
+            setColorFilter(color(R.color.onAccent))
+        }
+        val forward10 = icon(R.drawable.ic_forward10)
+        val next = icon(R.drawable.ic_skip_next)
+        val controls = row().apply {
+            gravity = Gravity.CENTER
+            listOf(previous, back10, play, forward10, next).forEachIndexed { index, view ->
+                addView(view, LinearLayout.LayoutParams(0, dp(if (index == 2) 72 else 52), 1f))
             }
         }
+        val favorite = audioIconButton(R.drawable.ic_star, "收藏", color(R.color.ink3)) {}
+        fun paintFavorite(starred: Boolean) {
+            favorite.setImageResource(if (starred) R.drawable.ic_star_filled else R.drawable.ic_star)
+            favorite.setColorFilter(color(if (starred) R.color.star else R.color.ink3))
+            favorite.contentDescription = if (starred) "取消收藏" else "收藏"
+        }
+        val courseText = TextView(this).apply {
+            textSize = 10.5f
+            setTextColor(color(R.color.ink3))
+            gravity = Gravity.CENTER
+            setPadding(dp(8), 0, 0, 0)
+        }
+        val extras = row().apply {
+            gravity = Gravity.CENTER
+            addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(courseText)
+        }
+        val stop = audioIconButton(R.drawable.ic_close, "停止播放", color(R.color.ink2)) {
+            stopBackgroundAudio()
+            closeAudioPage()
+        }
+        val collapse = audioIconButton(R.drawable.ic_chevron_down, "收起播放器", color(R.color.ink2)) {
+            closeAudioPage()
+        }
+        val topBar = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(collapse, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
+            addView(stop, LinearLayout.LayoutParams(dp(44), dp(44)))
+        }
         val panel = column().apply {
-            setPadding(dp(24), dp(16), dp(24), dp(24))
-            addView(headAction("⌄ 收起播放器") { closeAudioPage() })
-            addView(ImageView(this@MainActivity).apply {
-                setImageResource(R.drawable.ic_music)
-                setColorFilter(color(R.color.accentInk))
-                setBackgroundResource(R.drawable.bg_fmt_audio)
-                setPadding(dp(27), dp(27), dp(27), dp(27))
-            }, LinearLayout.LayoutParams(dp(96), dp(96)).apply {
+            setPadding(dp(16), dp(4), dp(16), dp(24))
+            addView(topBar)
+            addView(cover, LinearLayout.LayoutParams(dp(260), dp(260)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
-                topMargin = dp(36)
-                bottomMargin = dp(20)
+                topMargin = dp(4)
             })
-            addView(track)
+            addView(titleView)
             addView(message)
+            addView(seek, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
+            addView(times)
             addView(controls)
-            addView(row().apply {
-                listOf(previous, favorite, next).forEach {
-                    addView(it, LinearLayout.LayoutParams(0, -2, 1f))
-                }
-            })
-            addView(button("停止播放") {
-                pendingQueue = null
-                PlaybackQueueState.anchor = null
-                PlaybackQueueState.entries = emptyList()
-                PlaybackQueueState.listKey = null
-                renderCourseSwitch()
-                cancelPendingAudioRequest()
-                player.sendCustomCommand(AudioPlaybackService.CLEAR_FILE, Bundle.EMPTY)
-                closeAudioPage()
-            })
+            addView(extras, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) })
         }
         val page = ScrollView(this).apply {
             setBackgroundColor(color(R.color.bg))
-            isClickable = true
             isFillViewport = true
+            isClickable = true
             if (Build.VERSION.SDK_INT >= 28) accessibilityPaneTitle = "音频播放器"
             addView(panel)
         }
-        fun updateMessage() {
-            val current = currentAudioEntry(player)
-            previous.isEnabled = current?.let { siblingOf(it, -1) != null } == true
-            next.isEnabled = current?.let { siblingOf(it, 1) != null } == true
-            favorite.isEnabled = current != null
-            favorite.text = if (current?.let(favorites::has) == true) "取消收藏" else "收藏"
+        var seeking = false
+        fun update() {
+            if (audioPage !== page) return
+            val entry = currentAudioEntry(player)
+            val durationMs = player.duration
+            val duration = if (durationMs > 0) (durationMs / 1000).toInt() else 0
+            val position = (player.currentPosition / 1000).toInt().coerceAtLeast(0)
+            titleView.text = player.mediaMetadata.title ?: "当前播放"
+            if (!seeking) seek.progress = if (duration > 0) (position * 1000 / duration).coerceIn(0, 1000) else 0
+            currentTime.text = formatAudioTime(position)
+            totalTime.text = formatAudioTime(duration)
+            play.setImageResource(if (player.isPlaying) R.drawable.ic_pause else R.drawable.ic_play)
+            play.setColorFilter(color(R.color.onAccent))
+            val starred = entry != null && favorites.has(entry)
+            paintFavorite(starred)
+            val queue = PlaybackQueueState.entries
+            val index = entry?.let { active -> queue.indexOfFirst { sameEntry(it, active) } } ?: -1
+            courseText.text = if (index >= 0) "第 ${index + 1} / ${queue.size} 节" else ""
+            previous.isEnabled = entry?.let { siblingOf(it, -1) != null } == true
+            next.isEnabled = entry?.let { siblingOf(it, 1) != null } == true
+            previous.alpha = if (previous.isEnabled) 1f else 0.35f
+            next.alpha = if (next.isEnabled) 1f else 0.35f
             val error = player.playerError
             message.text = audioRequestMessage ?: when {
-                error != null -> "播放失败（${playbackError(error)}）。可长按 MP3 使用网页播放。"
+                error != null -> "播放失败（${playbackError(error)}）"
                 player.playbackState == Player.STATE_BUFFERING -> "正在缓冲…"
                 player.playbackState == Player.STATE_ENDED -> "播放结束"
                 player.isPlaying -> "正在播放"
                 else -> "已暂停"
             }
         }
-        val listener = object : Player.Listener {
-            override fun onEvents(player: Player, events: Player.Events) {
-                if (ownsAudio(player)) {
-                    track.text = player.mediaMetadata.title ?: "当前播放"
-                    updateMessage()
-                } else closeAudioPage()
+        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(bar: SeekBar) { seeking = true }
+            override fun onStopTrackingTouch(bar: SeekBar) {
+                seeking = false
+                val duration = player.duration
+                if (duration > 0) player.seekTo(duration * bar.progress / 1000)
+                update()
+            }
+            override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (!fromUser) return
+                val duration = player.duration
+                if (duration > 0) currentTime.text = formatAudioTime((duration * progress / 1000 / 1000).toInt())
+            }
+        })
+        play.setOnClickListener {
+            when {
+                player.playbackState == Player.STATE_ENDED -> {
+                    player.seekToDefaultPosition()
+                    player.play()
+                }
+                player.playWhenReady -> player.pause()
+                else -> player.play()
             }
         }
+        previous.setOnClickListener { currentAudioEntry(player)?.let { playSibling(it, -1) } }
+        next.setOnClickListener { currentAudioEntry(player)?.let { playSibling(it, 1) } }
+        back10.setOnClickListener { player.seekBack() }
+        forward10.setOnClickListener { player.seekForward() }
+        favorite.setOnClickListener {
+            currentAudioEntry(player)?.let { toggleFavorite(it) }
+            update()
+        }
+        val listener = object : Player.Listener {
+            override fun onEvents(player: Player, events: Player.Events) {
+                if (ownsAudio(player)) update() else closeAudioPage()
+            }
+            override fun onIsPlayingChanged(isPlaying: Boolean) { update() }
+        }
         player.addListener(listener)
-        updateMessage()
-        refreshAudioPageMessage = ::updateMessage
-        audioPage = page
+        val ticker = object : Runnable {
+            override fun run() {
+                if (audioPage === page) {
+                    update()
+                    handler.postDelayed(this, 500)
+                }
+            }
+        }
+        handler.post(ticker)
         releaseAudioPage = {
             player.removeListener(listener)
-            controls.player = null
+            handler.removeCallbacks(ticker)
         }
+        audioPage = page
         native.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         (native.parent as ViewGroup).addView(page, FrameLayout.LayoutParams(-1, -1))
-        controls.show()
+        update()
     }
 
     private fun closeAudioPage() {
@@ -1921,6 +2297,19 @@ class MainActivity : Activity() {
             updateNowPlaying()
             renderAudioHistory()
         }
+    }
+
+    private fun stopBackgroundAudio() {
+        pendingQueue = null
+        PlaybackQueueState.anchor = null
+        PlaybackQueueState.entries = emptyList()
+        PlaybackQueueState.listKey = null
+        renderCourseSwitch()
+        cancelPendingAudioRequest()
+        updateAudioRequestMessage(null)
+        controller?.sendCustomCommand(AudioPlaybackService.CLEAR_FILE, Bundle.EMPTY)
+        nowPlaying.visibility = View.GONE
+        renderAudioHistory()
     }
 
     private fun startVideo(
@@ -1988,6 +2377,15 @@ class MainActivity : Activity() {
                     },
                     isFavorite = favorites.has(entry),
                     onFavorite = { account == verifiedAccount && toggleFavorite(entry) },
+                    onClearBackgroundAudio = {
+                        controller?.sendCustomCommand(AudioPlaybackService.CLEAR_FILE, Bundle.EMPTY)
+                        pendingQueue = null
+                        PlaybackQueueState.anchor = null
+                        PlaybackQueueState.entries = emptyList()
+                        PlaybackQueueState.listKey = null
+                        renderCourseSwitch()
+                        updateNowPlaying()
+                    },
                     onClose = { closed ->
                         if (videoPage === closed) {
                             videoPage = null
@@ -2379,7 +2777,7 @@ class MainActivity : Activity() {
     }
 
     @Suppress("DEPRECATION")
-    override fun onRetainNonConfigurationInstance(): Any? {
+    override fun onRetainCustomNonConfigurationInstance(): Any? {
         val snapshot = loadingVideo ?: stoppedVideo ?: videoPage?.snapshot() ?: videoToRestore
         val entry = snapshot?.entry ?: dispatchedAudioEntry
         val selection = pendingQueue?.takeIf { entry != null && sameEntry(it.entry, entry) }
@@ -2394,6 +2792,7 @@ class MainActivity : Activity() {
         if (videoToRestore == null && videoPage == null && videoLoading == null) videoToRestore = loadingVideo
         nowPlaying.post(nowPlayingTicker)
         restoreVideoIfReady()
+        maybeCheckHomeInBackground()
     }
 
     override fun onStop() {
@@ -2405,10 +2804,11 @@ class MainActivity : Activity() {
             pdfLoading = null
         }
         stoppedVideo = videoPage?.snapshot()
-        videoPage?.pause()
+        videoPage?.pauseForBackground()
         videoResolver.cancel()
         videoLoading?.dismiss()
         videoLoading = null
+        if (!isChangingConfigurations) BackupStore.capture(this, "auto")
         super.onStop()
     }
 

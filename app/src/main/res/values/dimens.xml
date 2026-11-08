@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <dimen name="page_pad">18dp</dimen>
-    <dimen name="card_pad">14dp</dimen>
-    <dimen name="radius_sm">8dp</dimen>
-    <dimen name="radius_md">14dp</dimen>
-    <dimen name="radius_lg">20dp</dimen>
+    <dimen name="card_pad">16dp</dimen>
+    <dimen name="radius_sm">12dp</dimen>
+    <dimen name="radius_md">18dp</dimen>
+    <dimen name="radius_lg">24dp</dimen>
     <dimen name="radius_pill">100dp</dimen>
-    <dimen name="fmt_size">36dp</dimen>
-    <dimen name="foot_indent">47dp</dimen>
+    <dimen name="fmt_size">46dp</dimen>
+    <dimen name="foot_indent">62dp</dimen>
     <dimen name="divider">1dp</dimen>
+    <dimen name="nav_height">80dp</dimen>
+    <dimen name="header_pad">18dp</dimen>
 </resources>

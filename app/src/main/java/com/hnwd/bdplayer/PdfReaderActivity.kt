@@ -12,6 +12,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.pdf.viewer.fragment.PdfViewerFragment
 import java.io.File
 
@@ -37,23 +39,35 @@ class PdfReaderActivity : AppCompatActivity() {
         // 渲染发生在 isolatedProcess 服务中，按包名显式授予读取权限
         grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
+        window.statusBarColor = getColor(R.color.bg)
+        window.navigationBarColor = getColor(R.color.bg)
+        androidx.core.view.WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = true
+            isAppearanceLightNavigationBars = true
+        }
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(Color.rgb(247, 246, 243))
-            setPadding(16, 12, 16, 12)
+            setBackgroundColor(getColor(R.color.bg))
+            setPadding(dp(18), dp(10), dp(12), dp(10))
         }
         val titleView = TextView(this).apply {
             text = name
-            setTextColor(Color.rgb(31, 33, 33))
-            textSize = 15f
-            isSingleLine = true
+            setTextColor(getColor(R.color.ink))
+            textSize = 16f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            maxLines = 2
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
         }
-        val close = Button(this).apply {
+        val close = TextView(this).apply {
             text = "关闭"
-            isAllCaps = false
+            setTextColor(getColor(R.color.accentInk))
+            textSize = 12.5f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            gravity = Gravity.CENTER
+            setPadding(18, 12, 18, 12)
             setOnClickListener { finish() }
         }
         bar.addView(titleView)
@@ -65,6 +79,14 @@ class PdfReaderActivity : AppCompatActivity() {
         )
         root.addView(container, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
         setContentView(root)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            bar.setPadding(dp(18) + safe.left, dp(10) + safe.top, dp(12) + safe.right, dp(10))
+            container.setPadding(0, 0, 0, safe.bottom)
+            insets
+        }
 
         // 固定容器 id，保证旋转等配置变更后 Fragment 能被正确恢复
         // 官方指南（API 31 + ext 13）与 release notes（backport 到 28）口径不一致，

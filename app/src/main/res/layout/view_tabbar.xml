@@ -3,7 +3,6 @@
     android:id="@+id/tabBar"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginTop="8dp"
     android:background="@color/surface"
     android:orientation="vertical">
 
@@ -16,7 +15,9 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
+        android:paddingLeft="8dp"
         android:paddingTop="6dp"
+        android:paddingRight="8dp"
         android:paddingBottom="8dp">
 
         <include
@@ -27,14 +28,14 @@
             android:layout_weight="1" />
 
         <include
-            android:id="@+id/navFavorites"
+            android:id="@+id/navBrowse"
             layout="@layout/view_tab_item"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1" />
 
         <include
-            android:id="@+id/navBrowse"
+            android:id="@+id/navFavorites"
             layout="@layout/view_tab_item"
             android:layout_width="0dp"
             android:layout_height="wrap_content"

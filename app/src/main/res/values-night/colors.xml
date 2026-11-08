@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色 -->
+    <color name="bg">#111216</color>
+    <color name="surface">#1A1B21</color>
+    <color name="surface2">#202128</color>
+    <color name="surface3">#2F313C</color>
+    <color name="ink">#E8E6EC</color>
+    <color name="ink2">#B6B3BF</color>
+    <color name="ink3">#8D8A97</color>
+    <color name="line">#3A3B47</color>
+    <color name="line2">#4A4B57</color>
+    <color name="accent">#BFC5FF</color>
+    <color name="accentSoft">#27359B</color>
+    <color name="accentInk">#DDE1FF</color>
+    <color name="onAccent">#0D1A66</color>
+    <color name="ok">#9BD7B9</color>
+    <color name="okSoft">#164A33</color>
+    <color name="barTrack">#3A3B47</color>
+
+    <color name="heroText">#FFFFFF</color>
+    <color name="heroPlayIcon">#2E3BB2</color>
+
+    <color name="star">#FFB95C</color>
+    <color name="audioSoft">#3A3B52</color>
+    <color name="folderSoft">#5D3D00</color>
+    <color name="folderInk">#FFDEAA</color>
+    <color name="pdfSoft">#93000A</color>
+    <color name="pdfInk">#FFDAD6</color>
+    <color name="danger">#FFB4AB</color>
+    <color name="dangerSoft">#93000A</color>
+    <color name="dangerInk">#FFDAD6</color>
+
+    <color name="logoBg">#E8E6EC</color>
+    <color name="logoInk">#16171C</color>
+    <color name="navPill">#27359B</color>
+    <color name="scrim">#99000000</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="transparent">#00000000</color>
+</resources>

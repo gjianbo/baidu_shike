@@ -5,13 +5,23 @@
     <permission android:name="com.hnwd.bdplayer.CONTROL_AUDIO" android:protectionLevel="signature" />
     <uses-permission android:name="com.hnwd.bdplayer.CONTROL_AUDIO" />
     <application
+        android:name=".PlayerApp"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme"
         android:usesCleartextTraffic="false">
         <service
             android:name=".AudioPlaybackService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".VideoAudioSessionService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
@@ -27,6 +37,10 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <activity
+            android:name=".BackupActivity"
+            android:exported="false"
+            android:theme="@style/AppTheme" />
         <activity
             android:name=".PdfReaderActivity"
             android:exported="false"

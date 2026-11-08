@@ -53,7 +53,6 @@ internal object PanApi {
         .buildUpon()
         .appendQueryParameter("authsite", "1")
         .appendQueryParameter("tpl", "netdisk")
-        .appendQueryParameter("overseas", "1")
         .appendQueryParameter("smsLoginLink", "1")
         .appendQueryParameter("display", "mobile")
         .appendQueryParameter(
