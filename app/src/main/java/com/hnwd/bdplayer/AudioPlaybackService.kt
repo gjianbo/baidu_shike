@@ -18,10 +18,13 @@ import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.session.CommandButton
+import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import java.util.UUID
@@ -44,6 +47,18 @@ class AudioPlaybackService : MediaSessionService() {
             handler.postDelayed(this, 5_000)
         }
     }
+    /** v0.2 睡眠定时：每秒轮询 SleepTimer，到点暂停并停止。 */
+    private val sleepTick = object : Runnable {
+        override fun run() {
+            if (!SleepTimer.isArmed()) return
+            if (SleepTimer.remainingMs() <= 0L) {
+                SleepTimer.disarm()
+                player.pause()
+            } else {
+                handler.postDelayed(this, 1_000L)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -54,6 +69,9 @@ class AudioPlaybackService : MediaSessionService() {
             .setUserAgent(PanApi.DLINK_USER_AGENT)
             .setAllowCrossProtocolRedirects(true)
         player = ExoPlayer.Builder(this)
+            // 通知栏 / 耳机线控的 30s 快进快退：media3 通知的 ⏪⏩ 直接用这两个增量。
+            .setSeekBackIncrementMs(30_000)
+            .setSeekForwardIncrementMs(30_000)
             .setMediaSourceFactory(DefaultMediaSourceFactory(http))
             .build().apply {
             setAudioAttributes(AudioAttributes.DEFAULT, true)
@@ -81,6 +99,9 @@ class AudioPlaybackService : MediaSessionService() {
         )
         session = MediaSession.Builder(this, player)
             .setSessionActivity(activity)
+            // 系统「媒体卡片」（下拉通知里 SystemUI 自己渲染的那块）只认 MediaButtonPreferences，
+            // 不读通知里的自定义 action —— 这里同步声明，卡片上才有 30s 两个按钮。
+            .setMediaButtonPreferences(seekMediaButtons())
             .setCallback(object : MediaSession.Callback {
                 override fun onConnect(
                     session: MediaSession,
@@ -88,10 +109,13 @@ class AudioPlaybackService : MediaSessionService() {
                 ): MediaSession.ConnectionResult {
                     val sameApp = controller.uid == applicationInfo.uid
                     val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-                    if (sameApp) commands.add(PLAY_FILE).add(CLEAR_FILE).add(SYNC_ACCOUNT).add(RENEW_FILE).add(RENEW_HLS)
+                    if (sameApp) commands.add(PLAY_FILE).add(CLEAR_FILE).add(SYNC_ACCOUNT).add(RENEW_FILE).add(RENEW_HLS).add(SLEEP_TIMER)
                     val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
                         .remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
                         .remove(Player.COMMAND_SET_MEDIA_ITEM)
+                        // 单条播放：上一项/下一项点了没有效果，去掉，别让系统媒体卡片画一个死按钮
+                        .remove(Player.COMMAND_SEEK_TO_PREVIOUS)
+                        .remove(Player.COMMAND_SEEK_TO_NEXT)
                         .build()
                     return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                         .setAvailableSessionCommands(commands.build())
@@ -126,6 +150,13 @@ class AudioPlaybackService : MediaSessionService() {
                             if (entry != null && playbackAccount != AccountScope.current) clearFile()
                             SessionResult.RESULT_SUCCESS
                         }
+                        customCommand == SLEEP_TIMER -> {
+                            val minutes = args.getInt("minutes", 0)
+                            handler.removeCallbacks(sleepTick)
+                            SleepTimer.arm(minutes)
+                            if (minutes > 0) handler.postDelayed(sleepTick, 1_000L)
+                            SessionResult.RESULT_SUCCESS
+                        }
                         customCommand == CLEAR_FILE -> {
                             clearFile()
                             SessionResult.RESULT_SUCCESS
@@ -135,6 +166,8 @@ class AudioPlaybackService : MediaSessionService() {
                     return Futures.immediateFuture(SessionResult(result))
                 }
             }).build()
+        // media3 默认通知只有上一项/播放暂停；补 30s 快退/快进两个按钮。
+        setMediaNotificationProvider(SeekButtonsProvider(this))
     }
 
     private fun playFile(args: Bundle): Int {
@@ -167,6 +200,8 @@ class AudioPlaybackService : MediaSessionService() {
         val previous = playbackHistory.find(next)?.takeUnless { it.completed }
         lastSaved = previous?.let { it.seconds to false }
         val metadata = MediaMetadata.Builder().setTitle(next.name)
+            // 显式给 artist：留空时系统媒体卡片会显示 "null"
+            .setArtist("拾课")
             .setExtras(Bundle().apply {
                 putString("account", account)
                 putString("origin", next.origin.name)
@@ -268,6 +303,8 @@ class AudioPlaybackService : MediaSessionService() {
         entry = null
         history = null
         playbackAccount = ""
+        handler.removeCallbacks(sleepTick)
+        SleepTimer.disarm()
         session.player.stop()
         session.player.clearMediaItems()
     }
@@ -292,6 +329,7 @@ class AudioPlaybackService : MediaSessionService() {
 
     override fun onDestroy() {
         handler.removeCallbacks(checkpoint)
+        handler.removeCallbacks(sleepTick)
         saveProgress()
         session.player.release()
         session.release()
@@ -304,7 +342,43 @@ class AudioPlaybackService : MediaSessionService() {
         internal val RENEW_HLS = SessionCommand("com.hnwd.bdplayer.RENEW_HLS", Bundle.EMPTY)
         internal val SYNC_ACCOUNT = SessionCommand("com.hnwd.bdplayer.SYNC_ACCOUNT", Bundle.EMPTY)
         internal val CLEAR_FILE = SessionCommand("com.hnwd.bdplayer.CLEAR_FILE", Bundle.EMPTY)
+        internal val SLEEP_TIMER = SessionCommand("com.hnwd.bdplayer.SLEEP_TIMER", Bundle.EMPTY)
     }
+}
+
+/** 30 秒快退 / 播放暂停 / 30 秒快进。同一份按钮同时用于系统媒体卡片（MediaButtonPreferences）
+ *  和通知（SeekButtonsProvider），避免两处显示不一致。 */
+@OptIn(UnstableApi::class)
+private fun seekMediaButtons(showPauseButton: Boolean = true): ImmutableList<CommandButton> {
+    val back = CommandButton.Builder(CommandButton.ICON_SKIP_BACK_30)
+        .setPlayerCommand(Player.COMMAND_SEEK_BACK)
+        .setDisplayName("快退 30 秒")
+        .setSlots(CommandButton.SLOT_BACK)
+        .build()
+    val playPause = CommandButton.Builder(
+        if (showPauseButton) CommandButton.ICON_PAUSE else CommandButton.ICON_PLAY,
+    )
+        .setPlayerCommand(Player.COMMAND_PLAY_PAUSE)
+        .setDisplayName(if (showPauseButton) "暂停" else "播放")
+        .setSlots(CommandButton.SLOT_CENTRAL)
+        .build()
+    val forward = CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD_30)
+        .setPlayerCommand(Player.COMMAND_SEEK_FORWARD)
+        .setDisplayName("快进 30 秒")
+        .setSlots(CommandButton.SLOT_FORWARD)
+        .build()
+    return ImmutableList.of(back, playPause, forward)
+}
+
+@OptIn(UnstableApi::class)
+private class SeekButtonsProvider(context: android.content.Context) :
+    DefaultMediaNotificationProvider(context) {
+    override fun getMediaButtons(
+        session: MediaSession,
+        playerCommands: Player.Commands,
+        currentButtons: ImmutableList<CommandButton>,
+        showPauseButton: Boolean,
+    ): ImmutableList<CommandButton> = seekMediaButtons(showPauseButton)
 }
 
 internal object AudioPlayRequestGate {

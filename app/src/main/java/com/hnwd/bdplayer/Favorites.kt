@@ -30,6 +30,36 @@ internal class Favorites(private val preferences: SharedPreferences) {
         } else {
             items.add(0, entry)
         }
+        save(items)
+        return index < 0
+    }
+
+    /** v0.2 批量收藏：返回新增数量（已存在的不重复添加）。 */
+    fun addAll(entries: List<PanEntry>): Int {
+        val items = all().toMutableList()
+        var added = 0
+        entries.forEach { entry ->
+            if (items.none { same(it, entry) }) {
+                items.add(0, entry)
+                added++
+            }
+        }
+        if (added > 0) save(items)
+        return added
+    }
+
+    /** v0.2 批量取消收藏：返回移除数量。 */
+    fun removeAll(entries: List<PanEntry>): Int {
+        val items = all().toMutableList()
+        var removed = 0
+        entries.forEach { entry ->
+            if (items.removeAll { same(it, entry) }) removed++
+        }
+        if (removed > 0) save(items)
+        return removed
+    }
+
+    private fun save(items: List<PanEntry>) {
         val data = JSONArray()
         items.forEach {
             data.put(JSONObject()
@@ -45,7 +75,6 @@ internal class Favorites(private val preferences: SharedPreferences) {
                 .put("md5", it.md5))
         }
         preferences.edit().putString(storageKey(), data.toString()).apply()
-        return index < 0
     }
 
     private fun storageKey() = AccountScope.key("favorites")

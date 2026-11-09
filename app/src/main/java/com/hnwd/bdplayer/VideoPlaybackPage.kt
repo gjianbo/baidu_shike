@@ -8,12 +8,16 @@ import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
+import android.view.GestureDetector
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.WindowManager
+import android.view.MotionEvent
 import android.window.OnBackInvokedDispatcher
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
@@ -45,6 +49,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerView
 import com.google.common.util.concurrent.ListenableFuture
+import kotlin.math.abs
 
 @OptIn(UnstableApi::class)
 internal class VideoPlaybackPage(
@@ -403,6 +408,57 @@ internal class VideoPlaybackPage(
             sheet.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(0xFFBFC6FF.toInt())
             if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
         }.apply { visibility = View.GONE }
+        val sleepHandler = Handler(Looper.getMainLooper())
+        val timer = iconButton(R.drawable.ic_timer, "睡眠定时", padding = 10) {}
+        fun paintTimer() {
+            val armed = SleepTimer.isArmed()
+            timer.setColorFilter(if (armed) ContextCompat.getColor(activity, R.color.accent) else Color.WHITE)
+            val remaining = SleepTimer.remainingMs()
+            timer.contentDescription = if (armed) {
+                "睡眠定时，剩余 ${formatAudioTime((remaining / 1000).toInt())}"
+            } else {
+                "睡眠定时"
+            }
+        }
+        val sleepTick = object : Runnable {
+            override fun run() {
+                if (!SleepTimer.isArmed()) {
+                    paintTimer()
+                    return
+                }
+                if (SleepTimer.remainingMs() <= 0L) {
+                    SleepTimer.disarm()
+                    player.pause()
+                    paintTimer()
+                } else {
+                    sleepHandler.postDelayed(this, 1_000L)
+                }
+            }
+        }
+        timer.setOnClickListener { anchor ->
+            val menu = PopupMenu(activity, anchor, Gravity.END)
+            menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed()
+            listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
+                menu.menu.add(0, index + 1, index + 1, "$minutes 分钟")
+            }
+            menu.menu.add(0, 99, 99, "本集结束后停止")
+            menu.menu.setGroupCheckable(0, true, false)
+            menu.setOnMenuItemClickListener { item ->
+                sleepHandler.removeCallbacks(sleepTick)
+                when (item.itemId) {
+                    0 -> SleepTimer.disarm()
+                    99 -> SleepTimer.armStopAfterCurrent()
+                    else -> {
+                        SleepTimer.arm(listOf(15, 30, 45, 60)[item.itemId - 1])
+                        sleepHandler.postDelayed(sleepTick, 1_000L)
+                    }
+                }
+                paintTimer()
+                true
+            }
+            menu.show()
+        }
+        paintTimer()
         val topBar = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -413,6 +469,7 @@ internal class VideoPlaybackPage(
                 LinearLayout.LayoutParams(dp(44), dp(44)),
             )
             addView(title, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(timer, LinearLayout.LayoutParams(dp(44), dp(44)))
             addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
             addView(audioOnly, LinearLayout.LayoutParams(dp(44), dp(44)))
             addView(courseButton, LinearLayout.LayoutParams(dp(44), dp(44)))
@@ -441,7 +498,8 @@ internal class VideoPlaybackPage(
             addView(embeddedCourses, FrameLayout.LayoutParams(-1, -1))
             addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
         }
-        val videoFrame = video.findViewById<View>(androidx.media3.ui.R.id.exo_content_frame)
+        // 兜底到 PlayerView 自身：万一以后换布局少了 content_frame，也不至于整个播放器崩掉
+        val videoFrame = video.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_content_frame) ?: video
         fun arrangePlayer() {
             val top = if (immersive) 0 else dp(52)
             val controlsHeight = dp(98)
@@ -491,7 +549,145 @@ internal class VideoPlaybackPage(
         refreshArrange = { arrangePlayer() }
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> arrangePlayer() }
         arrangePlayer()
+        // ── 手势（仅全屏态生效）：左右滑进度 / 双击播放暂停 / 长按倍速 / 左亮度·右音量 ──
+        val audioManager = activity.getSystemService(android.media.AudioManager::class.java)
+        val hint = TextView(activity).apply {
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            gravity = Gravity.CENTER
+            // 固定最小宽度：文案变短时视图不缩，避免残留上一帧的像素
+            minWidth = dp(200)
+            setBackgroundResource(R.drawable.bg_video_chip)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            visibility = View.GONE
+        }
+        // 放在上方：中央位置是「正在缓冲…」提示，两者会叠在一起
+        content.addView(
+            hint,
+            FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(76) },
+        )
+        val hideHint = Runnable { hint.visibility = View.GONE }
+        fun showHint(text: String) {
+            hint.text = text
+            hint.visibility = View.VISIBLE
+            hint.removeCallbacks(hideHint)
+            hint.postDelayed(hideHint, 900)
+        }
+        var gestureMode = 0        // 0=未定 1=进度 2=亮度/音量
+        var downX = 0f
+        var downY = 0f
+        var seekBase = 0L
+        var seekTarget = 0L
+        var brightBase = -1f
+        var volumeBase = -1
+        var maxVolume = 1
+        var gestureSide = 0        // 1=左半屏亮度 2=右半屏音量
+        var speedBase = 1f
+        var speedHeld = false
+        var controllerVisible = true
+        val gestureDetector = GestureDetector(activity, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDown(e: MotionEvent) = true
+
+            // 手势层吃掉了触摸，PlayerView 自己不会再切控制条，这里补上单击显隐。
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                if (controllerVisible) video.hideController() else video.showController()
+                return true
+            }
+
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) {
+                    player.pause()
+                } else {
+                    if (player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition()
+                    player.play()
+                }
+                return true
+            }
+
+            override fun onLongPress(e: MotionEvent) {
+                gestureMode = 0
+                speedBase = player.playbackParameters.speed
+                speedHeld = true
+                player.setPlaybackParameters(PlaybackParameters(2f))
+                paintSpeed()
+                showHint("松开恢复 ${PlaybackSpeed.label(speedBase)}")
+            }
+        })
+        // 位移用原始坐标差计算（不走 GestureDetector.onScroll）：快速滑动会被识别成 fling，
+        // onScroll 提前终止，累计距离会严重偏小。
+        val gestureLayer = View(activity).apply {
+            isClickable = true
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            visibility = View.GONE
+            setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downX = event.x
+                        downY = event.y
+                        gestureMode = 0
+                        gestureSide = 0
+                        brightBase = -1f
+                        volumeBase = -1
+                        speedHeld = false
+                    }
+
+                    MotionEvent.ACTION_MOVE -> if (!speedHeld) {
+                        val width = video.width.coerceAtLeast(1)
+                        val height = video.height.coerceAtLeast(1)
+                        val totalX = event.x - downX
+                        val totalY = event.y - downY
+                        if (gestureMode == 0 && (abs(totalX) >= dp(10) || abs(totalY) >= dp(10))) {
+                            gestureMode = if (abs(totalX) > abs(totalY)) 1 else 2
+                            seekBase = player.currentPosition
+                            seekTarget = seekBase
+                            if (gestureMode == 2) {
+                                gestureSide = if (downX < width / 2f) 1 else 2
+                                val current = dialog.window?.attributes?.screenBrightness ?: -1f
+                                brightBase = if (current > 0f) current else 0.5f
+                                volumeBase = audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                                maxVolume = audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                            }
+                        }
+                        if (gestureMode == 1) {
+                            val duration = player.duration
+                            if (duration > 0) {
+                                seekTarget = (seekBase + (totalX / width * duration)).toLong().coerceIn(0L, duration)
+                                val sign = if (seekTarget >= seekBase) "+" else "-"
+                                val delta = abs(seekTarget - seekBase) / 1000
+                                val ss = (delta % 60).toString().padStart(2, '0')
+                                showHint("$sign${delta / 60}:$ss  ${formatAudioTime((seekTarget / 1000).toInt())}")
+                            }
+                        } else if (gestureMode == 2) {
+                            // 上滑增大，下滑减小
+                            val ratio = (-totalY / height).coerceIn(-1f, 1f)
+                            if (gestureSide == 1) {
+                                val value = (brightBase + ratio).coerceIn(0.01f, 1f)
+                                dialog.window?.let { w -> w.attributes = w.attributes.apply { screenBrightness = value } }
+                                showHint("亮度 ${(value * 100).toInt()}%")
+                            } else {
+                                val value = (volumeBase + (ratio * maxVolume).toInt()).coerceIn(0, maxVolume)
+                                audioManager.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, value, 0)
+                                showHint("音量 ${value * 100 / maxVolume}%")
+                            }
+                        }
+                    }
+
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (gestureMode == 1 && player.duration > 0) player.seekTo(seekTarget)
+                        if (player.playbackParameters.speed != speedBase) {
+                            player.setPlaybackParameters(PlaybackParameters(speedBase))
+                            paintSpeed()
+                        }
+                        gestureMode = 0
+                        speedHeld = false
+                    }
+                }
+                gestureDetector.onTouchEvent(event)
+            }
+        }
+        videoFrame.addView(gestureLayer, FrameLayout.LayoutParams(-1, -1))
         video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
+            controllerVisible = visibility == View.VISIBLE
             topBar.visibility = if (immersive) visibility else View.VISIBLE
         })
         var orientationRequested = startFullscreen && activity.requestedOrientation != orientationBeforeFullscreen
@@ -499,7 +695,9 @@ internal class VideoPlaybackPage(
             immersive = enabled
             arrangePlayer()
             fullscreen.setImageResource(if (enabled) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
-            video.controllerHideOnTouch = enabled
+            video.controllerHideOnTouch = false
+            gestureLayer.visibility = if (enabled) View.VISIBLE else View.GONE
+            if (!enabled) hint.visibility = View.GONE
             video.controllerShowTimeoutMs = if (enabled) 3_000 else 0
             if (enabled && shouldRotateForFullscreen()) {
                 activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
@@ -525,6 +723,7 @@ internal class VideoPlaybackPage(
             if (orientationRequested && !keepOrientationOnClose && !activity.isDestroyed && !activity.isFinishing) {
                 activity.requestedOrientation = orientationBeforeFullscreen
             }
+            sleepHandler.removeCallbacks(sleepTick)
             video.removeCallbacks(checkpoint)
             saveProgress()
             video.player = null
@@ -571,7 +770,11 @@ internal class VideoPlaybackPage(
                     progress.edit().remove(progressKey).remove(legacyProgressKey).apply()
                     history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
                     readyToSave = false
-                    video.post { if (canAutoAdvance()) onEnded(snapshot()) }
+                    video.post {
+                        if (!canAutoAdvance()) return@post
+                        if (SleepTimer.consumeStopAfterCurrent()) return@post
+                        onEnded(snapshot())
+                    }
                 }
                 if (player.playerError != null) return
                 message.visibility = if (listening || !rendered || playbackState == Player.STATE_BUFFERING) {

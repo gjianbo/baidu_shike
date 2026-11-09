@@ -97,6 +97,21 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         return existing?.entries != fresh || existing.nextCursor != nextCursor
     }
 
+    /** 从指定目录缓存中移除若干条目（删除后立即从列表消失，避免异步任务落盘延迟）。 */
+    fun removeEntries(key: String, entries: List<PanEntry>) {
+        if (entries.isEmpty()) return
+        val ids = entries.map(::idOf).toHashSet()
+        var page = 1
+        while (true) {
+            val cached = readPage(key, page) ?: break
+            val filtered = cached.entries.filterNot { idOf(it) in ids }
+            if (filtered.size != cached.entries.size) {
+                write(key, page, filtered, cached.nextCursor, cached.latestEmpty)
+            }
+            page++
+        }
+    }
+
     /** 已缓存网盘文件的内容指纹（md5:size），用于「已转存」匹配。 */
     fun diskIndex(): Set<String> {
         val prefix = AccountScope.prefix()
@@ -145,6 +160,21 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         val at = readPage(key, 1)?.syncedAt ?: return ""
         if (at <= 0) return ""
         return SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(at))
+    }
+
+    /** 清除当前账号下所有「我的网盘」目录缓存（写操作成功后调用）。 */
+    fun clearDisk() {
+        val prefix = AccountScope.prefix()
+        val editor = preferences.edit()
+        preferences.all.keys.filter { stored ->
+            if (!stored.startsWith(prefix)) {
+                false
+            } else {
+                val key = stored.removePrefix(prefix).substringBeforeLast(':')
+                key == "disk:roots" || key.startsWith("disk:dir:")
+            }
+        }.forEach { editor.remove(it) }
+        editor.apply()
     }
 
     fun clear(key: String) = clearAfter(key, 0)

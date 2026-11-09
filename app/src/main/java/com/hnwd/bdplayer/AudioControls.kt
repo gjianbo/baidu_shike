@@ -18,6 +18,7 @@ internal class AudioControls(
     private val context: Context,
     private val title: String,
     private val setPlaying: (Boolean) -> Unit,
+    private val seekBy: (Int) -> Unit,
 ) {
     private val session = MediaSession(context, "GroupPlayer")
     private val notifications = context.getSystemService(NotificationManager::class.java)
@@ -30,9 +31,16 @@ internal class AudioControls(
     )
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == command) setPlaying(intent.getBooleanExtra("play", false))
+            if (intent.action != command) return
+            val delta = intent.getIntExtra("seek", 0)
+            if (delta != 0) seekBy(delta) else setPlaying(intent.getBooleanExtra("play", false))
         }
     }
+    private fun seekIntent(requestCode: Int, delta: Int) = PendingIntent.getBroadcast(
+        context, requestCode,
+        Intent(command).setPackage(context.packageName).putExtra("seek", delta),
+        PendingIntent.FLAG_IMMUTABLE,
+    )
 
     init {
         ContextCompat.registerReceiver(
@@ -47,6 +55,8 @@ internal class AudioControls(
         session.setCallback(object : MediaSession.Callback() {
             override fun onPlay() = setPlaying(true)
             override fun onPause() = setPlaying(false)
+            override fun onFastForward() = seekBy(SEEK_SECONDS)
+            override fun onRewind() = seekBy(-SEEK_SECONDS)
         })
     }
 
@@ -55,7 +65,11 @@ internal class AudioControls(
     fun update(playing: Boolean, seconds: Int) {
         session.setPlaybackState(
             PlaybackState.Builder()
-                .setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_PLAY_PAUSE)
+                .setActions(
+                    PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                        PlaybackState.ACTION_PLAY_PAUSE or
+                        PlaybackState.ACTION_FAST_FORWARD or PlaybackState.ACTION_REWIND,
+                )
                 .setState(
                     if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
                     seconds * 1000L, if (playing) 1f else 0f,
@@ -79,8 +93,20 @@ internal class AudioControls(
                 .setContentIntent(open)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setOnlyAlertOnce(true)
+                .addAction(
+                    Notification.Action.Builder(
+                        android.graphics.drawable.Icon.createWithResource(context, android.R.drawable.ic_media_rew),
+                        "快退 $SEEK_SECONDS 秒", seekIntent(3, -SEEK_SECONDS),
+                    ).build(),
+                )
                 .addAction(Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(context, icon), label, toggle).build())
-                .setStyle(Notification.MediaStyle().setMediaSession(session.sessionToken).setShowActionsInCompactView(0))
+                .addAction(
+                    Notification.Action.Builder(
+                        android.graphics.drawable.Icon.createWithResource(context, android.R.drawable.ic_media_ff),
+                        "快进 $SEEK_SECONDS 秒", seekIntent(4, SEEK_SECONDS),
+                    ).build(),
+                )
+                .setStyle(Notification.MediaStyle().setMediaSession(session.sessionToken).setShowActionsInCompactView(0, 1, 2))
                 .build(),
         )
     }
@@ -94,5 +120,6 @@ internal class AudioControls(
     private companion object {
         const val CHANNEL = "audio_playback"
         const val NOTIFICATION_ID = 1
+        const val SEEK_SECONDS = 30
     }
 }

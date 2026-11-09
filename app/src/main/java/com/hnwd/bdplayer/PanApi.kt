@@ -156,7 +156,7 @@ internal object PanApi {
         return Base64.encodeToString(hex.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
     }
 
-    fun viewer() = api("/api/gettemplatevariable", "fields" to "[\"uk\"]")
+    fun viewer() = api("/api/gettemplatevariable", "fields" to "[\"uk\",\"username\"]")
 
     fun groupListSession() = api("/api/gettemplatevariable", "fields" to "[\"uk\",\"bdstoken\"]")
 
@@ -249,7 +249,7 @@ internal object PanApi {
     )
 
     fun parseDiskList(json: JSONObject): List<PanEntry> =
-        json.optJSONArray("list")?.objects().orEmpty().mapNotNull(::diskEntry)
+        json.getJSONArray("list").objects().mapNotNull(::diskEntry)
 
     fun diskSearch(token: String, keyword: String, dir: String = "/", page: Int = 1, num: Int = 100) = api(
         "/api/search", "channel" to "chunlei", "bdstoken" to token, "dir" to dir,
@@ -275,8 +275,11 @@ internal object PanApi {
         )
     }
 
+    fun hasMore(json: JSONObject): Boolean =
+        json.optBoolean("has_more") || json.optInt("has_more") != 0
+
     fun diskHasMore(json: JSONObject, num: Int): Boolean =
-        json.optJSONArray("list")?.length() == num || json.optInt("has_more") == 1
+        json.getJSONArray("list").length() >= num || hasMore(json)
 
     fun diskVideoPlaylist(entry: PanEntry): Uri = diskStreaming(entry, "M3U8_AUTO_480", "")
 
@@ -297,6 +300,184 @@ internal object PanApi {
         val uri = Uri.parse(json.getJSONArray("dlink").getJSONObject(0).getString("dlink"))
         check(isFileLink(uri)) { "网盘未返回有效的原始文件地址。" }
         return uri
+    }
+
+    // ===================== 网盘文件管理（写操作） =====================
+    // 所有写操作都在隐藏 WebView 内同源 fetch（Cookie 自动带），需要 bdstoken；
+    // errno=0 视为成功。接口无契约，失败都要能回退成明确提示、不破坏已有缓存。
+
+    /** 写操作请求：完整 URL + x-www-form-urlencoded 表单体。 */
+    internal data class WriteRequest(val url: String, val form: String)
+
+    /** 拼接网盘路径，dir 为 "/" 或空时返回根下的 name。 */
+    fun diskPath(dir: String, name: String): String {
+        val base = dir.trimEnd('/')
+        return if (base.isEmpty()) "/$name" else "$base/$name"
+    }
+
+    /** 取父目录；"/a/b.txt" -> "/a"，"/a" -> "/"。 */
+    fun parentPath(path: String): String =
+        path.trimEnd('/').substringBeforeLast('/', "").ifEmpty { "/" }
+
+    private fun form(vararg pairs: Pair<String, String>): String =
+        pairs.joinToString("&") { (key, value) -> "$key=${URLEncoder.encode(value, "UTF-8")}" }
+
+    /** fs_id 用数字提交更稳；非数字时退回字符串。 */
+    private fun fsidValue(id: String): Any = id.toLongOrNull() ?: id
+
+    private fun fsidArray(ids: List<String>): JSONArray {
+        val array = JSONArray()
+        ids.forEach { id -> array.put(fsidValue(id)) }
+        return array
+    }
+
+    /** 新建文件夹：POST /api/create，isdir=1。 */
+    fun createFolder(token: String, path: String): WriteRequest = WriteRequest(
+        api("/api/create", "channel" to "chunlei", "bdstoken" to token),
+        form("path" to path, "isdir" to "1", "block_list" to "[]", "size" to "0"),
+    )
+
+    /** /api/filemanager 统一入口；filelist 为 JSON 数组字符串。 */
+    fun fileManager(
+        token: String, opera: String, filelist: String, ondup: String = "",
+    ): WriteRequest = WriteRequest(
+        api("/api/filemanager", "channel" to "chunlei", "bdstoken" to token, "opera" to opera),
+        if (ondup.isEmpty()) form("async" to "0", "filelist" to filelist)
+        else form("async" to "0", "filelist" to filelist, "ondup" to ondup),
+    )
+
+    fun renameItem(token: String, entry: PanEntry, newName: String): WriteRequest =
+        fileManager(
+            token, "rename",
+            JSONArray().put(
+                JSONObject().put("id", fsidValue(entry.fileId)).put("path", entry.path).put("newname", newName),
+            ).toString(),
+        )
+
+    fun moveItem(token: String, entry: PanEntry, destDir: String): WriteRequest =
+        fileManager(
+            token, "move",
+            JSONArray().put(
+                JSONObject().put("id", fsidValue(entry.fileId)).put("path", entry.path)
+                    .put("dest", destDir).put("newname", entry.name),
+            ).toString(),
+            ondup = "fail",
+        )
+
+    fun copyItem(token: String, entry: PanEntry, destDir: String, newName: String): WriteRequest =
+        fileManager(
+            token, "copy",
+            JSONArray().put(
+                JSONObject().put("path", entry.path).put("dest", destDir)
+                    .put("newname", newName).put("ondup", "newcopy"),
+            ).toString(),
+            ondup = "newcopy",
+        )
+
+    fun moveItems(token: String, entries: List<PanEntry>, destDir: String): WriteRequest {
+        val list = JSONArray()
+        entries.forEach { entry ->
+            list.put(
+                JSONObject().put("id", fsidValue(entry.fileId)).put("path", entry.path)
+                    .put("dest", destDir).put("newname", entry.name),
+            )
+        }
+        return fileManager(token, "move", list.toString(), ondup = "fail")
+    }
+
+    fun copyItems(token: String, entries: List<PanEntry>, destDir: String): WriteRequest {
+        val list = JSONArray()
+        entries.forEach { entry ->
+            list.put(
+                JSONObject().put("path", entry.path).put("dest", destDir)
+                    .put("newname", entry.name).put("ondup", "newcopy"),
+            )
+        }
+        return fileManager(token, "copy", list.toString(), ondup = "newcopy")
+    }
+
+    /** 删除走后台任务；errno=0 只代表请求已受理。 */
+    fun deleteItems(token: String, entries: List<PanEntry>): WriteRequest {
+        val paths = JSONArray()
+        entries.forEach { entry -> paths.put(entry.path) }
+        return WriteRequest(
+            api(
+                "/api/filemanager", "channel" to "chunlei", "bdstoken" to token,
+                "opera" to "delete", "async" to "2", "onnest" to "fail", "newVerify" to "1",
+            ),
+            form("filelist" to paths.toString()),
+        )
+    }
+
+    /** filemanager 可能在外层成功时仍返回单项错误。 */
+    fun writeErrno(json: JSONObject): Int {
+        val errno = json.getInt("errno")
+        if (errno != 0) return errno
+        val items = json.optJSONArray("info") ?: return 0
+        return (0 until items.length()).asSequence()
+            .map { items.optJSONObject(it)?.optInt("errno") ?: 0 }
+            .firstOrNull { it != 0 } ?: 0
+    }
+
+    /** 创建分享链接：POST /share/set。period：0 永久 / 1 天 / 7 天。 */
+    fun shareSet(token: String, fileIds: List<String>, period: Int, pwd: String): WriteRequest =
+        WriteRequest(
+            api("/share/set", "channel" to "chunlei"),
+            form(
+                "fid_list" to fsidArray(fileIds).toString(), "schannel" to "4",
+                "period" to period.toString(), "pwd" to pwd, "bdstoken" to token,
+            ),
+        )
+
+    internal data class ShareInfo(val link: String, val pwd: String)
+
+    fun parseShare(json: JSONObject): ShareInfo? {
+        val sources = listOfNotNull(json, json.optJSONObject("data"))
+        val link = sources.asSequence()
+            .flatMap { obj -> sequenceOf("link", "shortlink", "shorturl", "url").map(obj::optString) }
+            .firstOrNull { it.startsWith("http") } ?: return null
+        val pwd = sources.asSequence()
+            .flatMap { obj -> sequenceOf("pwd", "passwd", "extract_code").map(obj::optString) }
+            .firstOrNull { it.isNotEmpty() }.orEmpty()
+        return ShareInfo(link, pwd)
+    }
+
+    /**
+     * 群文件转存到我的网盘（best-effort）。
+     * 群文件不是公开分享链接，这里按 messageId/owner 走 /api/transfer，属于待设备回归的接口。
+     */
+    fun transferFromGroup(token: String, entry: PanEntry, destDir: String): WriteRequest = WriteRequest(
+        api("/api/transfer", "channel" to "chunlei", "bdstoken" to token),
+        form(
+            "shareid" to entry.messageId, "from" to entry.owner,
+            "ondup" to "newcopy", "async" to "2", "path" to destDir,
+            "fsidlist" to fsidArray(listOf(entry.fileId)).toString(),
+        ),
+    )
+
+    /** 写操作错误码 -> 中文提示（op 用于补充上下文）。 */
+    fun writeError(op: String, errno: Int, json: JSONObject): String {
+        val show = sequenceOf("show_msg", "error_msg", "message")
+            .map { json.optString(it) }.firstOrNull { it.isNotBlank() }?.trim()?.take(60).orEmpty()
+        val hint = when (errno) {
+            0 -> ""
+            -6 -> "登录态已失效，请重新登录百度网盘"
+            -7, -8 -> "同名文件或文件夹已存在"
+            -9 -> "文件不存在或已被移动"
+            3, 31066 -> "文件名不合法（不能包含 / \\ : * ? \" < > | 等字符）"
+            4 -> "网盘空间不足"
+            12 -> "已有转存任务在进行，请稍后再试"
+            111 -> "分享/转存任务已存在"
+            132 -> "百度网盘要求安全验证（平台风控）"
+            -20 -> "百度网盘拒绝了此次请求"
+            else -> "网盘请求失败"
+        }
+        val base = if (hint.isEmpty()) "「$op」失败" else "$op：$hint"
+        val tail = buildString {
+            append("（错误码 $errno）")
+            if (show.isNotEmpty()) append(" · 网盘提示：$show")
+        }
+        return base + tail
     }
 
     private fun diskStreaming(entry: PanEntry, streamType: String, token: String): Uri {
@@ -373,13 +554,18 @@ internal object PanApi {
         val records = json.getJSONObject("records")
         if (isContactSource(gid)) {
             return records.getJSONArray("list").objects().flatMap { message ->
-                val files = message.optJSONObject("filelist")?.optJSONArray("list")
-                    ?: message.optJSONObject("xfilelist")?.optJSONArray("list")
-                    ?: message.optJSONArray("file_list")
                 val messageId = message.optString("msg_id")
                 val owner = message.optString("from_uk")
-                if (messageId.isBlank() || owner.isBlank()) return@flatMap emptyList()
-                files?.objects().orEmpty().map { file -> entry(file, gid, messageId, owner) }
+                if (message.isNull("msg_id") || messageId.isBlank() ||
+                    message.isNull("from_uk") || owner.isBlank()
+                ) return@flatMap emptyList()
+                listOfNotNull(
+                    message.optJSONObject("filelist")?.optJSONArray("list"),
+                    message.optJSONObject("xfilelist")?.optJSONArray("list"),
+                    message.optJSONArray("file_list"),
+                ).flatMap { it.objects() }
+                    .distinctBy { it.getString("fs_id") }
+                    .map { file -> entry(file, gid, messageId, owner) }
             }
         }
         return records.getJSONArray("msg_list").objects().flatMap { message ->

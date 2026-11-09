@@ -1,6 +1,8 @@
 package com.hnwd.bdplayer
 
 import android.app.Dialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.res.ColorStateList
@@ -29,6 +31,7 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -73,6 +76,7 @@ import org.json.JSONTokener
 
 private const val CACHE_TTL_MS = 30 * 60 * 1000L
 private const val HOME_RECHECK_COOLDOWN_MS = 30 * 1000L
+private const val MAX_GLOBAL_SEARCH_HITS = 1000
 private const val API_PAGE = "https://${PanApi.HOST}/__shike_api"
 
 class MainActivity : AppCompatActivity() {
@@ -90,6 +94,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sectionRow: LinearLayout
     private lateinit var sectionTitle: TextView
     private lateinit var sortButton: TextView
+    private lateinit var btnSelect: TextView
+    private lateinit var batchBar: View
+    private lateinit var batchCount: TextView
+    private lateinit var batchAll: TextView
+    private lateinit var batchFav: TextView
+    private lateinit var batchDone: TextView
+    private lateinit var batchMove: TextView
+    private lateinit var batchCopy: TextView
+    private lateinit var batchDelete: TextView
+    private lateinit var btnDiskNewFolder: View
     private lateinit var crumbsScroll: View
     private lateinit var crumbsRow: LinearLayout
     private lateinit var filterBar: View
@@ -98,6 +112,15 @@ class MainActivity : AppCompatActivity() {
     private var transferredOnly = false
     private var diskIndexCache: Set<String>? = null
     private val diskSearchFingerprints = mutableSetOf<String>()
+
+    /**
+     * 已提交删除、但服务端异步任务可能尚未落盘的路径，按目录缓存键分组。
+     * 任何一次目录读取都会把这些路径过滤掉，避免「已删除」之后又被服务端旧数据刷回来。
+     */
+    private var diskWriteInFlight = false
+    private var deleteCheckInFlight = false
+    private var writeRequestId = 0
+    private var deleteCheckRequestId = 0
     private lateinit var navRoots: List<View>
     private lateinit var historyPanel: LinearLayout
     private lateinit var nowPlaying: View
@@ -155,6 +178,12 @@ class MainActivity : AppCompatActivity() {
     private var showingHomeDirectory = false
     private lateinit var mediaChips: List<TextView>
 
+    // V02-2 批量操作
+    private var selectionMode = false
+    private val selectedKeys = LinkedHashSet<String>()
+    private var selectionScreen: Screen? = null
+    private var lastRenderedEntries: List<PanEntry> = emptyList()
+
     private enum class CourseOrder(val label: String) {
         ASCENDING("名称升序"),
         DESCENDING("名称降序"),
@@ -169,11 +198,19 @@ class MainActivity : AppCompatActivity() {
     private val folders = mutableListOf<PanEntry>()
     private val courseEntries = mutableListOf<PanEntry>()
     private var courseParentKey = ""
-    private data class FolderPosition(val scrollY: Int, val filter: MediaFilter, val transferredOnly: Boolean)
+    private data class FolderPosition(
+        val scrollY: Int,
+        val filter: MediaFilter,
+        val transferredOnly: Boolean,
+    )
     private val folderPositions = mutableMapOf<List<String>, FolderPosition>()
-    private enum class RequestLane { LIST, SEARCH, COURSE, AUDIO, RENEWAL }
+    private enum class RequestLane { LIST, SEARCH, COURSE, AUDIO, RENEWAL, WRITE, DELETE_CHECK }
     private var searchRequestId = 0
     private var searchDialog: Dialog? = null
+
+    private enum class SearchScope(val label: String) { DISK("我的网盘"), GROUP("群组"), ALL("全部") }
+    private data class SearchTarget(val scope: SearchScope, val sourceId: String, val name: String)
+    private var searchScope = SearchScope.DISK
     private var courseRequestId = 0
     private var automaticCourseLoad: PanEntry? = null
     private var historyRefreshScheduled = false
@@ -218,6 +255,8 @@ class MainActivity : AppCompatActivity() {
     private var loginPending = false
     private var pickingSource = false
     private var verifiedAccount = ""
+    private var verifiedAccountName = ""
+    private var verifiedAccountAvatar = ""
     private var accountProbeId = 0
     private var renewalRequestId = 0
     private var renewingPlaybackId: String? = null
@@ -477,6 +516,24 @@ class MainActivity : AppCompatActivity() {
             }
         }
         sortButton.setOnClickListener { showCourseSort() }
+        btnSelect = shell.findViewById(R.id.btnSelect)
+        batchBar = shell.findViewById(R.id.batchBar)
+        batchCount = shell.findViewById(R.id.batchCount)
+        batchAll = shell.findViewById(R.id.batchAll)
+        batchFav = shell.findViewById(R.id.batchFav)
+        batchDone = shell.findViewById(R.id.batchDone)
+        btnSelect.setOnClickListener { enterSelection() }
+        batchAll.setOnClickListener { selectAllVisible() }
+        batchFav.setOnClickListener { batchFavoriteSelected() }
+        batchDone.setOnClickListener { exitSelection() }
+        batchMove = shell.findViewById(R.id.batchMove)
+        batchCopy = shell.findViewById(R.id.batchCopy)
+        batchDelete = shell.findViewById(R.id.batchDelete)
+        batchMove.setOnClickListener { batchMoveSelected() }
+        batchCopy.setOnClickListener { batchCopySelected() }
+        batchDelete.setOnClickListener { batchDeleteSelected() }
+        btnDiskNewFolder = shell.findViewById(R.id.btnDiskNewFolder)
+        btnDiskNewFolder.setOnClickListener { promptNewFolder() }
         nowPlaying.setOnClickListener { controller?.let { showPlayback(it) } }
         nowPlaying.findViewById<View>(R.id.miniClose).setOnClickListener { stopBackgroundAudio() }
         nowPlaying.findViewById<View>(R.id.miniPlay).setOnClickListener {
@@ -708,6 +765,7 @@ class MainActivity : AppCompatActivity() {
     }.getOrDefault(emptyList())
 
     private fun showScreen(target: Screen) {
+        clearSelectionIfActive()
         if (screen == target) {
             contentScroll.scrollTo(0, 0)
             refresh()
@@ -768,7 +826,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateNav() {
         val screens = listOf(Screen.HOME, Screen.DISK, Screen.GROUPS, Screen.SETTINGS)
         val active = if (screen == Screen.FAVORITES) screens.indexOf(favoritesOrigin) else screens.indexOf(screen)
-        val titles = listOf("首页", "网盘", "文件库", "设置")
+        val titles = listOf("首页", "网盘", "群组", "设置")
         val icons = listOf(R.drawable.ic_home, R.drawable.ic_cloud, R.drawable.ic_users, R.drawable.ic_settings)
         navRoots.forEachIndexed { index, root ->
             val on = index == active
@@ -793,6 +851,7 @@ class MainActivity : AppCompatActivity() {
         btnFavorites.visibility = if (screen == Screen.DISK || screen == Screen.GROUPS) View.VISIBLE else View.GONE
         btnBack.visibility = if (screen == Screen.FAVORITES) View.VISIBLE else View.GONE
         appSub.visibility = when {
+            screen == Screen.HOME && hasVerifiedAccount() && verifiedAccountName.isNotBlank() -> View.VISIBLE
             screen == Screen.DISK -> View.VISIBLE
             browsing && (folders.isNotEmpty() || !hasVerifiedAccount()) -> View.VISIBLE
             else -> View.GONE
@@ -801,6 +860,10 @@ class MainActivity : AppCompatActivity() {
         searchButton.visibility = if (hasVerifiedAccount() &&
             ((screen == Screen.GROUPS && gid.isNotEmpty() && !isContactSource(gid)) || screen == Screen.DISK)
         ) View.VISIBLE else View.GONE
+        if (::btnDiskNewFolder.isInitialized) {
+            val diskManage = screen == Screen.DISK && hasVerifiedAccount()
+            btnDiskNewFolder.visibility = if (diskManage) View.VISIBLE else View.GONE
+        }
         title.setTextSize(
             if (screen == Screen.HOME ||
                 ((screen == Screen.DISK || screen == Screen.GROUPS) && folders.isEmpty())
@@ -1072,6 +1135,8 @@ class MainActivity : AppCompatActivity() {
         val label = if (contacts) "联系人" else "群组"
         val account = verifiedAccount
         val candidates = linkedMapOf<String, ShareSource>()
+        val seenPages = mutableSetOf<List<String>>()
+        val idField = if (contacts) "uk" else "gid"
         val pageSize = 20
 
         fun failed() {
@@ -1089,21 +1154,26 @@ class MainActivity : AppCompatActivity() {
             val url = if (contacts) PanApi.contacts(token, start, pageSize) else PanApi.groups(token, start, pageSize)
             load(url, statusHint = "正在读取网盘${label}…", onFailure = ::failed) { json ->
                 val records = json.getJSONArray("records")
-                for (index in 0 until records.length()) {
-                    val item = records.getJSONObject(index)
-                    val id = item.optString(if (contacts) "uk" else "gid")
+                val items = List(records.length(), records::getJSONObject)
+                val freshPage = seenPages.add(items.map { it.optString(idField) })
+                for (item in items) {
+                    val id = item.optString(idField)
                     if (!id.matches(Regex("[0-9]{1,24}"))) continue
                     if (contacts && item.optInt("black_flag") != 0) continue
                     val sourceId = if (contacts) CONTACT_SOURCE_PREFIX + id else id
                     val name = if (contacts) sequenceOf("remark", "display_name", "nick_name", "uname")
-                        .map { item.optString(it, "") }.firstOrNull { it.isNotBlank() } else item.optString("name")
+                        .filterNot(item::isNull).map { item.optString(it, "") }.firstOrNull { it.isNotBlank() } else item.optString("name")
                     candidates[sourceId] = ShareSource(sourceId, name?.takeIf { it.isNotBlank() } ?: "$label $id")
                 }
                 val nextStart = start + records.length()
-                val hasMore = if (json.has("has_more")) json.optInt("has_more") != 0
+                val hasMore = if (!json.isNull("has_more")) PanApi.hasMore(json)
                     else json.optInt("count", nextStart) > nextStart || records.length() == pageSize
-                if (hasMore && records.length() > 0) nextPage(token, nextStart)
-                else showSourcePicker(account, contacts, candidates.values.toList())
+                if (hasMore && items.isNotEmpty() && freshPage) {
+                    nextPage(token, nextStart)
+                } else {
+                    showSourcePicker(account, contacts, candidates.values.toList())
+                    if (hasMore) toast("网盘仅返回了部分${label}，请稍后重试")
+                }
             }
         }
 
@@ -1113,7 +1183,9 @@ class MainActivity : AppCompatActivity() {
                 verifyAndRefresh()
             } else {
                 val token = session.optString("bdstoken")
-                check(token.isNotBlank()) { "网盘未返回通讯录所需的会话参数，请重新登录。" }
+                check(!session.isNull("bdstoken") && token.isNotBlank()) {
+                    "网盘未返回通讯录所需的会话参数，请重新登录。"
+                }
                 nextPage(token, 0)
             }
         }
@@ -1146,12 +1218,12 @@ class MainActivity : AppCompatActivity() {
                 if (hasVerifiedAccount() && verifiedAccount == account) {
                     val candidateIds = candidates.map { it.id }.toSet()
                     val selectedSources = selected.mapNotNull { it.tag as? ShareSource }
-                        .map { existing[it.id]?.takeUnless { source -> source.name == "原群文件库" } ?: it }
+                        .map { it.copy(sessionUrl = existing[it.id]?.sessionUrl.orEmpty()) }
                     val retained = shareSources().filterNot { it.id in candidateIds }
                     val sources = retained + selectedSources
                     val nextGroup = gid.takeIf { current -> sources.any { it.id == current } }
                         ?: selectedSources.firstOrNull()?.id
-                        ?: retained.firstOrNull { it.sessionUrl.isEmpty() }?.id.orEmpty()
+                        ?: retained.firstOrNull()?.id.orEmpty()
                     saveShareSources(sources, nextGroup)
                     activateGroup(nextGroup)
                 }
@@ -1213,6 +1285,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun activateGroup(group: String, returnFromWeb: Boolean = false) {
+        clearSelectionIfActive()
         val changed = group != gid
         setActiveGroup(group)
         tabFolders.remove(Screen.GROUPS)
@@ -1253,18 +1326,63 @@ class MainActivity : AppCompatActivity() {
             toast("网盘正在连接，请稍后再试")
             return
         }
-        val disk = screen == Screen.DISK
-        val group = gid
-        val scope = if (disk) "我的网盘" else shareSources().firstOrNull { it.id == group }?.name ?: "当前文件库"
         val account = verifiedAccount
+        val groups = shareSources().filterNot { isContactSource(it.id) }
+        val scopes = buildList {
+            add(SearchScope.DISK)
+            if (groups.isNotEmpty()) {
+                add(SearchScope.GROUP)
+                add(SearchScope.ALL)
+            }
+        }
+        val stored = getSharedPreferences("app_settings", MODE_PRIVATE)
+            .getString("search_scope", SearchScope.DISK.name)
+        searchScope = SearchScope.entries.firstOrNull { it.name == stored && it in scopes } ?: SearchScope.DISK
         val view = layoutInflater.inflate(R.layout.dialog_search_input, null, false)
         val input = view.findViewById<EditText>(R.id.searchInput)
-        view.findViewById<TextView>(R.id.searchInputSubtitle).text =
-            if (disk) "在我的网盘中搜索" else "在「$scope」中搜索"
-        view.findViewById<TextView>(R.id.searchInputTitle).text =
-            if (disk) "搜索我的网盘" else "搜索文件库"
-        view.findViewById<TextView>(R.id.searchInputScope).text =
-            if (disk) "搜索我的网盘中所有文件" else "搜索整个群文件库"
+        val chipDisk = view.findViewById<TextView>(R.id.scopeDisk)
+        val chipGroup = view.findViewById<TextView>(R.id.scopeGroup)
+        val chipAll = view.findViewById<TextView>(R.id.scopeAll)
+        val scopeHint = view.findViewById<TextView>(R.id.scopeHint)
+        val scopeRow = view.findViewById<View>(R.id.searchScopeRow)
+        val subtitle = view.findViewById<TextView>(R.id.searchInputSubtitle)
+        val titleView = view.findViewById<TextView>(R.id.searchInputTitle)
+        chipGroup.visibility = if (groups.isNotEmpty()) View.VISIBLE else View.GONE
+        chipAll.visibility = if (groups.isNotEmpty()) View.VISIBLE else View.GONE
+        scopeRow.visibility = if (scopes.size > 1) View.VISIBLE else View.GONE
+        fun paintScope() {
+            fun paint(chip: TextView, on: Boolean) {
+                chip.setBackgroundResource(if (on) R.drawable.bg_chip_on else R.drawable.bg_chip)
+                chip.setTextColor(color(if (on) R.color.accentInk else R.color.ink2))
+                chip.isSelected = on
+            }
+            paint(chipDisk, searchScope == SearchScope.DISK)
+            paint(chipGroup, searchScope == SearchScope.GROUP)
+            paint(chipAll, searchScope == SearchScope.ALL)
+            titleView.text = when (searchScope) {
+                SearchScope.DISK -> "搜索我的网盘"
+                SearchScope.GROUP -> "搜索群组"
+                SearchScope.ALL -> "搜索全部"
+            }
+            subtitle.text = when (searchScope) {
+                SearchScope.DISK -> "在我的网盘中搜索"
+                SearchScope.GROUP -> "在已关联的群组文件库中搜索"
+                SearchScope.ALL -> "在群组和我的网盘中搜索"
+            }
+            scopeHint.visibility = if (searchScope == SearchScope.ALL) View.VISIBLE else View.GONE
+            scopeHint.text = "将搜索 ${groups.size} 个群 + 我的网盘，结果可能较多"
+        }
+        fun choose(scope: SearchScope) {
+            if (scope !in scopes) return
+            searchScope = scope
+            getSharedPreferences("app_settings", MODE_PRIVATE).edit()
+                .putString("search_scope", scope.name).apply()
+            paintScope()
+        }
+        chipDisk.setOnClickListener { choose(SearchScope.DISK) }
+        chipGroup.setOnClickListener { choose(SearchScope.GROUP) }
+        chipAll.setOnClickListener { choose(SearchScope.ALL) }
+        paintScope()
         val dialog = Dialog(this)
         dialog.setContentView(view)
         sizeSheet(dialog) { WindowManager.LayoutParams.WRAP_CONTENT }
@@ -1288,10 +1406,8 @@ class MainActivity : AppCompatActivity() {
             }
             getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(input.windowToken, 0)
             dialog.dismiss()
-            if (ready && hasVerifiedAccount() && verifiedAccount == account &&
-                (if (disk) screen == Screen.DISK else gid == group)
-            ) {
-                if (disk) searchDiskFiles(keyword) else searchFiles(group, keyword)
+            if (ready && hasVerifiedAccount() && verifiedAccount == account) {
+                runGlobalSearch(keyword, searchTargets(searchScope), searchScope)
             } else {
                 toast("网盘连接已变化，请重新搜索")
             }
@@ -1309,6 +1425,195 @@ class MainActivity : AppCompatActivity() {
             WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
         )
+    }
+
+    /** V02-1 按范围组装搜索目标：群组 = 全部已关联群组；全部 = 群组 + 我的网盘。 */
+    private fun searchTargets(scope: SearchScope): List<SearchTarget> = buildList {
+        if (scope != SearchScope.DISK) {
+            shareSources().filterNot { isContactSource(it.id) }
+                .forEach { add(SearchTarget(SearchScope.GROUP, it.id, it.name)) }
+        }
+        if (scope != SearchScope.GROUP) {
+            add(SearchTarget(SearchScope.DISK, DISK_SOURCE_ID, "我的网盘"))
+        }
+    }
+
+    /** V02-1 全局搜索：串行遍历各来源（避免 SEARCH 单请求 id 并发互斥），聚合并按来源去重。 */
+    private fun runGlobalSearch(keyword: String, targets: List<SearchTarget>, scope: SearchScope) {
+        val account = verifiedAccount
+        val hits = mutableListOf<PanSearchHit>()
+        val seen = mutableSetOf<String>()
+        val sourceNames = mutableMapOf<String, String>()
+        val view = layoutInflater.inflate(R.layout.dialog_search_results, null, false)
+        val more = view.findViewById<View>(R.id.searchMore)
+        val eyebrow = view.findViewById<TextView>(R.id.searchEyebrow)
+        val keywordTitle = view.findViewById<TextView>(R.id.searchTitle)
+        val summary = view.findViewById<TextView>(R.id.searchSummary)
+        val loading = view.findViewById<View>(R.id.searchLoading)
+        val list = view.findViewById<ListView>(R.id.searchResults)
+        val empty = view.findViewById<View>(R.id.searchEmpty)
+        val emptyTitle = view.findViewById<TextView>(R.id.searchEmptyTitle)
+        val emptyHint = view.findViewById<TextView>(R.id.searchEmptyHint)
+        more.visibility = View.GONE
+        eyebrow.text = "搜索 · ${scope.label}"
+        keywordTitle.text = keyword
+        summary.text = "正在搜索…"
+        loading.visibility = View.VISIBLE
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = hits.size
+            override fun getItem(position: Int) = hits[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView ?: layoutInflater.inflate(R.layout.item_search_hit, parent, false)
+                val hit = hits[position]
+                val entry = hit.entry
+                val kind = PanApi.kindOf(entry)
+                paintMediaIcon(row.findViewById<ImageView>(R.id.searchIcon), kind, entry.directory)
+                row.findViewById<TextView>(R.id.searchName).text = entry.name
+                val location = if (entry.directory) entry.path else hit.parentPath
+                val sourceLabel = if (entry.isDisk) "我的网盘" else sourceNames[entry.gid] ?: "群组"
+                row.findViewById<TextView>(R.id.searchMeta).text =
+                    listOf(sourceLabel, mediaKindLabel(kind, entry.directory, formatOf(entry)), location.ifEmpty { "/" })
+                        .filter { it.isNotEmpty() }.joinToString(" · ")
+                row.findViewById<View>(R.id.searchDivider).visibility =
+                    if (position == hits.lastIndex) View.GONE else View.VISIBLE
+                return row
+            }
+        }
+        list.adapter = adapter
+        val dialog = Dialog(this)
+        dialog.setContentView(view)
+        sizeSheet(dialog) { available ->
+            minOf((available * 0.70f).toInt().coerceIn(dp(320), dp(640)), available - dp(24))
+                .coerceAtLeast(1)
+        }
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.45f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setWindowAnimations(R.style.SearchSheetAnimation)
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        searchDialog = dialog
+        dialog.setOnDismissListener {
+            searchRequestId++
+            searchDialog = null
+        }
+        view.findViewById<ImageView>(R.id.searchClose).setOnClickListener { dialog.dismiss() }
+        fun isCurrent() = searchDialog === dialog && verifiedAccount == account
+        var stopped = false
+        list.setOnItemClickListener { _, _, position, _ ->
+            val hit = hits.getOrNull(position) ?: return@setOnItemClickListener
+            stopped = true
+            val entry = hit.entry
+            if (entry.isDisk) {
+                dialog.dismiss()
+                if (entry.directory) openSourceDirectory(entry)
+                else openEntry(entry, hits.filter { it.entry.isDisk }.map { it.entry })
+            } else {
+                list.isEnabled = false
+                list.alpha = 0.55f
+                loading.visibility = View.VISIBLE
+                summary.text = "正在定位目录…"
+                val group = entry.gid
+                if (group != gid) setActiveGroup(group)
+                locateSearchHit(group, hit) { ok, message ->
+                    if (!isCurrent() || !dialog.isShowing) return@locateSearchHit
+                    list.isEnabled = true
+                    list.alpha = 1f
+                    if (ok) {
+                        dialog.dismiss()
+                    } else {
+                        loading.visibility = View.GONE
+                        summary.text = message ?: "定位失败，请稍后重试"
+                    }
+                }
+            }
+        }
+        dialog.show()
+        var index = 0
+        var failed = 0
+        fun finish() {
+            if (stopped || !isCurrent()) return
+            loading.visibility = View.GONE
+            if (hits.isEmpty()) {
+                empty.visibility = View.VISIBLE
+                list.visibility = View.GONE
+                emptyTitle.text = "没有找到匹配的文件"
+                emptyHint.text = "换个关键词，或缩小搜索范围"
+                summary.text = if (failed > 0) "0 个结果 · $failed 个来源失败" else "0 个结果"
+            } else {
+                empty.visibility = View.GONE
+                list.visibility = View.VISIBLE
+                list.alpha = 1f
+                list.isEnabled = true
+                summary.text = "已找到 ${hits.size} 项" + if (failed > 0) " · $failed 个来源失败" else " · 点选打开"
+            }
+        }
+        fun updateProgress() {
+            if (isCurrent()) summary.text = "已搜 $index/${targets.size} · 已找到 ${hits.size} 项"
+        }
+        fun clampHits() {
+            while (hits.size > MAX_GLOBAL_SEARCH_HITS) hits.removeAt(hits.size - 1)
+        }
+        fun next() {
+            if (stopped || !isCurrent() || !dialog.isShowing) return
+            if (index >= targets.size) {
+                finish()
+                return
+            }
+            val target = targets[index]
+            updateProgress()
+            if (target.scope == SearchScope.DISK) {
+                ensureBdstoken(
+                    onReady = { token ->
+                        if (!isCurrent() || !dialog.isShowing) return@ensureBdstoken
+                        load(
+                            PanApi.diskSearch(token, keyword, page = 1, num = 100), lane = RequestLane.SEARCH,
+                            onCancelled = { failed++; index++; next() },
+                            onFailure = { failed++; index++; next() },
+                        ) { json ->
+                            if (!isCurrent() || !dialog.isShowing) return@load
+                            PanApi.parseDiskSearch(json).forEach { hit ->
+                                if (seen.add("D:${hit.entry.fileId}")) hits.add(hit)
+                            }
+                            clampHits()
+                            adapter.notifyDataSetChanged()
+                            index++
+                            updateProgress()
+                            if (hits.size >= MAX_GLOBAL_SEARCH_HITS) {
+                                finish()
+                                return@load
+                            }
+                            web.postDelayed({ next() }, 150)
+                        }
+                    },
+                    onFailure = { failed++; index++; next() },
+                )
+            } else {
+                sourceNames[target.sourceId] = target.name
+                load(
+                    PanApi.searchGroup(target.sourceId, keyword), post = true, lane = RequestLane.SEARCH,
+                    onCancelled = { failed++; index++; next() },
+                    onFailure = { failed++; index++; next() },
+                ) { json ->
+                    if (!isCurrent() || !dialog.isShowing) return@load
+                    PanApi.parseSearch(json, target.sourceId).take(800).forEach { hit ->
+                        if (seen.add("G:${hit.entry.gid}:${hit.entry.fileId}")) hits.add(hit)
+                    }
+                    clampHits()
+                    adapter.notifyDataSetChanged()
+                    index++
+                    updateProgress()
+                    if (hits.size >= MAX_GLOBAL_SEARCH_HITS) {
+                        finish()
+                        return@load
+                    }
+                    web.postDelayed({ next() }, 150)
+                }
+            }
+        }
+        next()
     }
 
     private fun searchDiskFiles(keyword: String) {
@@ -1635,7 +1940,7 @@ class MainActivity : AppCompatActivity() {
                         return@load
                     }
                 }
-                if (json.optInt("has_more") != 0 && fresh.isNotEmpty()) {
+                if (PanApi.hasMore(json) && fresh.isNotEmpty()) {
                     scanDirectory(entry, page + 1, seen, match, onFound, onMissing)
                 } else {
                     onMissing()
@@ -1718,6 +2023,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun openFolderTrail(group: String, trail: List<PanEntry>) {
         if (!hasVerifiedAccount() || group != gid) return
+        clearSelectionIfActive()
         if (screen == Screen.GROUPS && trail.take(folders.size).map(::entryKey) == folders.map(::entryKey) && trail.size > folders.size) {
             rememberFolderPosition()
         }
@@ -1855,7 +2161,7 @@ class MainActivity : AppCompatActivity() {
             title.text = when (screen) {
                 Screen.SETTINGS -> "设置"
                 Screen.DISK -> "我的网盘"
-                Screen.GROUPS -> "文件库"
+                Screen.GROUPS -> "群组"
                 else -> "首页"
             }
             appSub.text = when (screen) {
@@ -1896,7 +2202,7 @@ class MainActivity : AppCompatActivity() {
             Screen.FAVORITES -> "收藏"
             Screen.SETTINGS -> "设置"
             Screen.DISK -> parent?.name ?: "我的网盘"
-            Screen.GROUPS -> parent?.name ?: "文件库"
+            Screen.GROUPS -> parent?.name ?: "群组"
             else -> parent?.name ?: "首页"
         }
         appSub.text = when {
@@ -1904,7 +2210,8 @@ class MainActivity : AppCompatActivity() {
             screen == Screen.FAVORITES -> "仅保存在本机"
             screen == Screen.SETTINGS -> "外观、备份与本机数据"
             screen == Screen.DISK -> "个人文件 · 已转存内容可直接播放"
-            screen == Screen.GROUPS -> "共享文件库"
+            screen == Screen.GROUPS -> "群组文件库"
+            screen == Screen.HOME -> verifiedAccountName.trim().takeIf { it.isNotEmpty() }?.let { "你好，$it" } ?: ""
             else -> ""
         }
         renderCrumbs()
@@ -2060,12 +2367,19 @@ class MainActivity : AppCompatActivity() {
             onReady(bdstoken)
             return
         }
+        val account = verifiedAccount
         load(
             PanApi.groupListSession(), lane = RequestLane.LIST, statusHint = "正在连接我的网盘…",
             onCancelled = onFailure, onFailure = onFailure,
         ) { json ->
-            val token = json.optJSONObject("result")?.optString("bdstoken").orEmpty()
-            if (token.isEmpty()) {
+            val session = json.getJSONObject("result")
+            if (session.optString("uk") != account) {
+                verifyAndRefresh()
+                onFailure()
+                return@load
+            }
+            val token = session.optString("bdstoken")
+            if (token.isBlank() || session.isNull("bdstoken")) {
                 status.text = "网盘会话参数缺失，请重新登录。"
                 onFailure()
             } else {
@@ -2231,6 +2545,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun openSourceDirectory(entry: PanEntry) {
+        clearSelectionIfActive()
         val target = if (entry.isDisk) Screen.DISK else Screen.GROUPS
         if (!entry.isDisk) {
             if (shareSources().none { it.id == entry.gid }) {
@@ -2444,7 +2759,7 @@ class MainActivity : AppCompatActivity() {
             }
             renderRootMore(key)
             val pagination = if (isContactSource(group)) json.getJSONObject("records") else json
-            if (next.isEmpty() && pagination.optInt("has_more") != 0) {
+            if (next.isEmpty() && PanApi.hasMore(pagination)) {
                 status.text = "网盘未返回可用的分页游标，请刷新后重试。"
             }
         }
@@ -2454,12 +2769,12 @@ class MainActivity : AppCompatActivity() {
         if (isContactSource(sourceId)) {
             val records = json.getJSONObject("records")
             return records.optString("cursor", "").takeIf {
-                records.optInt("has_more") != 0 && !records.isNull("cursor") && it != cursor
+                PanApi.hasMore(records) && !records.isNull("cursor") && it != cursor
             }.orEmpty()
         }
         return json.optString("last_msg_time").takeIf {
             val time = it.toLongOrNull()
-            json.optInt("has_more") != 0 && time != null && time > 0 &&
+            PanApi.hasMore(json) && time != null && time > 0 &&
                 time < (cursor.toLongOrNull() ?: Long.MAX_VALUE)
         }.orEmpty()
     }
@@ -2493,9 +2808,15 @@ class MainActivity : AppCompatActivity() {
         requestId++
         checkingAccount = false
         verifiedAccount = ""
+        verifiedAccountName = ""
+        verifiedAccountAvatar = ""
         bdstoken = ""
         diskIndexCache = null
         diskSearchFingerprints.clear()
+        writeRequestId++
+        deleteCheckRequestId++
+        diskWriteInFlight = false
+        deleteCheckInFlight = false
         mediaCaptchaDialog?.second?.dismiss()
         videoResolver.cancel()
         renewalResolver.cancel()
@@ -2567,13 +2888,19 @@ class MainActivity : AppCompatActivity() {
                         return@evaluateJavascript
                     }
                     val body = runCatching { JSONTokener(raw).nextValue()?.toString() }.getOrNull().orEmpty()
-                    val uk = runCatching {
+                    val result = runCatching {
                         val json = JSONObject(body)
-                        if (json.optInt("errno", -1) == 0) json.optJSONObject("result")?.optString("uk").orEmpty()
-                        else ""
-                    }.getOrDefault("")
+                        if (json.optInt("errno", -1) == 0) json.optJSONObject("result") else null
+                    }.getOrNull()
+                    val uk = result?.optString("uk").orEmpty()
                     val confirmed = uk.matches(Regex("[0-9]{1,24}"))
                     verifiedAccount = uk.takeIf { confirmed }.orEmpty()
+                    verifiedAccountName = if (confirmed) {
+                        result?.optString("netdisk_name").orEmpty().ifBlank {
+                            result?.optString("username").orEmpty()
+                        }
+                    } else ""
+                    verifiedAccountAvatar = if (confirmed) result?.optString("avatar_url").orEmpty() else ""
                     val changed = confirmed && AccountScope.set(this@MainActivity, uk)
                     if (confirmed) controller?.let {
                         it.sendCustomCommand(AudioPlaybackService.SYNC_ACCOUNT, Bundle.EMPTY)
@@ -2644,7 +2971,7 @@ class MainActivity : AppCompatActivity() {
             },
         ) { json ->
             val entries = PanApi.parseChildren(json, parent)
-            val hasMore = json.optInt("has_more") != 0 && entries.isNotEmpty()
+            val hasMore = PanApi.hasMore(json) && entries.isNotEmpty()
             val changed = courseCache.writeIfChanged(key, page, entries, if (hasMore) "more" else "")
             if (changed || !hasMore) courseCache.clearAfter(key, page)
             courseEntries.clear()
@@ -2705,7 +3032,6 @@ class MainActivity : AppCompatActivity() {
         transferredChip.contentDescription = "只看已转存，共 $transferredCount 项"
         filterBar.visibility =
             if (hasFilterOptions(entries) || transferredCount > 0) View.VISIBLE else View.GONE
-        sortButton.visibility = if (sortable && entries.isNotEmpty()) View.VISIBLE else View.GONE
         sortButton.text = courseOrder.label
         val kinds = entries.map(PanApi::kindOf).toSet()
         showAvailableMediaFilters(kinds)
@@ -2721,6 +3047,9 @@ class MainActivity : AppCompatActivity() {
             updateFilterChips()
             val ordered = if (sortable) orderCourses(matching) else matching
             filterCount.text = "共 ${ordered.size} 项"
+            lastRenderedEntries = ordered
+            sortButton.visibility = if (sortable && entries.isNotEmpty() && !selectionMode) View.VISIBLE else View.GONE
+            btnSelect.visibility = if (!selectionMode && sortable && ordered.isNotEmpty()) View.VISIBLE else View.GONE
             rows.removeAllViews()
             extendPlaybackQueue(ordered)
             if (ordered.isEmpty() && entries.isNotEmpty()) rows.addView(label("当前已加载的内容中没有匹配项", 12f))
@@ -2868,7 +3197,7 @@ class MainActivity : AppCompatActivity() {
         ) { json ->
             val files = if (nested) PanApi.parseChildren(json, entry) else PanApi.parseRoots(json, entry.gid)
             val next = if (nested) {
-                if (json.optInt("has_more") != 0 && files.isNotEmpty() && files != cached.entries) "more" else ""
+                if (PanApi.hasMore(json) && files.isNotEmpty() && files != cached.entries) "more" else ""
             } else {
                 nextRootCursor(json, entry.gid, cached.nextCursor.orEmpty())
             }
@@ -3056,13 +3385,720 @@ class MainActivity : AppCompatActivity() {
                 if (mark.second) R.drawable.bg_dot_ok else R.drawable.bg_dot_accent,
             )
         }
-        row.setOnClickListener { openEntry(entry, entries, currentPlaybackListKey()) }
-        if (kind == MediaKind.AUDIO) row.setOnLongClickListener {
-            selectPlayback(entry, entries, currentPlaybackListKey())
-            resolveAudio(entry, PlaybackRoute.WEB_AUDIO)
-            true
+        val check = row.findViewById<ImageView>(R.id.itemCheck)
+        if (selectionMode) {
+            val key = entryKey(entry)
+            check.visibility = View.VISIBLE
+            check.isSelected = key in selectedKeys
+            check.contentDescription = if (check.isSelected) "已选：${entry.name}" else "未选：${entry.name}"
+            row.setOnClickListener { toggleSelection(entry) }
+            row.setOnLongClickListener(null)
+        } else {
+            check.visibility = View.GONE
+            row.setOnClickListener { openEntry(entry, entries, currentPlaybackListKey()) }
+            row.setOnLongClickListener {
+                showEntryActions(entry, entries)
+                true
+            }
         }
         return row
+    }
+
+    // ---- V02-2 批量操作 ----
+
+    private fun visibleSelectionEntries(): List<PanEntry> =
+        lastRenderedEntries.filter { entryKey(it) in selectedKeys }
+
+    private fun enterSelection() {
+        if (selectionMode || lastRenderedEntries.isEmpty()) return
+        selectionMode = true
+        selectionScreen = screen
+        selectedKeys.clear()
+        renderBatchBar()
+        redrawFilteredRows?.invoke()
+    }
+
+    private fun exitSelection() {
+        if (!selectionMode) return
+        selectionMode = false
+        selectionScreen = null
+        selectedKeys.clear()
+        renderBatchBar()
+        redrawFilteredRows?.invoke()
+    }
+
+    /** 离开屏幕/目录时强制退出选择模式（不重绘，交由后续 refresh 完成）。 */
+    private fun clearSelectionIfActive() {
+        if (!selectionMode) return
+        selectionMode = false
+        selectionScreen = null
+        selectedKeys.clear()
+        renderBatchBar()
+    }
+
+    private fun toggleSelection(entry: PanEntry) {
+        val key = entryKey(entry)
+        if (!selectedKeys.add(key)) selectedKeys.remove(key)
+        renderBatchBar()
+        redrawFilteredRows?.invoke()
+    }
+
+    private fun selectAllVisible() {
+        val visible = lastRenderedEntries.map(::entryKey)
+        if (visible.isEmpty()) return
+        if (selectedKeys.containsAll(visible)) selectedKeys.removeAll(visible.toSet())
+        else selectedKeys.addAll(visible)
+        renderBatchBar()
+        redrawFilteredRows?.invoke()
+    }
+
+    private fun batchFavoriteSelected() {
+        val entries = visibleSelectionEntries()
+        if (entries.isEmpty()) {
+            toast("请先选择条目")
+            return
+        }
+        val allStarred = entries.all { favorites.has(it) }
+        if (allStarred) {
+            favorites.removeAll(entries)
+            toast("已取消收藏 ${entries.size} 项")
+        } else {
+            favorites.addAll(entries)
+            toast("已收藏 ${entries.size} 项")
+        }
+        updateFavoritesBadge()
+        exitSelection()
+    }
+
+    // ===================== P2 网盘文件管理 =====================
+
+    private fun currentDiskDir(): String = folders.lastOrNull()?.path ?: "/"
+
+    private fun currentDiskCacheKey(): String =
+        folders.lastOrNull()?.let { "disk:dir:${it.fileId}" } ?: "disk:roots"
+
+    /** 需要 bdstoken 的网盘写操作统一入口。 */
+    private fun runDiskWrite(block: (token: String) -> Unit) {
+        if (!hasVerifiedAccount()) {
+            toast("请先登录百度网盘")
+            return
+        }
+        ensureBdstoken(onReady = { token -> block(token) }, onFailure = { toast("网盘会话未就绪，请刷新重试") })
+    }
+
+    /** 提交写请求；acceptAnyErrno 让我们拿到网盘具体错误码做友好提示。 */
+    private fun submitWrite(op: String, request: PanApi.WriteRequest, onSuccess: (JSONObject) -> Unit) {
+        if (diskWriteInFlight || deleteCheckInFlight) {
+            toast("已有网盘操作正在处理，请稍候")
+            return
+        }
+        diskWriteInFlight = true
+        status.text = "正在${op}…"
+        val session = accountProbeId
+        fun finish(message: String) {
+            if (session == accountProbeId && diskWriteInFlight) {
+                diskWriteInFlight = false
+                status.text = message
+                toast(message)
+            }
+        }
+        load(
+            request.url, post = true, form = request.form, lane = RequestLane.WRITE,
+            acceptAnyErrno = true,
+            onCancelled = { finish("${op}结果未确认，请刷新查看") },
+            onFailure = { finish("${op}结果未确认，请刷新查看") },
+        ) { json ->
+            diskWriteInFlight = false
+            val errno = PanApi.writeErrno(json)
+            if (errno == 132) {
+                showSecurityVerify(op)
+            } else if (errno != 0) {
+                val message = PanApi.writeError(op, errno, json)
+                if (json.getInt("errno") == 0) {
+                    afterDiskMutation("部分项目可能已处理，请查看刷新后的列表。$message")
+                } else {
+                    status.text = message
+                    toast(message)
+                }
+            } else {
+                status.text = ""
+                onSuccess(json)
+            }
+        }
+    }
+
+    /** errno 132：百度对删除等敏感操作强制安全验证，API 无法直接完成，引导去网页验证。 */
+    private fun showSecurityVerify(op: String) {
+        status.text = "百度网盘要求安全验证，「$op」未执行"
+        AlertDialog.Builder(this)
+            .setTitle("需要百度安全验证")
+            .setMessage("百度网盘对部分敏感操作开启了安全验证，本次「$op」未执行。\n\n可打开网盘网页完成一次验证，再回到 App 重试。")
+            .setNegativeButton("知道了", null)
+            .setPositiveButton("打开网盘网页") { _, _ ->
+                showWeb("https://pan.baidu.com/disk/main#/index?category=all")
+            }
+            .show()
+    }
+
+    private fun padded(view: View): View = FrameLayout(this).apply {
+        setPadding(dp(24), dp(8), dp(24), 0)
+        addView(view)
+    }
+
+    private fun formatSize(bytes: Long): String = when {
+        bytes >= 1024L * 1024 -> String.format(Locale.getDefault(), "%.1f MB", bytes / 1048576.0)
+        bytes >= 1024 -> String.format(Locale.getDefault(), "%.1f KB", bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    private fun randomSharePwd(): String {
+        val chars = "abcdefghijkmnpqrstuvwxyz23456789"
+        return (1..4).map { chars.random() }.joinToString("")
+    }
+
+    /** 写操作成功后：清网盘缓存与「已转存」索引，刷新当前页。 */
+    private fun afterDiskMutation(message: String = "操作成功") {
+        diskIndexCache = null
+        diskSearchFingerprints.clear()
+        courseCache.clearDisk()
+        if (screen == Screen.DISK) {
+            courseRequestId++
+            courseEntries.clear()
+            courseParentKey = ""
+            refresh()
+        }
+        toast(message)
+    }
+
+    private fun promptDiskName(title: String, action: String, initial: String, onSave: (String) -> Unit) {
+        val session = accountProbeId
+        val input = EditText(this).apply {
+            hint = "名称"
+            isSingleLine = true
+            setText(initial)
+            setSelection(initial.length)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(padded(input))
+            .setNegativeButton("取消", null)
+            .setPositiveButton(action, null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val name = input.text.toString().trim()
+            when {
+                name.isEmpty() -> input.error = "请输入名称"
+                name == "." || name == ".." || name.any { it in "/\\:*?\"<>|" || it.isISOControl() } ->
+                    input.error = "名称包含网盘不支持的字符"
+                else -> {
+                    dialog.dismiss()
+                    if (session == accountProbeId && name != initial) onSave(name)
+                }
+            }
+        }
+    }
+
+    private fun promptNewFolder() {
+        if (screen != Screen.DISK || !hasVerifiedAccount()) return
+        val dir = currentDiskDir()
+        promptDiskName("新建文件夹", "创建", "") { name ->
+            runDiskWrite { token ->
+                submitWrite("新建文件夹", PanApi.createFolder(token, PanApi.diskPath(dir, name))) {
+                    afterDiskMutation("已创建文件夹")
+                }
+            }
+        }
+    }
+
+    private fun promptRename(entry: PanEntry) {
+        promptDiskName("重命名", "保存", entry.name) { name ->
+            runDiskWrite { token ->
+                submitWrite("重命名", PanApi.renameItem(token, entry, name)) {
+                    afterDiskMutation("已重命名")
+                }
+            }
+        }
+    }
+
+    private fun promptMoveCopy(entry: PanEntry, copy: Boolean) {
+        val verb = if (copy) "复制" else "移动"
+        openFolderPicker("选择${verb}到", blocked = if (entry.directory) setOf(entry.path) else emptySet()) { dest ->
+            if (isSelfOrDescendant(dest, listOf(entry))) {
+                toast("不能${verb}到自身或其子目录")
+                return@openFolderPicker
+            }
+            runDiskWrite { token ->
+                val request = if (copy) PanApi.copyItem(token, entry, dest, entry.name)
+                else PanApi.moveItem(token, entry, dest)
+                submitWrite(verb, request) { afterDiskMutation("已${verb}到 $dest") }
+            }
+        }
+    }
+
+    private fun batchMoveSelected() {
+        val entries = visibleSelectionEntries()
+        if (entries.isEmpty()) {
+            toast("请先选择条目")
+            return
+        }
+        openFolderPicker("移动 ${entries.size} 项到", blocked = entries.filter { it.directory }.map { it.path }.toSet()) { dest ->
+            if (isSelfOrDescendant(dest, entries)) {
+                toast("不能移动到自身或其子目录")
+                return@openFolderPicker
+            }
+            runDiskWrite { token ->
+                submitWrite("移动", PanApi.moveItems(token, entries, dest)) {
+                    exitSelection()
+                    afterDiskMutation("已移动 ${entries.size} 项")
+                }
+            }
+        }
+    }
+
+    private fun batchCopySelected() {
+        val entries = visibleSelectionEntries()
+        if (entries.isEmpty()) {
+            toast("请先选择条目")
+            return
+        }
+        openFolderPicker("复制 ${entries.size} 项到", blocked = entries.filter { it.directory }.map { it.path }.toSet()) { dest ->
+            if (isSelfOrDescendant(dest, entries)) {
+                toast("不能复制到自身或其子目录")
+                return@openFolderPicker
+            }
+            runDiskWrite { token ->
+                submitWrite("复制", PanApi.copyItems(token, entries, dest)) {
+                    exitSelection()
+                    afterDiskMutation("已复制 ${entries.size} 项")
+                }
+            }
+        }
+    }
+
+    private fun batchDeleteSelected() {
+        val entries = visibleSelectionEntries()
+        if (entries.isEmpty()) {
+            toast("请先选择条目")
+            return
+        }
+        confirmDelete(entries)
+    }
+
+    /** 二次确认后提交删除，并检查网盘是否实际移除了原文件。 */
+    private fun confirmDelete(entries: List<PanEntry>) {
+        if (entries.isEmpty()) return
+        val label = if (entries.size == 1) "「${entries[0].name}」" else "${entries.size} 项"
+        val wasSelecting = selectionMode
+        val session = accountProbeId
+        AlertDialog.Builder(this)
+            .setTitle("删除")
+            .setMessage("确定删除 $label 吗？删除后可在网盘回收站找回。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ ->
+                if (session != accountProbeId) {
+                    toast("网盘会话已变更，请重试")
+                } else if (deleteCheckInFlight) {
+                    toast("正在确认上一笔删除，请稍候")
+                } else if (screen == Screen.DISK && entries.all { it.isDisk && PanApi.parentPath(it.path) == currentDiskDir() }) {
+                    val dir = currentDiskDir()
+                    val cacheKey = currentDiskCacheKey()
+                    runDiskWrite { token ->
+                        checkDeleteTargets(token, dir, entries) {
+                            submitWrite("删除", PanApi.deleteItems(token, entries)) {
+                                if (wasSelecting && screen == Screen.DISK && currentDiskCacheKey() == cacheKey) exitSelection()
+                                reconcileDeletedFiles(token, dir, cacheKey, entries.map { it.fileId }.toSet())
+                            }
+                        }
+                    }
+                }
+            }
+            .show()
+    }
+
+    /** 删除接口按路径操作，先确认缓存里的路径仍指向原来的文件。 */
+    private fun checkDeleteTargets(token: String, dir: String, entries: List<PanEntry>, onVerified: () -> Unit) {
+        if (diskWriteInFlight || deleteCheckInFlight) {
+            toast("已有网盘操作正在处理，请稍候")
+            return
+        }
+        deleteCheckInFlight = true
+        val session = accountProbeId
+        val remaining = entries.associate { it.path to it.fileId }.toMutableMap()
+        toast("正在核对要删除的文件")
+        fun finish(verified: Boolean) {
+            if (session != accountProbeId || isDestroyed || !deleteCheckInFlight) return
+            deleteCheckInFlight = false
+            if (verified) onVerified()
+            else toast("无法确认文件仍在原位置，请刷新后重新选择")
+        }
+        fun scan(page: Int) {
+            load(
+                PanApi.diskList(token, dir, page), lane = RequestLane.DELETE_CHECK,
+                onCancelled = { finish(false) }, onFailure = { finish(false) },
+            ) { json ->
+                val files = json.getJSONArray("list")
+                for (index in 0 until files.length()) {
+                    val file = files.getJSONObject(index)
+                    val path = PanApi.readablePath(file.getString("path"))
+                    val expected = remaining[path] ?: continue
+                    if (file.getString("fs_id") != expected) {
+                        finish(false)
+                        return@load
+                    }
+                    remaining.remove(path)
+                }
+                when {
+                    remaining.isEmpty() -> finish(true)
+                    files.length() == 0 || page >= 100 || !PanApi.diskHasMore(json, 100) -> finish(false)
+                    else -> scan(page + 1)
+                }
+            }
+        }
+        scan(1)
+    }
+
+    /** 入队后从目录第一页开始检查；只有完整读完且找不到原文件 ID 才确认成功。 */
+    private fun reconcileDeletedFiles(token: String, dir: String, cacheKey: String, ids: Set<String>) {
+        val session = accountProbeId
+        deleteCheckInFlight = true
+        toast("删除请求已提交，正在等待网盘确认")
+
+        val seenPages = mutableSetOf<List<String>>()
+        fun current() = !isDestroyed && deleteCheckInFlight && session == accountProbeId && hasVerifiedAccount()
+        fun finish(confirmed: Boolean) {
+            if (!current()) return
+            deleteCheckInFlight = false
+            if (confirmed) {
+                courseRequestId++
+                courseCache.clearDisk()
+                diskIndexCache = null
+                diskSearchFingerprints.clear()
+            }
+            if (screen == Screen.DISK && currentDiskCacheKey() == cacheKey) refresh()
+            toast(if (confirmed) "已删除 ${ids.size} 项" else "删除尚未确认，请稍后刷新查看")
+        }
+
+        fun scan(attempt: Int, page: Int) {
+            if (!current()) return
+            if (page == 1) seenPages.clear()
+            fun retry() {
+                if (!current()) return
+                if (attempt >= 8) finish(false)
+                else web.postDelayed({ scan(attempt + 1, 1) }, 1000)
+            }
+            load(
+                PanApi.diskList(token, dir, page), lane = RequestLane.DELETE_CHECK,
+                onCancelled = { finish(false) }, onFailure = ::retry,
+            ) { json ->
+                val files = json.getJSONArray("list")
+                val pageIds = List(files.length()) { files.getJSONObject(it).getString("fs_id") }
+                when {
+                    pageIds.any { it in ids } -> retry()
+                    !seenPages.add(pageIds) -> finish(false)
+                    !PanApi.diskHasMore(json, 100) -> finish(true)
+                    files.length() == 0 || page >= 100 -> finish(false)
+                    else -> scan(attempt, page + 1)
+                }
+            }
+        }
+        scan(1, 1)
+    }
+
+    private fun promptShare(entries: List<PanEntry>) {
+        if (entries.isEmpty()) return
+        val session = accountProbeId
+        val periods = listOf(0 to "永久有效", 7 to "7 天有效", 1 to "1 天有效")
+        showChoiceSheet(
+            title = "创建分享链接",
+            subtitle = if (entries.size == 1) entries[0].name else "${entries.size} 项",
+            choices = periods.map { SheetChoice(it.second, tag = it.first) },
+            onSelect = { choice ->
+                if (session != accountProbeId) return@showChoiceSheet
+                val period = choice.tag as Int
+                val pwd = randomSharePwd()
+                runDiskWrite { token ->
+                    submitWrite("创建分享", PanApi.shareSet(token, entries.map { it.fileId }, period, pwd)) { json ->
+                        val info = PanApi.parseShare(json)
+                        if (info == null) toast("分享已创建，但未取到链接") else showShareResult(info, pwd)
+                    }
+                }
+            },
+        )
+    }
+
+    private fun showShareResult(info: PanApi.ShareInfo, fallbackPwd: String = "") {
+        val pwd = info.pwd.ifEmpty { fallbackPwd }
+        val text = buildString {
+            append("链接：").append(info.link)
+            if (pwd.isNotEmpty()) append("\n提取码：").append(pwd)
+        }
+        AlertDialog.Builder(this)
+            .setTitle("分享已创建")
+            .setMessage(text)
+            .setNegativeButton("关闭", null)
+            .setPositiveButton("复制链接") { _, _ ->
+                val clip = if (pwd.isNotEmpty()) "${info.link} 提取码 ${pwd}" else info.link
+                val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("分享链接", clip))
+                toast("已复制到剪贴板")
+            }.show()
+    }
+
+    private fun promptTransfer(entry: PanEntry) {
+        openFolderPicker("转存到") { dest ->
+            runDiskWrite { token ->
+                submitWrite("转存", PanApi.transferFromGroup(token, entry, dest)) {
+                    afterDiskMutation("转存请求已提交，请稍后在 $dest 查看")
+                }
+            }
+        }
+    }
+
+    private fun showEntryDetail(entry: PanEntry) {
+        val message = buildString {
+            append("名称：").append(entry.name).append('\n')
+            append("位置：").append(PanApi.readablePath(entry.path)).append('\n')
+            append("类型：").append(if (entry.directory) "文件夹" else formatOf(entry)).append('\n')
+            if (!entry.directory) {
+                append("大小：").append(entry.size.toLongOrNull()?.let { formatSize(it) } ?: "-").append('\n')
+            }
+            if (entry.md5.isNotEmpty()) append("MD5：").append(entry.md5).append('\n')
+            append("来源：").append(entrySourceName(entry))
+        }
+        AlertDialog.Builder(this).setTitle("详情").setMessage(message).setPositiveButton("关闭", null).show()
+    }
+
+    private fun showEntryActions(entry: PanEntry, entries: List<PanEntry>) {
+        val kind = PanApi.kindOf(entry)
+        val choices = mutableListOf<SheetChoice>()
+        choices += if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) {
+            SheetChoice("播放", meta = if (kind == MediaKind.AUDIO) "仅播放此音频" else "播放此视频", tag = "play")
+        } else {
+            SheetChoice("打开", tag = "open")
+        }
+        if (entry.isDisk && screen == Screen.DISK) {
+            choices += SheetChoice("重命名", tag = "rename")
+            choices += SheetChoice("移动", tag = "move")
+            choices += SheetChoice("复制", tag = "copy")
+            choices += SheetChoice("分享", meta = "生成分享链接", tag = "share")
+            choices += SheetChoice("删除", meta = "移入回收站", tag = "delete")
+        } else if (!entry.isDisk && !entry.directory) {
+            choices += SheetChoice("转存到我的网盘", meta = "保存为网盘副本", tag = "transfer")
+        }
+        choices += SheetChoice(if (favorites.has(entry)) "取消收藏" else "收藏", tag = "favorite")
+        choices += SheetChoice("详情", tag = "detail")
+
+        showChoiceSheet(
+            title = entry.name,
+            subtitle = "文件操作",
+            choices = choices,
+            onSelect = { choice ->
+                when (choice.tag) {
+                    "play" -> {
+                        selectPlayback(entry, entries, currentPlaybackListKey())
+                        if (kind == MediaKind.AUDIO) resolveAudio(entry, PlaybackRoute.WEB_AUDIO) else startVideo(entry)
+                    }
+                    "open" -> openEntry(entry, entries, currentPlaybackListKey())
+                    "rename" -> promptRename(entry)
+                    "move" -> promptMoveCopy(entry, copy = false)
+                    "copy" -> promptMoveCopy(entry, copy = true)
+                    "share" -> promptShare(listOf(entry))
+                    "delete" -> confirmDelete(listOf(entry))
+                    "transfer" -> promptTransfer(entry)
+                    "favorite" -> toggleFavorite(entry)
+                    "detail" -> showEntryDetail(entry)
+                }
+            },
+        )
+    }
+
+    private fun openFolderPicker(
+        title: String,
+        blocked: Set<String> = emptySet(),
+        onPick: (String) -> Unit,
+    ) {
+        // 从当前所在目录起步：深层目录里移动/复制不必每次从根目录重新点进来
+        val start = if (screen == Screen.DISK) currentDiskDir() else "/"
+        ensureBdstoken(
+            onReady = { token -> showFolderPickerDialog(title, token, blocked, start, onPick) },
+            onFailure = { toast("网盘会话未就绪，请刷新重试") },
+        )
+    }
+
+    /** 目标目录是否落在被操作条目自身（或它的子目录）里——移动/复制到自身会失败，提前拦住。 */
+    private fun isSelfOrDescendant(dest: String, sources: List<PanEntry>): Boolean {
+        val target = dest.trimEnd('/').ifEmpty { "/" }
+        return sources.any { source ->
+            source.directory && (target == source.path.trimEnd('/') || target.startsWith(source.path.trimEnd('/') + "/"))
+        }
+    }
+
+    private fun folderAdapter(names: List<String>): ArrayAdapter<String> =
+        object : ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, names) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val view = super.getView(position, convertView, parent)
+                (view as? TextView)?.apply {
+                    setTextColor(color(R.color.ink))
+                    textSize = 15f
+                    setPadding(dp(8), dp(12), dp(8), dp(12))
+                }
+                return view
+            }
+        }
+
+    private fun showFolderPickerDialog(
+        title: String,
+        token: String,
+        blocked: Set<String>,
+        startDir: String,
+        onPick: (String) -> Unit,
+    ) {
+        val dialog = Dialog(this)
+        val root = column().apply {
+            setBackgroundColor(color(R.color.surface))
+            setPadding(dp(16), dp(16), dp(16), dp(12))
+        }
+        val hint = TextView(this).apply {
+            text = title
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(color(R.color.ink))
+        }
+        val pathLabel = TextView(this).apply {
+            text = "/"
+            textSize = 12f
+            setTextColor(color(R.color.ink3))
+            setPadding(0, dp(4), 0, dp(8))
+        }
+        val list = ListView(this)
+        val more = headAction("加载更多目录") {}
+        val up = headAction("↑ 上一级") {}
+        val pick = headAction("选择当前目录") {}
+        root.addView(hint)
+        root.addView(pathLabel)
+        root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(more)
+        root.addView(up)
+        root.addView(pick)
+        dialog.setContentView(root)
+        var current = startDir
+        var page = 0
+        var hasMore = false
+        var loading = false
+        val session = accountProbeId
+        val dirs = linkedMapOf<String, PanEntry>()
+        fun isBlocked(dir: String) = blocked.any { path ->
+            val base = path.trimEnd('/')
+            base.isNotEmpty() && (dir.trimEnd('/') == base || dir.startsWith("$base/"))
+        }
+        fun updateButtons() {
+            up.isEnabled = !loading && current != "/"
+            pick.isEnabled = !loading && page > 0
+            more.visibility = if (hasMore || page == 0) View.VISIBLE else View.GONE
+            more.text = if (page == 0) "重试读取目录" else "加载更多目录"
+            more.isEnabled = !loading
+            list.isEnabled = !loading
+        }
+        fun loadDir(dir: String, nextPage: Int = 1) {
+            if (loading || session != accountProbeId || !dialog.isShowing) return
+            if (nextPage == 1) {
+                current = dir
+                page = 0
+                hasMore = false
+                dirs.clear()
+                list.adapter = null
+                pathLabel.text = dir
+            }
+            loading = true
+            updateButtons()
+            fun failed() {
+                loading = false
+                if (dialog.isShowing) {
+                    updateButtons()
+                    toast("读取目录失败")
+                }
+            }
+            load(
+                PanApi.diskList(token, dir, nextPage), lane = RequestLane.COURSE,
+                onCancelled = ::failed, onFailure = ::failed,
+            ) { json ->
+                if (!dialog.isShowing || session != accountProbeId) return@load
+                PanApi.parseDiskList(json).filter { it.directory && !isBlocked(it.path) }
+                    .forEach { dirs[it.path] = it }
+                page = nextPage
+                hasMore = PanApi.diskHasMore(json, 100)
+                loading = false
+                val items = dirs.values.toList()
+                val firstVisible = list.firstVisiblePosition
+                list.adapter = folderAdapter(if (items.isEmpty() && !hasMore) listOf("（无可选子目录）") else items.map { it.name })
+                if (nextPage > 1) list.setSelection(firstVisible)
+                list.setOnItemClickListener { _, _, position, _ ->
+                    items.getOrNull(position)?.let { loadDir(it.path) }
+                }
+                updateButtons()
+            }
+        }
+        up.setOnClickListener { loadDir(PanApi.parentPath(current)) }
+        more.setOnClickListener { loadDir(current, page + 1) }
+        pick.setOnClickListener {
+            if (session != accountProbeId) {
+                dialog.dismiss()
+                toast("网盘会话已变更，请重试")
+                return@setOnClickListener
+            }
+            if (isBlocked(current)) {
+                toast("不能选择被操作文件夹自身或其子目录")
+                return@setOnClickListener
+            }
+            dialog.dismiss()
+            onPick(current)
+        }
+        dialog.show()
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setLayout((resources.displayMetrics.widthPixels * 0.92f).toInt(), dp(460))
+        }
+        loadDir(startDir)
+    }
+
+    private fun renderBatchBar() {
+        if (!::batchBar.isInitialized) return
+        if (::batchMove.isInitialized) {
+            val diskSel = selectionMode && selectionScreen == Screen.DISK
+            batchMove.visibility = if (diskSel) View.VISIBLE else View.GONE
+            batchCopy.visibility = if (diskSel) View.VISIBLE else View.GONE
+            batchDelete.visibility = if (diskSel) View.VISIBLE else View.GONE
+            batchFav.visibility = if (diskSel) View.GONE else View.VISIBLE
+        }
+        batchBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
+        if (selectionMode) {
+            batchCount.text = "已选 ${selectedKeys.size} 项"
+            sectionTitle.text = "已选 ${selectedKeys.size} 项"
+            filterCount.visibility = View.GONE
+            sortButton.visibility = View.GONE
+            val entries = visibleSelectionEntries()
+            val allStarred = entries.isNotEmpty() && entries.all { favorites.has(it) }
+            batchFav.text = if (allStarred) "取消收藏" else "收藏"
+            batchAll.text = if (lastRenderedEntries.isNotEmpty() &&
+                selectedKeys.containsAll(lastRenderedEntries.map(::entryKey))
+            ) "取消全选" else "全选"
+        } else {
+            filterCount.visibility = View.VISIBLE
+            sectionTitle.text = when (screen) {
+                Screen.HOME -> "群最新更新"
+                Screen.DISK, Screen.GROUPS -> "文件"
+                else -> ""
+            }
+        }
+    }
+
+    /** V02-3 睡眠定时：把定时分钟数下发给音频后台服务（0 = 关闭）。 */
+    private fun sendSleepTimer(minutes: Int) {
+        if (minutes > 0) SleepTimer.arm(minutes) else SleepTimer.disarm()
+        controller?.sendCustomCommand(
+            AudioPlaybackService.SLEEP_TIMER,
+            Bundle().apply { putInt("minutes", minutes) },
+        )
     }
 
     /** 按扩展名选择音视频播放或 PDF 下载。 */
@@ -3236,6 +4272,7 @@ class MainActivity : AppCompatActivity() {
 
         fun tryNext() {
             if (!canAdvance()) return
+            if (SleepTimer.consumeStopAfterCurrent()) return
             if (siblingOf(entry, 1) != null) {
                 playNext()
                 return
@@ -3476,9 +4513,15 @@ class MainActivity : AppCompatActivity() {
         val page = layoutInflater.inflate(R.layout.view_settings_page, content, false)
         page.findViewById<TextView>(R.id.setAccountStatus).text = when {
             checkingAccount || !ready -> "正在确认登录状态…"
-            hasVerifiedAccount() -> "已登录 · 账号状态正常"
+            hasVerifiedAccount() -> {
+                val tail = if (verifiedAccount.length <= 4) "账号 $verifiedAccount"
+                else "账号 …${verifiedAccount.takeLast(4)}"
+                val name = verifiedAccountName.trim()
+                if (name.isNotEmpty()) "已登录 · $name（$tail）" else "已登录 · $tail · 账号状态正常"
+            }
             else -> "未登录 · 点右侧重新登录"
         }
+        renderAccountAvatar(page.findViewById(R.id.setAccountAvatar))
         page.findViewById<View>(R.id.setLoginRow).setOnClickListener { showLoginDialog() }
         page.findViewById<TextView>(R.id.setGroupValue).text =
             shareSources().size.takeIf { it > 0 }?.let { "$it 个来源" } ?: "未关联"
@@ -3498,6 +4541,65 @@ class MainActivity : AppCompatActivity() {
             "${getString(R.string.app_name)} $version · $packageName"
         content.addView(page)
         renderCourseSwitch()
+    }
+
+    /**
+     * 账号头像：
+     * - 接口提供 avatar_url 时加载真实头像；
+     * - 否则用昵称/账号首字母生成字母头像（百度网盘 gettemplatevariable 不返回头像地址）。
+     */
+    private fun renderAccountAvatar(target: ImageView) {
+        val url = verifiedAccountAvatar.trim()
+        if (url.isNotEmpty()) {
+            target.setImageResource(R.drawable.ic_cloud)
+            target.scaleType = ImageView.ScaleType.FIT_CENTER
+            target.setPaddingRelative(dp(14), dp(14), dp(14), dp(14))
+            Thread {
+                val bitmap = runCatching {
+                    val conn = java.net.URL(url).openConnection()
+                    conn.connectTimeout = 5000
+                    conn.readTimeout = 5000
+                    conn.setRequestProperty("User-Agent", "Mozilla/5.0")
+                    conn.getInputStream().use { BitmapFactory.decodeStream(it) }
+                }.getOrNull()
+                if (bitmap != null) runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    target.setPaddingRelative(0, 0, 0, 0)
+                    target.scaleType = ImageView.ScaleType.CENTER_CROP
+                    target.setImageBitmap(bitmap)
+                }
+            }.start()
+            return
+        }
+        if (!hasVerifiedAccount()) {
+            target.setImageResource(R.drawable.ic_cloud)
+            target.scaleType = ImageView.ScaleType.FIT_CENTER
+            target.setPaddingRelative(dp(14), dp(14), dp(14), dp(14))
+            return
+        }
+        val label = verifiedAccountName.trim().ifEmpty { verifiedAccount }
+        val initial = label.firstOrNull()?.uppercaseChar()?.toString() ?: "拾"
+        target.background = null
+        target.setPaddingRelative(0, 0, 0, 0)
+        target.scaleType = ImageView.ScaleType.FIT_CENTER
+        target.setImageBitmap(letterAvatar(initial))
+    }
+
+    /** 生成圆形字母头像。 */
+    private fun letterAvatar(initial: String): android.graphics.Bitmap {
+        val size = 96
+        val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        paint.color = color(R.color.accent)
+        canvas.drawCircle(size / 2f, size / 2f, size / 2f, paint)
+        paint.color = color(R.color.onAccent)
+        paint.textAlign = android.graphics.Paint.Align.CENTER
+        paint.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+        paint.textSize = size * 0.46f
+        val metrics = paint.fontMetrics
+        canvas.drawText(initial, size / 2f, size / 2f - (metrics.ascent + metrics.descent) / 2f, paint)
+        return bitmap
     }
 
     private fun confirmClearHistory() {
@@ -4430,14 +5532,14 @@ class MainActivity : AppCompatActivity() {
         }
         val previous = icon(R.drawable.ic_skip_prev)
         previous.contentDescription = "上一节"
-        val back10 = icon(R.drawable.ic_replay10).apply { contentDescription = "后退 10 秒" }
+        val back10 = icon(R.drawable.ic_replay30).apply { contentDescription = "后退 30 秒" }
         val play = ImageView(this).apply {
             setBackgroundResource(R.drawable.bg_play_accent)
             setPadding(dp(13), dp(13), dp(13), dp(13))
             setImageResource(R.drawable.ic_play)
             setColorFilter(color(R.color.onAccent))
         }
-        val forward10 = icon(R.drawable.ic_forward10).apply { contentDescription = "前进 10 秒" }
+        val forward10 = icon(R.drawable.ic_forward30).apply { contentDescription = "前进 30 秒" }
         val next = icon(R.drawable.ic_skip_next).apply { contentDescription = "下一节" }
         val speed = headAction("") {}.apply {
             setPadding(dp(4), 0, dp(4), 0)
@@ -4474,6 +5576,40 @@ class MainActivity : AppCompatActivity() {
             favorite.setColorFilter(color(if (starred) R.color.star else R.color.ink3))
             favorite.contentDescription = if (starred) "取消收藏" else "收藏"
         }
+        val timer = audioIconButton(R.drawable.ic_timer, "睡眠定时", color(R.color.ink3)) {}
+        fun paintTimer() {
+            timer.setColorFilter(color(if (SleepTimer.isArmed()) R.color.accent else R.color.ink3))
+            val remaining = SleepTimer.remainingMs()
+            timer.contentDescription = when {
+                SleepTimer.isArmed() -> "睡眠定时，剩余 ${formatAudioTime((remaining / 1000).toInt())}"
+                SleepTimer.stopAfterCurrent -> "本集结束后停止"
+                else -> "睡眠定时"
+            }
+        }
+        timer.setOnClickListener { anchor ->
+            val menu = PopupMenu(this, anchor, Gravity.END)
+            menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed() && !SleepTimer.stopAfterCurrent
+            listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
+                menu.menu.add(0, index + 1, index + 1, "$minutes 分钟")
+            }
+            menu.menu.add(0, 99, 99, "本集结束后停止")
+            menu.menu.setGroupCheckable(0, true, false)
+            menu.setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    0 -> {
+                        SleepTimer.disarm()
+                        SleepTimer.consumeStopAfterCurrent()
+                        sendSleepTimer(0)
+                    }
+                    99 -> SleepTimer.armStopAfterCurrent()
+                    else -> sendSleepTimer(listOf(15, 30, 45, 60)[item.itemId - 1])
+                }
+                paintTimer()
+                true
+            }
+            menu.show()
+        }
+        paintTimer()
         val stop = audioIconButton(R.drawable.ic_close, "停止播放", color(R.color.ink2)) {
             stopBackgroundAudio()
             closeAudioPage()
@@ -4491,6 +5627,7 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(color(R.color.ink))
             }, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
             addView(row().apply {
+                addView(timer, LinearLayout.LayoutParams(dp(44), dp(44)))
                 addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
                 addView(stop, LinearLayout.LayoutParams(dp(44), dp(44)))
             }, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL))
@@ -4625,6 +5762,7 @@ class MainActivity : AppCompatActivity() {
                 player.isPlaying -> "正在播放"
                 else -> "已暂停"
             }
+            paintTimer()
         }
         updateAudioPage = ::update
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -4653,8 +5791,15 @@ class MainActivity : AppCompatActivity() {
         }
         previous.setOnClickListener { currentAudioEntry(player)?.let { playSibling(it, -1) } }
         next.setOnClickListener { currentAudioEntry(player)?.let { playSibling(it, 1) } }
-        back10.setOnClickListener { player.seekBack() }
-        forward10.setOnClickListener { player.seekForward() }
+        // 显式 30 秒：和通知栏 / 耳机线控的 30 秒保持一致，不依赖播放器增量
+        back10.setOnClickListener {
+            player.seekTo((player.currentPosition - 30_000L).coerceAtLeast(0L))
+        }
+        forward10.setOnClickListener {
+            val target = player.currentPosition + 30_000L
+            val duration = player.duration
+            player.seekTo(if (duration > 0) target.coerceAtMost(duration) else target)
+        }
         favorite.setOnClickListener {
             currentAudioEntry(player)?.let { toggleFavorite(it) }
             update()
@@ -4860,14 +6005,25 @@ class MainActivity : AppCompatActivity() {
         val account = verifiedAccount
         val source = JSONObject.quote(uri.toString())
         var webAudioEnded = false
-        val controls = AudioControls(this, entry.name) { playing ->
-            webAudioEnded = false
-            val action = if (playing) "a.play().catch(() => {})" else "a.pause()"
-            web.evaluateJavascript(
-                "(() => { const a = window.__groupPlayerAudio; if (a) $action; })()",
-                null,
-            )
-        }
+        val controls = AudioControls(
+            this,
+            entry.name,
+            setPlaying = { playing ->
+                webAudioEnded = false
+                val action = if (playing) "a.play().catch(() => {})" else "a.pause()"
+                web.evaluateJavascript(
+                    "(() => { const a = window.__groupPlayerAudio; if (a) $action; })()",
+                    null,
+                )
+            },
+            seekBy = { delta ->
+                web.evaluateJavascript(
+                    "(() => { const a = window.__groupPlayerAudio; if (a) a.currentTime = " +
+                        "Math.max(0, Math.min(a.duration || 0, a.currentTime + ($delta))); })()",
+                    null,
+                )
+            },
+        )
         audioControls = controls
         val playbackHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE), verifiedAccount)
         val previous = playbackHistory.find(entry)
@@ -5062,7 +6218,7 @@ class MainActivity : AppCompatActivity() {
         val form = PanApi.mediaLinkBody(entry, viewer)
         fun stop(message: String) {
             when (lane) {
-                RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL -> status.text = message
+                RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK -> status.text = message
                 RequestLane.AUDIO -> failAudioRequest(message)
             }
             onFailure()
@@ -5227,6 +6383,7 @@ class MainActivity : AppCompatActivity() {
         onFailure: () -> Unit = {},
         onCaptcha: ((JSONObject, () -> Boolean) -> Unit)? = null,
         onCurrentResult: ((JSONObject, () -> Boolean) -> Unit)? = null,
+        acceptAnyErrno: Boolean = false,
         onResult: (JSONObject) -> Unit,
     ) {
         if (!ready || !hasVerifiedAccount()) {
@@ -5239,6 +6396,8 @@ class MainActivity : AppCompatActivity() {
             RequestLane.COURSE -> ++courseRequestId
             RequestLane.AUDIO -> ++audioRequestId
             RequestLane.RENEWAL -> ++renewalRequestId
+            RequestLane.WRITE -> ++writeRequestId
+            RequestLane.DELETE_CHECK -> ++deleteCheckRequestId
         }
         dismissMediaCaptcha(lane)
         val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
@@ -5248,13 +6407,15 @@ class MainActivity : AppCompatActivity() {
             RequestLane.COURSE -> courseRequestId
             RequestLane.AUDIO -> audioRequestId
             RequestLane.RENEWAL -> renewalRequestId
+            RequestLane.WRITE -> writeRequestId
+            RequestLane.DELETE_CHECK -> deleteCheckRequestId
         } && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
         fun showError(message: String?) {
             val text = message ?: "网盘请求失败，请重试。"
             when (lane) {
                 RequestLane.LIST -> status.text = text
                 RequestLane.AUDIO -> failAudioRequest(text)
-                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL -> Unit
+                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK -> Unit
             }
         }
         if (lane == RequestLane.LIST) status.text = statusHint ?: "正在读取…"
@@ -5341,6 +6502,8 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (errno == -20 && onCaptcha != null) {
                         onCaptcha(json, ::isCurrent)
+                    } else if (acceptAnyErrno) {
+                        if (onCurrentResult != null) onCurrentResult(json, ::isCurrent) else onResult(json)
                     } else {
                         check(errno == 0) { apiError(url, errno, json) }
                         if (onCurrentResult != null) onCurrentResult(json, ::isCurrent) else onResult(json)
@@ -5501,6 +6664,8 @@ class MainActivity : AppCompatActivity() {
         const val STATE_TRANSFERRED_ONLY = "transferred_only"
         const val STATE_FAVORITES_ORIGIN = "favorites_origin"
         const val STATE_FOLDERS = "folder_trail"
+        /** 「待确认删除」登记的有效期：超过后以服务端列表为准，避免文件被永久隐藏。 */
+        const val PENDING_DELETE_TTL_MS = 30_000L
     }
 }
 

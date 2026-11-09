@@ -63,6 +63,22 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
     fun find(entry: PanEntry): AudioHistoryItem? =
         recentBucket(bucket(entry)).firstOrNull { sameFile(it.entry, entry) }
 
+    /**
+     * v0.2 未听/进行中/已完成筛选：一次性把所有账号分桶的播放记录压成一个索引。
+     * key 与 MainActivity.entryKey 完全一致：origin:sourceId:gid:messageId:fileId。
+     */
+    fun progressIndex(): Map<String, AudioHistoryItem> = runCatching {
+        val prefix = AccountScope.prefix(account ?: AccountScope.current)
+        preferences.all.keys.asSequence()
+            .filter { it.startsWith(prefix) }
+            .map { it.removePrefix(prefix) }
+            .flatMap { bucket -> recentBucket(bucket).asSequence() }
+            .associateBy { item ->
+                val entry = item.entry
+                "${entry.origin}:${entry.sourceId}:${entry.gid}:${entry.messageId}:${entry.fileId}"
+            }
+    }.getOrDefault(emptyMap())
+
     fun save(entry: PanEntry, seconds: Int, completed: Boolean, duration: Int = 0) {
         val newest = AudioHistoryItem(entry, seconds, completed, System.currentTimeMillis(), duration)
         val bucket = bucket(entry)
