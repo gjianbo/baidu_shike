@@ -154,4 +154,11 @@
                 android:textSize="11.5sp" />
         </LinearLayout>
     </FrameLayout>
+
+    <Button
+        android:id="@+id/searchMore"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="加载更多"
+        android:visibility="gone" />
 </LinearLayout>

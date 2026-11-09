@@ -32,6 +32,7 @@ import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -85,15 +86,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sourceButton: View
     private lateinit var searchButton: View
     private lateinit var refreshButton: View
-    private lateinit var sectionRow: View
+    private lateinit var sectionRow: LinearLayout
     private lateinit var sectionTitle: TextView
     private lateinit var sortButton: TextView
     private lateinit var crumbsScroll: View
     private lateinit var crumbsRow: LinearLayout
-    private lateinit var chipAll: TextView
-    private lateinit var chipUnheard: TextView
     private lateinit var filterBar: View
     private lateinit var filterCount: TextView
+    private lateinit var transferredChip: TextView
+    private var transferredOnly = false
+    private var diskIndexCache: Set<String>? = null
+    private val diskSearchFingerprints = mutableSetOf<String>()
     private lateinit var navRoots: List<View>
     private lateinit var historyPanel: LinearLayout
     private lateinit var nowPlaying: View
@@ -112,9 +115,13 @@ class MainActivity : AppCompatActivity() {
     private var pendingAudioPage: Pair<Int, PanEntry>? = null
     private val videoResolver = VideoStreamResolver()
     private val audioResolver = VideoStreamResolver()
+    private val renewalResolver = VideoStreamResolver()
+    private var diskRenewAttempts = 0
+    private var lastDiskRenewAt = 0L
     private val pdfFetcher by lazy { PdfFileFetcher(this) }
     private val mediaAddresses by lazy { MediaAddressCache(this) }
     private var pdfLoading: AlertDialog? = null
+    private var pdfOpenId = 0
     private var mediaCaptchaDialog: Pair<RequestLane, AlertDialog>? = null
     private var videoLoading: AlertDialog? = null
     private var videoPage: VideoPlaybackPage? = null
@@ -131,10 +138,11 @@ class MainActivity : AppCompatActivity() {
 
     private enum class PlaybackRoute { AUDIO, WEB_AUDIO }
     private enum class MediaFilter(val label: String) {
-        ALL("全部"), DOCUMENT("文档"), AUDIO("音频"), VIDEO("视频");
+        ALL("全部"), AUDIO("音频"), VIDEO("视频"), DOCUMENT("文档"), DIRECTORY("目录");
 
-        fun includes(kind: MediaKind): Boolean = kind == MediaKind.DIRECTORY || when (this) {
+        fun includes(kind: MediaKind): Boolean = when (this) {
             ALL -> true
+            DIRECTORY -> kind == MediaKind.DIRECTORY
             DOCUMENT -> kind == MediaKind.PDF || kind == MediaKind.DOCUMENT
             AUDIO -> kind == MediaKind.AUDIO
             VIDEO -> kind == MediaKind.VIDEO
@@ -156,11 +164,11 @@ class MainActivity : AppCompatActivity() {
     private val courseCollator = Collator.getInstance(Locale.SIMPLIFIED_CHINESE)
     private var courseOrder = CourseOrder.ASCENDING
 
-    private enum class Screen { HOME, FAVORITES, BROWSE, SETTINGS }
+    private enum class Screen { HOME, DISK, GROUPS, FAVORITES, SETTINGS }
     private val folders = mutableListOf<PanEntry>()
     private val courseEntries = mutableListOf<PanEntry>()
     private var courseParentKey = ""
-    private data class FolderPosition(val scrollY: Int, val filter: MediaFilter, val unheardOnly: Boolean)
+    private data class FolderPosition(val scrollY: Int, val filter: MediaFilter, val transferredOnly: Boolean)
     private val folderPositions = mutableMapOf<List<String>, FolderPosition>()
     private enum class RequestLane { LIST, SEARCH, COURSE, AUDIO, RENEWAL }
     private var searchRequestId = 0
@@ -189,8 +197,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
     private var screen = Screen.HOME
-    private var unheardOnly = false
-    private var unheardCount = 0
     private var recent = true
     private val wide: Boolean
         get() = resources.configuration.screenWidthDp >= 600
@@ -198,6 +204,14 @@ class MainActivity : AppCompatActivity() {
     private var ready = false
     private var requestId = 0
     private var gid = ""
+    private var bdstoken = ""
+    private var homeGroupChip: TextView? = null
+    private lateinit var btnFavorites: View
+    private lateinit var favBadge: TextView
+    private lateinit var btnBack: View
+    private val tabFolders = mutableMapOf<Screen, List<PanEntry>>()
+    private val tabScroll = mutableMapOf<Screen, Int>()
+    private var favoritesOrigin = Screen.HOME
     private var loginPending = false
     private var pickingSource = false
     private var verifiedAccount = ""
@@ -357,8 +371,6 @@ class MainActivity : AppCompatActivity() {
         sortButton = shell.findViewById(R.id.sortButton)
         crumbsScroll = shell.findViewById(R.id.crumbsScroll)
         crumbsRow = shell.findViewById(R.id.crumbsRow)
-        chipAll = shell.findViewById(R.id.chipAll)
-        chipUnheard = shell.findViewById(R.id.chipUnheard)
         filterBar = shell.findViewById(R.id.filterBar)
         val mediaFilters = shell.findViewById<LinearLayout>(R.id.mediaFilters)
         mediaChips = MediaFilter.entries.map { filter ->
@@ -373,7 +385,6 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(color(R.color.ink2))
                 setOnClickListener {
                     mediaFilter = filter
-                    unheardOnly = false
                     updateFilterChips()
                     redrawFilteredRows?.invoke()
                 }
@@ -382,13 +393,53 @@ class MainActivity : AppCompatActivity() {
                 })
             }
         }
+        transferredChip = TextView(this).apply {
+            textSize = 12.5f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            minHeight = dp(36)
+            setPadding(dp(14), 0, dp(14), 0)
+            setBackgroundResource(R.drawable.bg_chip)
+            setTextColor(color(R.color.ink2))
+            visibility = View.GONE
+            setOnClickListener {
+                transferredOnly = !transferredOnly
+                updateFilterChips()
+                redrawFilteredRows?.invoke()
+            }
+            mediaFilters.addView(this, LinearLayout.LayoutParams(-2, dp(36)).apply {
+                marginStart = dp(8)
+            })
+        }
         filterCount = shell.findViewById(R.id.filterCount)
         navRoots = listOf(
             shell.findViewById(R.id.navHome),
-            shell.findViewById(R.id.navBrowse),
-            shell.findViewById(R.id.navFavorites),
+            shell.findViewById(R.id.navDisk),
+            shell.findViewById(R.id.navGroups),
             shell.findViewById(R.id.navSettings),
         )
+        btnFavorites = shell.findViewById(R.id.btnFavorites)
+        favBadge = shell.findViewById(R.id.favBadge)
+        btnBack = shell.findViewById(R.id.btnBack)
+        btnFavorites.setOnClickListener { openFavorites() }
+        btnBack.setOnClickListener { closeFavorites() }
+        homeGroupChip = TextView(this).apply {
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11.5f)
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(color(R.color.ink2))
+            setBackgroundResource(R.drawable.bg_source_chip)
+            gravity = Gravity.CENTER
+            setPadding(dp(10), 0, dp(10), 0)
+            compoundDrawablePadding = dp(4)
+            setCompoundDrawablesRelativeWithIntrinsicBounds(
+                R.drawable.ic_users, 0, R.drawable.ic_chevron_down, 0,
+            )
+            visibility = View.GONE
+            setOnClickListener { chooseSource() }
+        }
+        sectionRow.addView(homeGroupChip, 1, LinearLayout.LayoutParams(-2, dp(44)).apply {
+            marginEnd = dp(8)
+        })
         status = shell.findViewById(R.id.status)
         nowPlaying = shell.findViewById(R.id.miniPlayer)
         historyPanel = shell.findViewById(R.id.historyPanel)
@@ -415,8 +466,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         sortButton.setOnClickListener { showCourseSort() }
-        chipAll.setOnClickListener { setFilter(false) }
-        chipUnheard.setOnClickListener { setFilter(true) }
         nowPlaying.setOnClickListener { controller?.let { showPlayback(it) } }
         nowPlaying.findViewById<View>(R.id.miniClose).setOnClickListener { stopBackgroundAudio() }
         nowPlaying.findViewById<View>(R.id.miniPlay).setOnClickListener {
@@ -441,6 +490,7 @@ class MainActivity : AppCompatActivity() {
                 recent = restored == Screen.HOME
             }
         }
+        restoreNavigationState(savedInstanceState)
         refresh()
         web.loadUrl(API_PAGE)
         val token = SessionToken(this, ComponentName(this, AudioPlaybackService::class.java))
@@ -514,7 +564,7 @@ class MainActivity : AppCompatActivity() {
         if (historyRefreshPending && !historyRefreshScheduled && !isDestroyed && hasVerifiedAccount() &&
             screen == Screen.HOME && folders.isEmpty() && audioPage == null && contentScroll.scrollY <= dp(24)
         ) {
-            renderAudioHistory()
+            renderHomeSections()
         }
     }
 
@@ -585,22 +635,105 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString(STATE_SCREEN, screen.name)
+        outState.putString(STATE_FILTER, mediaFilter.name)
+        outState.putBoolean(STATE_TRANSFERRED_ONLY, transferredOnly)
+        outState.putString(STATE_FAVORITES_ORIGIN, favoritesOrigin.name)
+        if (screen == Screen.DISK || screen == Screen.GROUPS) {
+            outState.putString(STATE_FOLDERS, encodeEntries(folders))
+        }
+        super.onSaveInstanceState(outState)
+    }
+
+    private fun restoreNavigationState(state: Bundle?) {
+        if (state == null) return
+        val restored = runCatching { Screen.valueOf(state.getString(STATE_SCREEN).orEmpty()) }.getOrNull()
+            ?: return
+        screen = restored
+        recent = restored == Screen.HOME
+        mediaFilter = runCatching { MediaFilter.valueOf(state.getString(STATE_FILTER).orEmpty()) }
+            .getOrDefault(MediaFilter.ALL)
+        transferredOnly = state.getBoolean(STATE_TRANSFERRED_ONLY, false)
+        favoritesOrigin = runCatching {
+            Screen.valueOf(state.getString(STATE_FAVORITES_ORIGIN).orEmpty())
+        }.getOrDefault(Screen.HOME)
+        folders.clear()
+        if (restored == Screen.DISK || restored == Screen.GROUPS) {
+            folders.addAll(decodeEntries(state.getString(STATE_FOLDERS)))
+        }
+    }
+
+    private fun encodeEntries(entries: List<PanEntry>): String = JSONArray().apply {
+        entries.forEach { entry ->
+            put(JSONObject()
+                .put("gid", entry.gid)
+                .put("message", entry.messageId)
+                .put("owner", entry.owner)
+                .put("file", entry.fileId)
+                .put("name", entry.name)
+                .put("path", entry.path)
+                .put("size", entry.size)
+                .put("directory", entry.directory)
+                .put("origin", entry.origin.name)
+                .put("md5", entry.md5))
+        }
+    }.toString()
+
+    private fun decodeEntries(raw: String?): List<PanEntry> = runCatching {
+        val array = JSONArray(raw ?: return emptyList())
+        List(array.length()) { index ->
+            val item = array.getJSONObject(index)
+            PanEntry(
+                item.getString("gid"), item.getString("message"), item.getString("owner"),
+                item.getString("file"), item.getString("name"), item.optString("path"),
+                item.optString("size"), item.optBoolean("directory"),
+                runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
+                    .getOrDefault(EntryOrigin.GROUP),
+                item.optString("md5"),
+            )
+        }
+    }.getOrDefault(emptyList())
+
     private fun showScreen(target: Screen) {
+        if (screen == target) {
+            contentScroll.scrollTo(0, 0)
+            refresh()
+            return
+        }
+        if (screen != Screen.FAVORITES) {
+            tabFolders[screen] = folders.toList()
+            tabScroll[screen] = contentScroll.scrollY
+        }
         screen = target
         recent = target == Screen.HOME
-        unheardOnly = false
+        transferredOnly = false
         folders.clear()
-        folderPositions.clear()
+        if (target == Screen.DISK || target == Screen.GROUPS) {
+            tabFolders[target]?.let { folders.addAll(it) }
+        }
         courseEntries.clear()
         courseParentKey = ""
         contentScroll.scrollTo(0, 0)
         refresh()
+        scrollAfterLayout(tabScroll[target] ?: 0)
     }
 
-    private fun setFilter(unheard: Boolean) {
-        unheardOnly = unheard
-        updateFilterChips()
-        redrawFilteredRows?.invoke()
+    private fun openFavorites() {
+        if (!hasVerifiedAccount()) {
+            toast("请先登录百度网盘")
+            return
+        }
+        if (screen == Screen.FAVORITES) return
+        favoritesOrigin = when (screen) {
+            Screen.DISK, Screen.GROUPS, Screen.HOME -> screen
+            else -> Screen.HOME
+        }
+        showScreen(Screen.FAVORITES)
+    }
+
+    private fun closeFavorites() {
+        if (screen == Screen.FAVORITES) showScreen(favoritesOrigin)
     }
 
     private fun updateFilterChips() {
@@ -609,10 +742,8 @@ class MainActivity : AppCompatActivity() {
             chip.isSelected = filter == mediaFilter
             setTabActive(chip, chip.isSelected)
         }
-        setTabActive(chipAll, !unheardOnly)
-        setTabActive(chipUnheard, unheardOnly)
-        chipUnheard.visibility = if (mediaFilter == MediaFilter.DOCUMENT) View.GONE else View.VISIBLE
-        chipUnheard.text = "${if (mediaFilter == MediaFilter.AUDIO) "未听" else "未播完"} $unheardCount"
+        transferredChip.isSelected = transferredOnly
+        setTabActive(transferredChip, transferredOnly)
     }
 
     private fun showAvailableMediaFilters(kinds: Set<MediaKind>) {
@@ -623,10 +754,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateNav() {
-        val screens = listOf(Screen.HOME, Screen.BROWSE, Screen.FAVORITES, Screen.SETTINGS)
-        val active = screens.indexOf(screen)
-        val titles = listOf("最近", "目录", "收藏", "设置")
-        val icons = listOf(R.drawable.ic_history, R.drawable.ic_folder, R.drawable.ic_star, R.drawable.ic_settings)
+        val screens = listOf(Screen.HOME, Screen.DISK, Screen.GROUPS, Screen.SETTINGS)
+        val active = if (screen == Screen.FAVORITES) screens.indexOf(favoritesOrigin) else screens.indexOf(screen)
+        val titles = listOf("首页", "网盘", "群组", "设置")
+        val icons = listOf(R.drawable.ic_home, R.drawable.ic_cloud, R.drawable.ic_users, R.drawable.ic_settings)
         navRoots.forEachIndexed { index, root ->
             val on = index == active
             root.findViewById<View>(R.id.navIndicator).setBackgroundResource(
@@ -643,19 +774,40 @@ class MainActivity : AppCompatActivity() {
             root.setOnClickListener { showScreen(screens[index]) }
         }
         renderSourcePicker()
-        val browsing = screen == Screen.HOME || screen == Screen.BROWSE
-        sourceButton.visibility = if (browsing) View.VISIBLE else View.GONE
-        appSub.visibility = if (browsing && (folders.isNotEmpty() || !hasVerifiedAccount())) View.VISIBLE else View.GONE
+        updateFavoritesBadge()
+        val browsing = screen == Screen.HOME || screen == Screen.DISK || screen == Screen.GROUPS
+        sourceButton.visibility = if (screen == Screen.GROUPS) View.VISIBLE else View.GONE
+        homeGroupChip?.visibility = if (screen == Screen.HOME) View.VISIBLE else View.GONE
+        btnFavorites.visibility = if (screen == Screen.DISK || screen == Screen.GROUPS) View.VISIBLE else View.GONE
+        btnBack.visibility = if (screen == Screen.FAVORITES) View.VISIBLE else View.GONE
+        appSub.visibility = when {
+            screen == Screen.DISK -> View.VISIBLE
+            browsing && (folders.isNotEmpty() || !hasVerifiedAccount()) -> View.VISIBLE
+            else -> View.GONE
+        }
         refreshButton.visibility = if (browsing) View.VISIBLE else View.GONE
-        searchButton.visibility = if (browsing && gid.isNotEmpty() && hasVerifiedAccount()) View.VISIBLE else View.GONE
-        title.setTextSize(if (screen == Screen.HOME) 30f else 26f)
-        crumbsScroll.visibility = if (screen == Screen.BROWSE) View.VISIBLE else View.GONE
-        sectionRow.visibility = if (browsing || folders.isNotEmpty()) View.VISIBLE else View.GONE
-        sectionTitle.text = when {
-            screen == Screen.HOME -> "群内更新"
-            screen == Screen.BROWSE -> "文件"
+        searchButton.visibility = if (hasVerifiedAccount() &&
+            ((screen == Screen.GROUPS && gid.isNotEmpty()) || screen == Screen.DISK)
+        ) View.VISIBLE else View.GONE
+        title.setTextSize(
+            if (screen == Screen.HOME ||
+                ((screen == Screen.DISK || screen == Screen.GROUPS) && folders.isEmpty())
+            ) 30f else 26f,
+        )
+        crumbsScroll.visibility =
+            if ((screen == Screen.DISK || screen == Screen.GROUPS) && folders.isNotEmpty()) View.VISIBLE else View.GONE
+        sectionRow.visibility = if (browsing) View.VISIBLE else View.GONE
+        sectionTitle.text = when (screen) {
+            Screen.HOME -> "群最新更新"
+            Screen.DISK, Screen.GROUPS -> "文件"
             else -> ""
         }
+    }
+
+    private fun updateFavoritesBadge() {
+        val count = favorites.all().size
+        favBadge.text = count.toString()
+        favBadge.visibility = if (count > 0) View.VISIBLE else View.GONE
     }
 
     private fun renderCrumbs() {
@@ -681,7 +833,12 @@ class MainActivity : AppCompatActivity() {
                 setPadding(dp(2), 0, dp(2), 0)
             })
         }
-        addCrumb("根目录", folders.isEmpty()) {
+        val rootLabel = when (screen) {
+            Screen.DISK -> "我的网盘"
+            Screen.GROUPS -> shareSources().firstOrNull { it.id == gid }?.name ?: "群组"
+            else -> "根目录"
+        }
+        addCrumb(rootLabel, folders.isEmpty()) {
             if (folders.isNotEmpty()) returnToFolder(0)
         }
         folders.forEachIndexed { index, entry ->
@@ -692,7 +849,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        crumbsScroll.visibility = if (screen == Screen.BROWSE) View.VISIBLE else View.GONE
+        crumbsScroll.visibility =
+            if ((screen == Screen.DISK || screen == Screen.GROUPS) && folders.isNotEmpty()) View.VISIBLE else View.GONE
     }
 
     private fun showChoiceSheet(
@@ -833,19 +991,15 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun isUnfinishedMedia(entry: PanEntry): Boolean = when (PanApi.kindOf(entry)) {
-        MediaKind.AUDIO, MediaKind.VIDEO -> !isPlayed(entry)
-        else -> false
-    }
+    private fun hasFilterOptions(entries: List<PanEntry>): Boolean =
+        entries.map(PanApi::kindOf).distinct().size >= 2
 
-    private fun isPlayed(entry: PanEntry): Boolean {
-        val item = when (PanApi.kindOf(entry)) {
-            MediaKind.AUDIO -> audioHistory.find(entry)
-            MediaKind.VIDEO -> videoHistory.find(entry)
-            else -> null
-        }
-        return item?.completed == true
-    }
+    private fun transferredIndex(): Set<String> =
+        diskIndexCache ?: (courseCache.diskIndex() + diskSearchFingerprints).also { diskIndexCache = it }
+
+    private fun matchesTransferred(entry: PanEntry, index: Set<String>): Boolean =
+        !entry.directory && entry.md5.isNotEmpty() &&
+            index.contains("${PanApi.md5Key(entry.md5)}:${entry.size}")
 
     private fun shareSources(): List<ShareSource> {
         val prefs = getSharedPreferences("account_scope", MODE_PRIVATE)
@@ -1026,22 +1180,39 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun activateGroup(group: String, returnFromWeb: Boolean = false) {
+        val changed = group != gid
+        setActiveGroup(group)
+        tabFolders.remove(Screen.GROUPS)
+        tabScroll.remove(Screen.GROUPS)
+        if (returnFromWeb) {
+            screen = Screen.GROUPS
+            recent = false
+            folders.clear()
+            folderPositions.clear()
+            courseEntries.clear()
+            courseParentKey = ""
+            showApp()
+        } else {
+            if (changed && screen == Screen.GROUPS) {
+                folders.clear()
+                folderPositions.clear()
+                courseEntries.clear()
+                courseParentKey = ""
+                mediaFilter = MediaFilter.ALL
+                transferredOnly = false
+            }
+            showScreen(screen)
+            contentScroll.scrollTo(0, 0)
+        }
+    }
+
+    private fun setActiveGroup(group: String) {
         gid = group
         homeCheckToken++
         homeCheckInFlight = false
         lastHomeCheckAt = 0L
         getSharedPreferences("account_scope", MODE_PRIVATE).edit()
             .putString(AccountScope.key("group_id"), gid).apply()
-        if (returnFromWeb) {
-            screen = Screen.HOME
-            recent = true
-            folders.clear()
-            folderPositions.clear()
-            showApp()
-        } else {
-            showScreen(screen)
-            contentScroll.scrollTo(0, 0)
-        }
     }
 
     private fun showFileSearch() {
@@ -1049,12 +1220,18 @@ class MainActivity : AppCompatActivity() {
             toast("网盘正在连接，请稍后再试")
             return
         }
+        val disk = screen == Screen.DISK
         val group = gid
-        val scope = shareSources().firstOrNull { it.id == group }?.name ?: "当前文件库"
+        val scope = if (disk) "我的网盘" else shareSources().firstOrNull { it.id == group }?.name ?: "当前文件库"
         val account = verifiedAccount
         val view = layoutInflater.inflate(R.layout.dialog_search_input, null, false)
         val input = view.findViewById<EditText>(R.id.searchInput)
-        view.findViewById<TextView>(R.id.searchInputSubtitle).text = "在「$scope」中搜索"
+        view.findViewById<TextView>(R.id.searchInputSubtitle).text =
+            if (disk) "在我的网盘中搜索" else "在「$scope」中搜索"
+        view.findViewById<TextView>(R.id.searchInputTitle).text =
+            if (disk) "搜索我的网盘" else "搜索文件库"
+        view.findViewById<TextView>(R.id.searchInputScope).text =
+            if (disk) "搜索我的网盘中所有文件" else "搜索整个群文件库"
         val dialog = Dialog(this)
         dialog.setContentView(view)
         val metrics = resources.displayMetrics
@@ -1081,10 +1258,12 @@ class MainActivity : AppCompatActivity() {
             }
             getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(input.windowToken, 0)
             dialog.dismiss()
-            if (ready && hasVerifiedAccount() && verifiedAccount == account && gid == group) {
-                searchFiles(group, keyword)
+            if (ready && hasVerifiedAccount() && verifiedAccount == account &&
+                (if (disk) screen == Screen.DISK else gid == group)
+            ) {
+                if (disk) searchDiskFiles(keyword) else searchFiles(group, keyword)
             } else {
-                toast("群组连接已变化，请重新搜索")
+                toast("网盘连接已变化，请重新搜索")
             }
         }
         view.findViewById<TextView>(R.id.searchInputCancel).setOnClickListener { dialog.dismiss() }
@@ -1100,6 +1279,156 @@ class MainActivity : AppCompatActivity() {
             WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
                 WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
         )
+    }
+
+    private fun searchDiskFiles(keyword: String) {
+        val account = verifiedAccount
+        val hits = mutableListOf<PanSearchHit>()
+        val seen = mutableSetOf<String>()
+        val view = layoutInflater.inflate(R.layout.dialog_search_results, null, false)
+        val more = view.findViewById<View>(R.id.searchMore)
+        val eyebrow = view.findViewById<TextView>(R.id.searchEyebrow)
+        val keywordTitle = view.findViewById<TextView>(R.id.searchTitle)
+        val summary = view.findViewById<TextView>(R.id.searchSummary)
+        val loading = view.findViewById<View>(R.id.searchLoading)
+        val list = view.findViewById<ListView>(R.id.searchResults)
+        val empty = view.findViewById<View>(R.id.searchEmpty)
+        val emptyTitle = view.findViewById<TextView>(R.id.searchEmptyTitle)
+        val emptyHint = view.findViewById<TextView>(R.id.searchEmptyHint)
+        eyebrow.text = "搜索 · 我的网盘"
+        keywordTitle.text = keyword
+        summary.text = "正在搜索…"
+        loading.visibility = View.VISIBLE
+
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = hits.size
+            override fun getItem(position: Int) = hits[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView ?: layoutInflater.inflate(R.layout.item_search_hit, parent, false)
+                val hit = hits[position]
+                val kind = PanApi.kindOf(hit.entry)
+                paintMediaIcon(row.findViewById<ImageView>(R.id.searchIcon), kind, hit.entry.directory)
+                row.findViewById<TextView>(R.id.searchName).text = hit.entry.name
+                val location = if (hit.entry.directory) hit.entry.path else hit.parentPath
+                row.findViewById<TextView>(R.id.searchMeta).text =
+                    listOf(mediaKindLabel(kind, hit.entry.directory, formatOf(hit.entry)), location.ifEmpty { "/" })
+                        .filter { it.isNotEmpty() }
+                        .joinToString(" · ")
+                row.findViewById<View>(R.id.searchDivider).visibility =
+                    if (position == hits.lastIndex) View.GONE else View.VISIBLE
+                return row
+            }
+        }
+        list.adapter = adapter
+
+        val dialog = Dialog(this)
+        dialog.setContentView(view)
+        val metrics = resources.displayMetrics
+        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
+        val height = minOf(
+            (metrics.heightPixels * 0.70f).toInt().coerceAtLeast(dp(320)),
+            dp(640),
+            metrics.heightPixels - dp(24),
+        )
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.45f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
+            setLayout(width, height)
+            setWindowAnimations(R.style.SearchSheetAnimation)
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        searchDialog = dialog
+        dialog.setOnDismissListener {
+            searchRequestId++
+            searchDialog = null
+        }
+        view.findViewById<ImageView>(R.id.searchClose).setOnClickListener { dialog.dismiss() }
+
+        fun showEmpty(titleText: String, hintText: String, summaryText: String) {
+            loading.visibility = View.GONE
+            list.visibility = View.GONE
+            empty.visibility = View.VISIBLE
+            emptyTitle.text = titleText
+            emptyHint.text = hintText
+            summary.text = summaryText
+        }
+
+        list.setOnItemClickListener { _, _, index, _ ->
+            val hit = hits.getOrNull(index) ?: return@setOnItemClickListener
+            dialog.dismiss()
+            if (hit.entry.directory) {
+                openSourceDirectory(hit.entry)
+            } else {
+                openEntry(hit.entry, hits.map { it.entry })
+            }
+        }
+        dialog.show()
+
+        var nextPage = 1
+        val pageSize = 100
+        fun isCurrentSearch() = searchDialog === dialog && verifiedAccount == account
+        fun pageFailed(message: String) {
+            if (!isCurrentSearch()) return
+            if (hits.isEmpty()) {
+                showEmpty("搜索失败", "请重新搜索", message)
+            } else {
+                loading.visibility = View.GONE
+                more.isEnabled = true
+                summary.text = "已加载 ${hits.size} 项 · ${message}"
+            }
+        }
+
+        fun loadPage() {
+            more.isEnabled = false
+            loading.visibility = View.VISIBLE
+            ensureBdstoken(
+                onReady = { token ->
+                    if (!isCurrentSearch()) return@ensureBdstoken
+                    load(
+                        PanApi.diskSearch(token, keyword, page = nextPage, num = pageSize), lane = RequestLane.SEARCH,
+                        onCancelled = { pageFailed("加载已取消") },
+                        onFailure = { pageFailed("加载失败，请重试") },
+                    ) { json ->
+                        if (!isCurrentSearch()) return@load
+                        val page = PanApi.parseDiskSearch(json).filter { seen.add(it.entry.fileId) }
+                        hits.addAll(page)
+                        adapter.notifyDataSetChanged()
+                        loading.visibility = View.GONE
+                        // 单独保留本次会话的搜索命中，目录刷新后仍可用于匹配。
+                        val matched = page.mapNotNull { hit ->
+                            val entry = hit.entry
+                            if (!entry.directory && entry.md5.isNotEmpty()) {
+                                "${PanApi.md5Key(entry.md5)}:${entry.size}"
+                            } else {
+                                null
+                            }
+                        }
+                        if (diskSearchFingerprints.addAll(matched)) {
+                            diskIndexCache = null
+                        }
+                        if (hits.isEmpty()) {
+                            showEmpty("没有找到匹配的文件", "换个关键词，或减少关键词长度", "0 个结果")
+                        } else {
+                            empty.visibility = View.GONE
+                            list.visibility = View.VISIBLE
+                            list.alpha = 1f
+                            list.isEnabled = true
+                            summary.text = "已加载 ${hits.size} 项 · 点选打开"
+                        }
+                        val hasMore = page.isNotEmpty() && PanApi.diskHasMore(json, pageSize)
+                        more.visibility = if (hasMore) View.VISIBLE else View.GONE
+                        more.isEnabled = hasMore
+                        nextPage++
+                    }
+                },
+                onFailure = { pageFailed("无法连接我的网盘") },
+            )
+        }
+        more.setOnClickListener { loadPage() }
+        loadPage()
     }
 
     private fun searchFiles(group: String, keyword: String) {
@@ -1369,21 +1698,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun openFolderTrail(group: String, trail: List<PanEntry>) {
         if (!hasVerifiedAccount() || group != gid) return
-        if (screen == Screen.BROWSE && trail.take(folders.size).map(::entryKey) == folders.map(::entryKey) && trail.size > folders.size) {
+        if (screen == Screen.GROUPS && trail.take(folders.size).map(::entryKey) == folders.map(::entryKey) && trail.size > folders.size) {
             rememberFolderPosition()
         }
-        if (screen != Screen.BROWSE) folderPositions.clear()
-        screen = Screen.BROWSE
+        if (screen != Screen.GROUPS) folderPositions.clear()
+        screen = Screen.GROUPS
         recent = false
         folders.clear()
         folders.addAll(trail)
         mediaFilter = MediaFilter.ALL
-        unheardOnly = false
+        transferredOnly = false
         refresh()
     }
 
     private fun rememberFolderPosition() {
-        folderPositions[folders.map(::entryKey)] = FolderPosition(contentScroll.scrollY, mediaFilter, unheardOnly)
+        folderPositions[folders.map(::entryKey)] =
+            FolderPosition(contentScroll.scrollY, mediaFilter, transferredOnly)
     }
 
     private fun returnToFolder(depth: Int) {
@@ -1392,7 +1722,7 @@ class MainActivity : AppCompatActivity() {
         val position = folderPositions.remove(path)
         folderPositions.keys.removeAll { it.size > depth }
         mediaFilter = position?.filter ?: MediaFilter.ALL
-        unheardOnly = position?.unheardOnly ?: false
+        transferredOnly = position?.transferredOnly ?: false
         refresh(cachedFirst = true)
         scrollAfterLayout(position?.scrollY ?: 0)
     }
@@ -1405,14 +1735,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh(force: Boolean = false, cachedFirst: Boolean = false) {
+        if (screen == Screen.FAVORITES) {
+            refreshFavoritesPage()
+            return
+        }
+        if (screen == Screen.DISK) {
+            refreshDisk()
+            return
+        }
         requestId++
         clearHomeUpdatePrompt()
         homeDisplayedEntries = emptyList()
         redrawFilteredRows = null
         showingHomeDirectory = false
-        unheardCount = 0
         filterCount.text = ""
         content.removeAllViews()
+        sortButton.visibility = View.GONE
         showAvailableMediaFilters(emptySet())
         styleContent()
         val earlyParent = folders.lastOrNull()
@@ -1425,12 +1763,12 @@ class MainActivity : AppCompatActivity() {
         if (earlyCached.isNotEmpty()) {
             updateNowPlaying()
             updateNav()
-            filterBar.visibility = View.VISIBLE
+            filterBar.visibility = View.GONE
             sectionRow.visibility = View.VISIBLE
-            renderAudioHistory(allowUnverified = true)
+            renderHomeSections(allowUnverified = true)
             renderCourseSwitch()
-            title.text = "最近"
-            appSub.text = "最近更新与最近播放"
+            title.text = "首页"
+            appSub.text = ""
             cacheNote = "缓存内容 · 上次同步 ${courseCache.syncLabel(earlyKey)}"
             display(earlyCached)
             status.text = cacheNote
@@ -1441,12 +1779,15 @@ class MainActivity : AppCompatActivity() {
             filterBar.visibility = View.GONE
             sectionRow.visibility = View.GONE
             title.text = when (screen) {
-                Screen.FAVORITES -> "收藏"
                 Screen.SETTINGS -> "设置"
-                Screen.BROWSE -> "目录"
-                else -> "最近"
+                Screen.DISK -> "我的网盘"
+                Screen.GROUPS -> "群组"
+                else -> "首页"
             }
-            appSub.text = "连接百度网盘后查看群组内容"
+            appSub.text = when (screen) {
+                Screen.DISK -> "连接百度网盘后浏览我的网盘"
+                else -> "连接百度网盘后查看内容"
+            }
             courseEntries.clear()
             renderCourseSwitch()
             updateNowPlaying()
@@ -1475,25 +1816,27 @@ class MainActivity : AppCompatActivity() {
         }
         updateNav()
         updateFilterChips()
-        filterBar.visibility =
-            if (parent != null || screen == Screen.HOME || screen == Screen.BROWSE) View.VISIBLE else View.GONE
+        // 由 addFilteredCourseRows 按实际内容决定是否显示；空列表/空目录不露出孤立筛选条。
+        filterBar.visibility = View.GONE
         title.text = when (screen) {
-            Screen.FAVORITES -> parent?.name ?: "收藏"
+            Screen.FAVORITES -> "收藏"
             Screen.SETTINGS -> "设置"
-            Screen.BROWSE -> parent?.name ?: "目录"
-            else -> parent?.name ?: "最近"
+            Screen.DISK -> parent?.name ?: "我的网盘"
+            Screen.GROUPS -> parent?.name ?: "群组"
+            else -> parent?.name ?: "首页"
         }
         appSub.text = when {
             parent != null -> "第 ${folders.size} 级目录"
             screen == Screen.FAVORITES -> "仅保存在本机"
             screen == Screen.SETTINGS -> "外观、备份与本机数据"
-            screen == Screen.BROWSE -> "群组目录"
-            else -> "最近更新与最近播放"
+            screen == Screen.DISK -> "个人文件 · 已转存内容可直接播放"
+            screen == Screen.GROUPS -> "群组目录"
+            else -> ""
         }
         renderCrumbs()
-        renderAudioHistory()
+        renderHomeSections()
         renderCourseSwitch()
-        if ((screen == Screen.HOME || screen == Screen.BROWSE) && parent == null) {
+        if ((screen == Screen.HOME || screen == Screen.GROUPS) && parent == null) {
             renderSourcePicker()
         }
         val cached = if (cacheKey.isNotEmpty()) courseCache.readAll(cacheKey) else emptyList()
@@ -1504,7 +1847,9 @@ class MainActivity : AppCompatActivity() {
             "缓存内容 · 上次同步 ${courseCache.syncLabel(cacheKey)}"
         } else ""
         if (homeRootKey != null && recentIsEmpty) {
-            renderHomeDirectory(homeRootKey)
+            showingHomeDirectory = false
+            status.text = "群内暂无更新"
+            content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
         } else if (cached.isNotEmpty() || (cachedFirst && courseCache.readPage(cacheKey, 1) != null)) {
             if (parent != null) {
                 courseEntries.clear()
@@ -1531,14 +1876,14 @@ class MainActivity : AppCompatActivity() {
                         if (courseCache.readPage(homeRootKey, 1) != null) renderRootMore(homeRootKey)
                         else loadRoots(homeRootKey)
                     }
-                    screen == Screen.BROWSE -> renderRootMore(cacheKey)
+                    screen == Screen.GROUPS -> renderRootMore(cacheKey)
                 }
             }
             !ready -> {
                 status.text = if (cached.isNotEmpty()) "$cacheNote · 正在连接网盘"
                 else "正在连接百度网盘。如果列表无法加载，请先登录。"
             }
-            cacheKey.isNotEmpty() && parent == null && !force && screen == Screen.BROWSE &&
+            cacheKey.isNotEmpty() && parent == null && !force && screen == Screen.GROUPS &&
                 courseCache.isFresh(cacheKey, CACHE_TTL_MS) &&
                 courseCache.readPage(cacheKey, 1)?.nextCursor != null -> {
                 status.text = "$cacheNote · 30 分钟内已检查"
@@ -1556,6 +1901,277 @@ class MainActivity : AppCompatActivity() {
             }
             else -> loadRoots(cacheKey)
         }
+    }
+
+    private fun refreshFavoritesPage() {
+        requestId++
+        clearHomeUpdatePrompt()
+        updateNowPlaying()
+        updateNav()
+        title.text = "收藏"
+        title.setTextSize(30f)
+        appSub.visibility = View.GONE
+        historyPanel.removeAllViews()
+        sectionRow.visibility = View.GONE
+        filterBar.visibility = View.GONE
+        sortButton.visibility = View.GONE
+        crumbsScroll.visibility = View.GONE
+        content.removeAllViews()
+        status.text = ""
+        if (!hasVerifiedAccount()) {
+            content.addView(headAction("登录百度网盘") { showLoginDialog() })
+            return
+        }
+        renderFavorites()
+    }
+
+    private fun refreshDisk() {
+        requestId++
+        clearHomeUpdatePrompt()
+        homeDisplayedEntries = emptyList()
+        redrawFilteredRows = null
+        showingHomeDirectory = false
+        filterCount.text = ""
+        content.removeAllViews()
+        historyPanel.removeAllViews()
+        sortButton.visibility = View.GONE
+        showAvailableMediaFilters(emptySet())
+        styleContent()
+        updateNowPlaying()
+        updateNav()
+        if (!hasVerifiedAccount()) {
+            filterBar.visibility = View.GONE
+            sectionRow.visibility = View.GONE
+            title.text = "我的网盘"
+            appSub.text = "连接百度网盘后浏览我的网盘"
+            content.addView(headAction("登录百度网盘") { showLoginDialog() })
+            return
+        }
+        val parent = folders.lastOrNull()
+        val cacheKey = if (parent == null) "disk:roots" else "disk:dir:${parent.fileId}"
+        val key = parent?.let { "disk:${it.fileId}" }.orEmpty()
+        if (key != courseParentKey) {
+            courseParentKey = key
+            courseEntries.clear()
+        }
+        updateFilterChips()
+        filterBar.visibility = View.GONE
+        title.text = parent?.name ?: "我的网盘"
+        appSub.text = if (parent == null) "个人文件 · 已转存内容可直接播放" else "第 ${folders.size} 级目录"
+        renderCrumbs()
+        renderCourseSwitch()
+        val cached = courseCache.readAll(cacheKey)
+        cacheNote = if (cached.isNotEmpty()) {
+            "缓存内容 · 上次同步 ${courseCache.syncLabel(cacheKey)}"
+        } else ""
+        if (cached.isNotEmpty()) {
+            courseEntries.clear()
+            courseEntries.addAll(cached)
+            renderCourse()
+            status.text = cacheNote
+        } else if (parent != null) {
+            content.addView(headAction("← 返回上一级") {
+                returnToFolder(folders.lastIndex)
+            })
+        }
+        loadDiskPage(parent?.path ?: "/", 1, cacheKey)
+    }
+
+    private fun ensureBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) {
+        if (bdstoken.isNotEmpty()) {
+            onReady(bdstoken)
+            return
+        }
+        load(
+            PanApi.groupListSession(), lane = RequestLane.LIST, statusHint = "正在连接我的网盘…",
+            onCancelled = onFailure, onFailure = onFailure,
+        ) { json ->
+            val token = json.optJSONObject("result")?.optString("bdstoken").orEmpty()
+            if (token.isEmpty()) {
+                status.text = "网盘会话参数缺失，请重新登录。"
+                onFailure()
+            } else {
+                bdstoken = token
+                onReady(token)
+            }
+        }
+    }
+
+    private fun loadDiskPage(dir: String, page: Int, cacheKey: String, previousButton: View? = null) {
+        val expectedParentKey = courseParentKey
+        ensureBdstoken(
+            onReady = { token ->
+                load(
+                    PanApi.diskList(token, dir, page), lane = RequestLane.COURSE,
+                    statusHint = if (page == 1 && courseCache.readAll(cacheKey).isEmpty()) {
+                        "正在读取我的网盘…"
+                    } else null,
+                    onCancelled = { previousButton?.isEnabled = true },
+                    onFailure = {
+                        previousButton?.isEnabled = true
+                        if (page == 1 && courseCache.readAll(cacheKey).isEmpty()) {
+                            status.text = "读取我的网盘失败，请刷新重试。"
+                        }
+                    },
+                ) { json ->
+                    if (screen != Screen.DISK || courseParentKey != expectedParentKey) return@load
+                    val entries = PanApi.parseDiskList(json)
+                    val hasMore = PanApi.diskHasMore(json, 100)
+                    val changed = courseCache.writeIfChanged(
+                        cacheKey, page, entries, if (hasMore) "more" else "",
+                    )
+                    if (changed || !hasMore) courseCache.clearAfter(cacheKey, page)
+                    diskIndexCache = null
+                    val all = courseCache.readAll(cacheKey)
+                    courseEntries.clear()
+                    courseEntries.addAll(all)
+                    cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
+                    renderCourse()
+                    if (all.isEmpty()) content.addView(label("此目录暂无内容", 12f))
+                    filterBar.visibility = if (hasFilterOptions(all)) View.VISIBLE else View.GONE
+                    renderDiskMore(dir, cacheKey)
+                    status.text = if (!changed && page == 1) "$cacheNote · 无更新" else cacheNote
+                }
+            },
+            onFailure = {
+                previousButton?.isEnabled = true
+                if (courseCache.readAll(cacheKey).isEmpty()) status.text = "无法读取我的网盘，请登录后重试。"
+            },
+        )
+    }
+
+    private fun renderDiskMore(dir: String, cacheKey: String) {
+        val (page, cached) = courseCache.lastPage(cacheKey) ?: return
+        if (cached.nextCursor != "more") return
+        val more = headAction("加载更多") {}
+        more.setBackgroundResource(R.drawable.bg_load_more)
+        more.setTextColor(color(R.color.ink3))
+        more.setOnClickListener {
+            more.isEnabled = false
+            loadDiskPage(dir, page + 1, cacheKey, more)
+        }
+        content.addView(more)
+    }
+
+    private fun renderHomeFavorites(allowUnverified: Boolean = false) {
+        if (screen != Screen.HOME || folders.isNotEmpty()) return
+        if (!allowUnverified && !hasVerifiedAccount()) return
+        val items = favorites.all()
+        val header = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = if (items.isEmpty()) "收藏" else "收藏 ${items.size}"
+                textSize = 16f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(color(R.color.ink))
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            if (items.isNotEmpty()) {
+                addView(TextView(this@MainActivity).apply {
+                    text = "查看全部"
+                    textSize = 12f
+                    gravity = Gravity.CENTER_VERTICAL
+                    minHeight = dp(44)
+                    setPadding(dp(8), 0, 0, 0)
+                    setTextColor(color(R.color.accentInk))
+                    setBackgroundResource(android.R.drawable.list_selector_background)
+                    isFocusable = true
+                    setOnClickListener { openFavorites() }
+                })
+            }
+        }
+        historyPanel.addView(header)
+        if (items.isEmpty()) {
+            historyPanel.addView(TextView(this@MainActivity).apply {
+                text = "还没有收藏，在目录右侧点星标"
+                textSize = 11.5f
+                setTextColor(color(R.color.ink3))
+                setPadding(0, dp(4), 0, dp(8))
+            })
+            return
+        }
+        val strip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(4), 0, dp(2))
+        }
+        val scroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+            addView(strip)
+        }
+        items.take(3).forEach { entry ->
+            strip.addView(favoriteCard(entry))
+        }
+        historyPanel.addView(scroll)
+    }
+
+    private fun favoriteCard(entry: PanEntry): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundResource(R.drawable.bg_card)
+            setPadding(dp(9), dp(8), dp(9), dp(8))
+            layoutParams = LinearLayout.LayoutParams(dp(280), -2).apply { marginEnd = dp(8) }
+            isClickable = true
+            setOnClickListener { openFavoriteEntry(entry) }
+        }
+        val icon = ImageView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+            setPadding(dp(7), dp(7), dp(7), dp(7))
+            paintMediaIcon(this, PanApi.kindOf(entry), entry.directory)
+        }
+        val copy = column().apply {
+            setPadding(dp(9), 0, 0, 0)
+            addView(TextView(this@MainActivity).apply {
+                text = entry.name
+                textSize = 13f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(color(R.color.ink))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = if (entry.directory) "目录 · ${entrySourceName(entry)}"
+                else "${mediaKindLabel(PanApi.kindOf(entry), false, formatOf(entry))} · ${entrySourceName(entry)}"
+                textSize = 10.5f
+                isSingleLine = true
+                setTextColor(color(R.color.ink3))
+                setPadding(0, dp(2), 0, 0)
+            })
+        }
+        card.addView(icon)
+        card.addView(copy)
+        return card
+    }
+
+    private fun entrySourceName(entry: PanEntry): String =
+        if (entry.isDisk) "我的网盘" else shareSources().firstOrNull { it.id == entry.gid }?.name ?: "群组"
+
+    private fun openFavoriteEntry(entry: PanEntry) {
+        if (entry.directory) {
+            openSourceDirectory(entry)
+        } else {
+            openEntry(entry, listOf(entry))
+        }
+    }
+
+    private fun openSourceDirectory(entry: PanEntry) {
+        val target = if (entry.isDisk) Screen.DISK else Screen.GROUPS
+        if (!entry.isDisk) {
+            if (shareSources().none { it.id == entry.gid }) {
+                toast("来源群组已移除，请重新关联")
+                return
+            }
+            if (entry.gid != gid) setActiveGroup(entry.gid)
+        }
+        tabFolders[target] = listOf(entry)
+        tabScroll[target] = 0
+        screen = target
+        recent = false
+        transferredOnly = false
+        folders.clear()
+        folders.add(entry)
+        courseEntries.clear()
+        courseParentKey = ""
+        contentScroll.scrollTo(0, 0)
+        refresh()
     }
 
     private fun startHomeCheck(
@@ -1576,9 +2192,10 @@ class MainActivity : AppCompatActivity() {
             onFailure = {
                 if (checkToken == homeCheckToken) homeCheckInFlight = false
                 if (recentIsEmpty) {
-                    cacheFailure(homeRootKey)
+                    status.text = "无法检查更新，请稍后重试"
                 } else if (cached.isEmpty()) {
-                    content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
+                    status.text = "无法加载群内更新，请稍后重试"
+                    content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
                 } else cacheFailure(cacheKey)
             },
         ) { json ->
@@ -1615,7 +2232,14 @@ class MainActivity : AppCompatActivity() {
         val fresh = PanApi.parseRecent(json)
         val changed = courseCache.writeNewFirst(cacheKey, 1, fresh)
         if (fresh.isEmpty()) {
-            loadHomeDirectory(homeRootKey, force)
+            showingHomeDirectory = false
+            homeDisplayedEntries = emptyList()
+            content.removeAllViews()
+            filterBar.visibility = View.GONE
+            filterCount.text = ""
+            sortButton.visibility = View.GONE
+            status.text = "群内暂无更新"
+            content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
             return
         }
         showingHomeDirectory = false
@@ -1680,12 +2304,11 @@ class MainActivity : AppCompatActivity() {
         status.setTypeface(null, Typeface.NORMAL)
     }
 
-    private fun matchesHomeFilter(entry: PanEntry): Boolean {
-        if (!mediaFilter.includes(PanApi.kindOf(entry))) return false
-        return !unheardOnly || entry.directory || isUnfinishedMedia(entry)
-    }
+    private fun matchesHomeFilter(entry: PanEntry): Boolean =
+        mediaFilter.includes(PanApi.kindOf(entry))
 
-    private fun entryKey(entry: PanEntry): String = "${entry.gid}:${entry.messageId}:${entry.fileId}"
+    private fun entryKey(entry: PanEntry): String =
+        "${entry.origin}:${entry.sourceId}:${entry.gid}:${entry.messageId}:${entry.fileId}"
 
     private fun loadHomeDirectory(key: String, force: Boolean) {
         if (!showingHomeDirectory) renderHomeDirectory(key)
@@ -1703,7 +2326,7 @@ class MainActivity : AppCompatActivity() {
         content.removeAllViews()
         renderSourcePicker()
         content.addView(label("近期没有更新，可以从群目录打开已有内容。", 13f))
-        content.addView(headAction("打开群目录") { showScreen(Screen.BROWSE) })
+        content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
         sectionTitle.text = "群目录内容"
         val entries = courseCache.readAll(key)
         addFilteredCourseRows(entries, sortable = true)
@@ -1766,6 +2389,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun invalidateAccount() {
+        pdfOpenId++
         accountProbeId++
         courseRequestId++
         automaticCourseLoad = null
@@ -1780,8 +2404,12 @@ class MainActivity : AppCompatActivity() {
         requestId++
         checkingAccount = false
         verifiedAccount = ""
+        bdstoken = ""
+        diskIndexCache = null
+        diskSearchFingerprints.clear()
         mediaCaptchaDialog?.second?.dismiss()
         videoResolver.cancel()
+        renewalResolver.cancel()
         videoLoading?.dismiss()
         videoLoading = null
         if (pdfLoading != null) {
@@ -1867,6 +2495,14 @@ class MainActivity : AppCompatActivity() {
                         closeAudioPage()
                         folders.clear()
                         folderPositions.clear()
+                        tabFolders.clear()
+                        tabScroll.clear()
+                        favoritesOrigin = Screen.HOME
+                        screen = Screen.HOME
+                        recent = true
+                        bdstoken = ""
+                        diskIndexCache = null
+                        diskSearchFingerprints.clear()
                         courseEntries.clear()
                         courseParentKey = ""
                         pendingQueue = pendingQueue?.takeIf { videoToRestore?.account == verifiedAccount }
@@ -1948,13 +2584,15 @@ class MainActivity : AppCompatActivity() {
         val name = shareSources().firstOrNull { it.id == gid }?.name
         sourceName.text = name ?: "选择群组"
         sourceButton.contentDescription = name?.let { "切换群组，当前为 $it" } ?: "选择群组"
+        homeGroupChip?.text = name ?: "选择群组"
+        homeGroupChip?.contentDescription = name?.let { "切换群组，当前为 $it" } ?: "选择群组"
     }
 
     private fun display(entries: List<PanEntry>) {
         if (screen == Screen.HOME && folders.isEmpty()) homeDisplayedEntries = entries
         status.text = if (entries.isEmpty()) "没有条目" else cacheNote
-        sectionTitle.text = if (screen == Screen.HOME) "群内更新" else "文件"
-        addFilteredCourseRows(entries, sortable = screen == Screen.BROWSE)
+        sectionTitle.text = if (screen == Screen.HOME) "群最新更新" else "文件"
+        addFilteredCourseRows(entries, sortable = screen == Screen.GROUPS)
     }
 
     private fun renderCourse() {
@@ -1965,27 +2603,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
-        sortButton.visibility = if (sortable) View.VISIBLE else View.GONE
+        val transferred = if (entries.any { !it.isDisk }) transferredIndex() else emptySet()
+        val transferredCount = entries.count { matchesTransferred(it, transferred) }
+        if (transferredCount == 0) transferredOnly = false
+        transferredChip.visibility = if (transferredCount > 0) View.VISIBLE else View.GONE
+        transferredChip.text = "已转存 $transferredCount"
+        transferredChip.contentDescription = "只看已转存，共 $transferredCount 项"
+        filterBar.visibility =
+            if (hasFilterOptions(entries) || transferredCount > 0) View.VISIBLE else View.GONE
+        sortButton.visibility = if (sortable && entries.isNotEmpty()) View.VISIBLE else View.GONE
         sortButton.text = courseOrder.label
-        val kinds = entries.asSequence().filterNot { it.directory }.map(PanApi::kindOf).toSet()
+        val kinds = entries.map(PanApi::kindOf).toSet()
         showAvailableMediaFilters(kinds)
         if (mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
             mediaFilter = MediaFilter.ALL
-            unheardOnly = false
         }
         val rows = column()
         fun renderRows() {
-            val matching = entries.filter { mediaFilter.includes(PanApi.kindOf(it)) }
-            val unheard = matching.filter { it.directory || isUnfinishedMedia(it) }
-            unheardCount = unheard.count { !it.directory }
+            val matching = entries.filter {
+                mediaFilter.includes(PanApi.kindOf(it)) &&
+                    (!transferredOnly || matchesTransferred(it, transferred))
+            }
             updateFilterChips()
-            val shown = if (unheardOnly) unheard else matching
-            val ordered = if (sortable) orderCourses(shown) else shown
+            val ordered = if (sortable) orderCourses(matching) else matching
             filterCount.text = "共 ${ordered.size} 项"
             rows.removeAllViews()
             extendPlaybackQueue(ordered)
             if (ordered.isEmpty() && entries.isNotEmpty()) rows.addView(label("当前已加载的内容中没有匹配项", 12f))
-            addCourseRows(rows, ordered)
+            addCourseRows(rows, ordered, transferred)
             renderCourseSwitch()
         }
         content.addView(rows)
@@ -2014,6 +2659,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playbackOrderKey(entry: PanEntry, listKey: String?): String? {
+        if (entry.isDisk) return playbackPathOrderKey(entry)
         val directory = directoryCacheKey(entry, listKey) ?: courseCache.directoryContaining(entry)
         return directory?.let { AccountScope.key(it) } ?: playbackPathOrderKey(entry)
     }
@@ -2021,7 +2667,7 @@ class MainActivity : AppCompatActivity() {
     private fun playbackPathOrderKey(entry: PanEntry): String? {
         val path = PanApi.readablePath(entry.path)
         if (!path.startsWith('/')) return null
-        return AccountScope.key("path:${entry.gid}:${path.substringBeforeLast('/')}")
+        return AccountScope.key("path:${entry.origin}:${entry.sourceId}:${path.substringBeforeLast('/')}")
     }
 
     private fun playbackOrder(entry: PanEntry, listKey: String?): CourseOrder {
@@ -2079,12 +2725,19 @@ class MainActivity : AppCompatActivity() {
             ?: courseCache.directoryContaining(entry)
             ?: return null
         val media = sameMediaKind(entry, courseCache.readAll(key))
-        val queueKey = if (key.startsWith("dir:")) key.removePrefix("dir:") else "BROWSE:${entry.gid}"
+        val queueKey = when {
+            key == "disk:roots" -> "D:root"
+            key.startsWith("disk:dir:") -> "D:${key.removePrefix("disk:dir:")}"
+            key.startsWith("roots:") -> "G:${entry.gid}"
+            key.startsWith("dir:") -> "G:${key.removePrefix("dir:")}"
+            else -> if (entry.isDisk) "D:root" else "G:${entry.gid}"
+        }
         return queueKey to orderCourses(media, playbackOrder(entry, queueKey))
     }
 
     private fun nextDirectoryPage(entry: PanEntry, listKey: String?): String? {
         val key = directoryCacheKey(entry, listKey) ?: return null
+        if (entry.isDisk || key.startsWith("disk:")) return null
         val (page, cached) = courseCache.lastPage(key) ?: return null
         if (key.startsWith("roots:")) {
             val cursor = cached.nextCursor?.takeIf { it.isNotEmpty() } ?: return null
@@ -2101,6 +2754,10 @@ class MainActivity : AppCompatActivity() {
         isCurrentCourse: () -> Boolean = { PlaybackQueueState.anchor?.let { sameEntry(it, entry) } == true },
         done: (List<PanEntry>?) -> Unit,
     ) {
+        if (entry.isDisk) {
+            loadMoreDiskCourses(entry, listKey, isCurrentCourse, done)
+            return
+        }
         val key = directoryCacheKey(entry, listKey) ?: return done(null)
         val (page, cached) = courseCache.lastPage(key) ?: return done(null)
         val url = nextDirectoryPage(entry, listKey) ?: return done(null)
@@ -2139,9 +2796,64 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun loadMoreDiskCourses(
+        entry: PanEntry,
+        listKey: String?,
+        isCurrentCourse: () -> Boolean,
+        done: (List<PanEntry>?) -> Unit,
+    ) {
+        val key = directoryCacheKey(entry, listKey) ?: return done(null)
+        if (!key.startsWith("disk:")) return done(null)
+        val (page, cached) = courseCache.lastPage(key) ?: return done(null)
+        if (cached.nextCursor != "more") return done(null)
+        val dir = if (key == "disk:roots") {
+            "/"
+        } else {
+            PanApi.readablePath(entry.path).substringBeforeLast('/').ifEmpty { "/" }
+        }
+        ensureBdstoken(
+            onReady = { token ->
+                load(
+                    PanApi.diskList(token, dir, page + 1), lane = RequestLane.COURSE,
+                    onCancelled = { done(null) }, onFailure = { done(null) },
+                ) { json ->
+                    if (PlaybackQueueState.listKey != listKey || !isCurrentCourse()) {
+                        done(null)
+                        return@load
+                    }
+                    val files = PanApi.parseDiskList(json)
+                    val hasMore = PanApi.diskHasMore(json, 100)
+                    val last = courseCache.lastPage(key)
+                    if (last?.first != page || last.second != cached) {
+                        done(null)
+                        return@load
+                    }
+                    courseCache.writeIfChanged(key, page + 1, files, if (hasMore) "more" else "")
+                    diskIndexCache = null
+                    val courses = orderCourses(
+                        sameMediaKind(entry, courseCache.readAll(key)),
+                        playbackOrder(entry, listKey),
+                    )
+                    PlaybackQueueState.entries = courses
+                    renderCourseSwitch()
+                    done(courses)
+                }
+            },
+            onFailure = { done(null) },
+        )
+    }
+
+    private fun hasMoreCourses(entry: PanEntry, listKey: String?): Boolean {
+        val key = directoryCacheKey(entry, listKey) ?: return false
+        val (_, cached) = courseCache.lastPage(key) ?: return false
+        return if (entry.isDisk) cached.nextCursor == "more" else nextDirectoryPage(entry, listKey) != null
+    }
+
     private fun directoryCacheKey(entry: PanEntry, listKey: String?): String? = when {
-        listKey == "BROWSE:${entry.gid}" -> "roots:${entry.gid}"
-        listKey?.startsWith("${entry.gid}:") == true -> "dir:$listKey"
+        listKey == "D:root" && entry.isDisk -> "disk:roots"
+        listKey?.startsWith("D:") == true && entry.isDisk -> "disk:dir:${listKey.removePrefix("D:")}"
+        listKey == "G:${entry.gid}" -> "roots:${entry.gid}"
+        listKey?.startsWith("G:${entry.gid}:") == true -> "dir:${listKey.removePrefix("G:")}"
         else -> null
     }
 
@@ -2181,9 +2893,19 @@ class MainActivity : AppCompatActivity() {
         })
     }
 
-    private fun addCourseRows(container: LinearLayout, entries: List<PanEntry>) {
+    private fun addCourseRows(
+        container: LinearLayout,
+        entries: List<PanEntry>,
+        transferred: Set<String> = emptySet(),
+    ) {
+        val favoriteKeys = favorites.all().map(::entryKey).toSet()
+        val sourceNames = if (screen == Screen.FAVORITES) {
+            shareSources().associate { it.id to it.name }
+        } else {
+            emptyMap()
+        }
         if (!wide) {
-            entries.forEach { container.addView(courseRow(it, entries)) }
+            entries.forEach { container.addView(courseRow(it, entries, transferred, favoriteKeys, sourceNames)) }
             return
         }
         entries.chunked(2).forEach { pair ->
@@ -2191,14 +2913,20 @@ class MainActivity : AppCompatActivity() {
             pair.forEachIndexed { index, entry ->
                 val params = LinearLayout.LayoutParams(0, -2, 1f)
                 if (index == 0 && pair.size == 2) params.rightMargin = dp(8)
-                line.addView(courseRow(entry, entries), params)
+                line.addView(courseRow(entry, entries, transferred, favoriteKeys, sourceNames), params)
             }
             if (pair.size == 1) line.addView(View(this), LinearLayout.LayoutParams(0, -2, 1f))
             container.addView(line)
         }
     }
 
-    private fun courseRow(entry: PanEntry, entries: List<PanEntry>): View {
+    private fun courseRow(
+        entry: PanEntry,
+        entries: List<PanEntry>,
+        transferred: Set<String> = emptySet(),
+        favoriteKeys: Set<String> = emptySet(),
+        sourceNames: Map<String, String> = emptyMap(),
+    ): View {
         val format = formatOf(entry)
         val kind = PanApi.kindOf(entry)
         val row = layoutInflater.inflate(R.layout.item_course, content, false)
@@ -2212,11 +2940,17 @@ class MainActivity : AppCompatActivity() {
             .substringAfterLast('/')
         val size = entry.size.toLongOrNull()?.let { if (it >= 1024 * 1024) "${it / 1024 / 1024} MB" else "" }.orEmpty()
         val kindName = mediaKindLabel(kind, entry.directory, format)
+        val source = when {
+            screen != Screen.FAVORITES -> ""
+            entry.isDisk -> "我的网盘"
+            else -> sourceNames[entry.gid] ?: "群组"
+        }
+        val transferredLabel = if (matchesTransferred(entry, transferred)) "已转存" else ""
         row.findViewById<TextView>(R.id.itemMeta).text =
-            listOf(kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
+            listOf(source, transferredLabel, kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
         val side = row.findViewById<ImageView>(R.id.itemSide)
         side.tag = favoriteTag(entry)
-        paintFavorite(side, favorites.has(entry))
+        paintFavorite(side, entryKey(entry) in favoriteKeys)
         side.setOnClickListener { toggleFavorite(entry) }
         val mark = progressMark(entry)
         if (mark != null) {
@@ -2239,12 +2973,31 @@ class MainActivity : AppCompatActivity() {
 
     /** 按扩展名选择音视频播放或 PDF 下载。 */
     private fun openEntry(entry: PanEntry, entries: List<PanEntry>, listKey: String? = null) {
+        if (screen == Screen.FAVORITES && entry.directory) {
+            openSourceDirectory(entry)
+            return
+        }
         val kind = PanApi.kindOf(entry)
         if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) selectPlayback(entry, entries, listKey)
         when (kind) {
             MediaKind.DIRECTORY -> {
+                if (screen == Screen.HOME) {
+                    screen = Screen.GROUPS
+                    recent = false
+                    transferredOnly = false
+                    tabFolders[Screen.GROUPS] = listOf(entry)
+                    tabScroll[Screen.GROUPS] = 0
+                    folders.clear()
+                    folders.add(entry)
+                    courseEntries.clear()
+                    courseParentKey = ""
+                    contentScroll.scrollTo(0, 0)
+                    refresh()
+                    return
+                }
                 rememberFolderPosition()
                 folders.add(entry)
+                transferredOnly = false
                 contentScroll.scrollTo(0, 0)
                 refresh()
             }
@@ -2277,7 +3030,7 @@ class MainActivity : AppCompatActivity() {
         return "${if (kind == MediaKind.AUDIO) "听到" else "看到"} ${formatAudioTime(item.seconds)}" to false
     }
 
-    private fun favoriteTag(entry: PanEntry) = "favorite:${entry.gid}:${entry.messageId}:${entry.fileId}"
+    private fun favoriteTag(entry: PanEntry) = "favorite:${entryKey(entry)}"
 
     private fun paintFavorite(icon: ImageView, starred: Boolean) {
         icon.setImageResource(if (starred) R.drawable.ic_star_filled else R.drawable.ic_star)
@@ -2287,9 +3040,12 @@ class MainActivity : AppCompatActivity() {
     private fun toggleFavorite(entry: PanEntry): Boolean {
         if (!hasVerifiedAccount()) return false
         val starred = favorites.toggle(entry)
-        if (screen == Screen.FAVORITES && folders.isEmpty()) {
+        updateFavoritesBadge()
+        if (screen == Screen.FAVORITES) {
             content.removeAllViews()
             renderFavorites()
+        } else if (screen == Screen.HOME && folders.isEmpty()) {
+            renderHomeSections()
         } else {
             content.findViewWithTag<ImageView>(favoriteTag(entry))?.let { paintFavorite(it, starred) }
         }
@@ -2303,9 +3059,13 @@ class MainActivity : AppCompatActivity() {
 
     private fun currentPlaybackListKey(): String {
         val parent = folders.lastOrNull()
-        val listScreen = if (showingHomeDirectory) Screen.BROWSE else screen
-        return if (parent == null) "$listScreen:$gid"
-        else "${parent.gid}:${parent.messageId}:${parent.fileId}"
+        return when {
+            parent != null && parent.isDisk -> "D:${parent.fileId}"
+            parent != null -> "G:${parent.gid}:${parent.messageId}:${parent.fileId}"
+            screen == Screen.DISK -> "D:root"
+            screen == Screen.GROUPS || showingHomeDirectory -> "G:$gid"
+            else -> "${screen}:$gid"
+        }
     }
 
     private fun sameMediaKind(entry: PanEntry, entries: List<PanEntry>): List<PanEntry> {
@@ -2318,7 +3078,7 @@ class MainActivity : AppCompatActivity() {
         if (!path.startsWith('/')) return listOf(entry)
         val directory = path.substringBeforeLast('/')
         return sameMediaKind(entry, entries).filter {
-            it.gid == entry.gid && PanApi.readablePath(it.path).let { path ->
+            it.origin == entry.origin && it.gid == entry.gid && PanApi.readablePath(it.path).let { path ->
                 path.startsWith('/') && path.substringBeforeLast('/') == directory
             }
         }.takeIf { list -> list.any { sameEntry(it, entry) } } ?: listOf(entry)
@@ -2341,10 +3101,12 @@ class MainActivity : AppCompatActivity() {
         if (!ownsAudio(player)) return null
         val item = player.currentMediaItem ?: return null
         val extras = item.mediaMetadata.extras ?: return null
+        val origin = runCatching { EntryOrigin.valueOf(extras.getString("origin") ?: "GROUP") }
+            .getOrDefault(EntryOrigin.GROUP)
         return PanEntry(
             extras.getString("gid").orEmpty(), extras.getString("message").orEmpty(),
             extras.getString("owner").orEmpty(), item.mediaId, item.mediaMetadata.title?.toString().orEmpty(),
-            extras.getString("path").orEmpty(), extras.getString("size").orEmpty(), false,
+            extras.getString("path").orEmpty(), extras.getString("size").orEmpty(), false, origin,
         )
     }
 
@@ -2383,7 +3145,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             if (automaticCourseLoad?.let { sameEntry(it, entry) } == true ||
-                nextDirectoryPage(entry, listKey) == null
+                !hasMoreCourses(entry, listKey)
             ) return
             automaticCourseLoad = entry
             loadMoreCourses(entry, listKey, ::canAdvance) { courses ->
@@ -2418,7 +3180,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun sameEntry(first: PanEntry, second: PanEntry): Boolean =
-        first.gid == second.gid && first.messageId == second.messageId && first.fileId == second.fileId
+        first.origin == second.origin && first.fileId == second.fileId &&
+            (first.isDisk || (first.gid == second.gid && first.messageId == second.messageId))
 
     private fun formatOf(entry: PanEntry): String =
         if (entry.directory) "目录" else entry.name.substringAfterLast('.', "文件").uppercase()
@@ -2461,8 +3224,12 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val listKey = PlaybackQueueState.listKey
-        val directoryQueue = PlaybackQueueState.entries.filter { it.gid == entry.gid }
-        val isDirectory = listKey == "BROWSE:${entry.gid}" || listKey?.startsWith("${entry.gid}:") == true
+        val directoryQueue = PlaybackQueueState.entries.filter {
+            it.origin == entry.origin && it.gid == entry.gid
+        }
+        val isDirectory = listKey == "G:${entry.gid}" ||
+            listKey?.startsWith("G:${entry.gid}:") == true ||
+            listKey?.startsWith("D:") == true
         if (isDirectory && directoryQueue.any { sameEntry(it, entry) }) {
             openEntry(entry, directoryQueue, listKey)
         } else {
@@ -2476,12 +3243,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun historyMeta(item: AudioHistoryItem, sourceNames: Map<String, String>): String {
         val isVideo = PanApi.kindOf(item.entry) == MediaKind.VIDEO
-        val progress = when {
+        val progress: String? = when {
             item.completed -> if (isVideo) "已看完" else "已听完"
             item.seconds > 0 -> "${if (isVideo) "看到" else "听到"} ${formatAudioTime(item.seconds)}"
-            else -> "未播放"
+            else -> null
         }
-        return listOfNotNull(sourceNames[item.entry.gid], progress).joinToString(" · ")
+        val source = if (item.entry.isDisk) "我的网盘" else sourceNames[item.entry.gid]
+        return listOfNotNull(source, progress).joinToString(" · ")
+    }
+
+    private fun renderHomeSections(allowUnverified: Boolean = false) {
+        renderAudioHistory(allowUnverified)
+        renderHomeFavorites(allowUnverified)
     }
 
     private fun renderAudioHistory(allowUnverified: Boolean = false) {
@@ -2590,9 +3363,10 @@ class MainActivity : AppCompatActivity() {
         page.findViewById<TextView>(R.id.favCount).text = "共 ${items.size} 项"
         page.findViewById<View>(R.id.favEmpty).visibility =
             if (items.isEmpty()) View.VISIBLE else View.GONE
-        addCourseRows(list, items)
+        val transferred = if (items.any { !it.isDisk }) transferredIndex() else emptySet()
+        addCourseRows(list, items, transferred)
         page.findViewById<TextView>(R.id.favGoBrowse).setOnClickListener {
-            showScreen(Screen.BROWSE)
+            showScreen(Screen.GROUPS)
         }
         content.addView(page)
         renderCourseSwitch()
@@ -2703,6 +3477,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+        if (entry.isDisk) {
+            resolveDiskAudio(entry, openPlayer)
+            return
+        }
         pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
         dispatchedAudioEntry = null
         val id = ++audioRequestId
@@ -2740,6 +3518,176 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             resolveAudioFile(entry, route, openPlayer, id, token)
+        }
+    }
+
+    private fun resolveDiskAudio(entry: PanEntry, openPlayer: Boolean) {
+        val id = ++audioRequestId
+        val token = AudioPlayRequestGate.begin()
+        audioPlayToken = token
+        pendingAudioEntry = entry
+        dispatchedAudioEntry = null
+        audioResolver.cancel()
+        dismissMediaCaptcha(RequestLane.AUDIO)
+        updateAudioRequestMessage("正在打开 ${entry.name}…")
+        val account = verifiedAccount
+        val key = mediaCacheKey(account, entry)
+        fun isCurrentPlayback() = !isDestroyed && verifiedAccount == account &&
+            audioPlayToken == token && AudioPlayRequestGate.isCurrent(token)
+        fun playStream(stream: VideoStream) {
+            mediaAddresses.savePlaylist(key, stream)
+            startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+        }
+        ensureBdstoken(
+            onReady = { bd ->
+                if (id != audioRequestId || !isCurrentPlayback()) return@ensureBdstoken
+                val uri = PanApi.diskAudioPlaylist(entry, bd)
+                mediaAddresses.playlist(key, uri)?.let {
+                    playStream(it)
+                    return@ensureBdstoken
+                }
+                var attempt = 0
+                fun fetch() {
+                    if (id != audioRequestId || isDestroyed) return
+                    if (!AudioPlayRequestGate.isCurrent(token)) {
+                        cancelPendingAudioRequest()
+                        return
+                    }
+                    attempt++
+                    if (attempt >= 2) updateAudioRequestMessage("音频转码准备中，请稍候…")
+                    audioResolver.start(uri, web.settings.userAgentString) { result ->
+                        if (id != audioRequestId || isDestroyed) return@start
+                        if (!AudioPlayRequestGate.isCurrent(token)) {
+                            cancelPendingAudioRequest()
+                            return@start
+                        }
+                        result.onSuccess(::playStream).onFailure { error ->
+                            when {
+                                error !is AudioTranscodingPending -> failAudioRequest(
+                                    (error as? IllegalStateException)?.message ?: "获取网盘音频失败，请重试。",
+                                )
+                                attempt < 4 -> web.postDelayed({ fetch() }, 2_000)
+                                else -> {
+                                    updateAudioRequestMessage("正在打开原始音频…")
+                                    requestDiskFileLink(
+                                        entry, bd, RequestLane.AUDIO, ::isCurrentPlayback,
+                                        onFailure = { failAudioRequest("无法打开原始音频，请稍后重试。") },
+                                    ) { link -> startBackgroundAudio(entry, link, openPlayer) }
+                                }
+                            }
+                        }
+                    }
+                }
+                fetch()
+            },
+            onFailure = {
+                if (id == audioRequestId && isCurrentPlayback()) {
+                    failAudioRequest("无法读取我的网盘，请登录后重试。")
+                }
+            },
+        )
+    }
+
+    private fun requestDiskFileLink(
+        entry: PanEntry,
+        bdstoken: String,
+        lane: RequestLane,
+        isCurrent: () -> Boolean,
+        onFailure: () -> Unit,
+        onReady: (Uri) -> Unit,
+    ) {
+        val fail = { if (isCurrent()) onFailure() }
+        fun stop(message: String) {
+            if (!isCurrent()) return
+            if (lane == RequestLane.AUDIO) {
+                failAudioRequest(message)
+            } else {
+                onFailure()
+                status.text = message
+            }
+        }
+        load(PanApi.diskDownloadSession(), lane = lane, onCancelled = fail, onFailure = fail) { json ->
+            if (!isCurrent()) return@load
+            val session = json.getJSONObject("result")
+            val sign1 = JSONObject.quote(session.getString("sign1"))
+            val sign2 = JSONObject.quote(session.getString("sign2"))
+            val sign3 = JSONObject.quote(session.getString("sign3"))
+            val timestamp = session.getString("timestamp")
+            val vip = session.getString("is_vip")
+            val script = """
+                (() => {
+                    if (location.origin !== 'https://pan.baidu.com') return '';
+                    try {
+                        const sign = new Function('return ' + $sign2)();
+                        return btoa(sign($sign3, $sign1));
+                    } catch (_) {
+                        return '';
+                    }
+                })()
+            """.trimIndent()
+            web.evaluateJavascript(script) { raw ->
+                if (!isCurrent()) return@evaluateJavascript
+                val sign = runCatching { JSONTokener(raw.orEmpty()).nextValue() as? String }.getOrNull()
+                if (sign.isNullOrEmpty()) {
+                    stop("无法生成下载签名，请重新登录后重试。")
+                    return@evaluateJavascript
+                }
+                fun submit(verification: String = "") {
+                    load(
+                        PanApi.diskDownload(entry, bdstoken, sign, timestamp, vip) + verification,
+                        lane = lane, onCancelled = fail, onFailure = fail,
+                        onCaptcha = { captchaJson, current ->
+                            if (!activityVisible) {
+                                stop("需要输入网盘验证码，请返回应用后重试。")
+                            } else {
+                                val message = if (verification.isEmpty()) "请输入图片中的验证码"
+                                else "验证码错误或已失效，请重新输入"
+                                val captcha = PanApi.parseMediaCaptcha(captchaJson)
+                                if (captcha == null) {
+                                    stop("网盘要求输入验证码，请在网页版网盘打开一次后重试。")
+                                } else {
+                                    showMediaCaptcha(
+                                        lane, captcha, message, { current() && isCurrent() }, ::stop,
+                                    ) { answer ->
+                                        submit("&" + PanApi.mediaCaptchaForm(captcha, answer))
+                                    }
+                                }
+                            }
+                        },
+                    ) { download ->
+                        if (!isCurrent()) return@load
+                        val link = runCatching { PanApi.parseDiskDownloadLink(download) }.getOrElse {
+                            stop(it.message ?: "网盘未返回有效的原始文件地址。")
+                            return@load
+                        }
+                        val cookies = CookieManager.getInstance()
+                        val cookie = cookies.getCookie(link.toString()) ?: cookies.getCookie("https://pan.baidu.com")
+                        val userAgent = web.settings.userAgentString
+                        Thread {
+                            val cdn = runCatching {
+                                val connection = URL(link.toString()).openConnection() as HttpURLConnection
+                                try {
+                                    connection.instanceFollowRedirects = false
+                                    connection.connectTimeout = 6_000
+                                    connection.readTimeout = 6_000
+                                    connection.setRequestProperty("User-Agent", userAgent)
+                                    if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
+                                    check(connection.responseCode == HttpURLConnection.HTTP_MOVED_TEMP)
+                                    Uri.parse(connection.getHeaderField("Location").orEmpty())
+                                        .also { check(PanApi.isCachedFileLink(it)) }
+                                } finally {
+                                    connection.disconnect()
+                                }
+                            }.getOrNull()
+                            runOnUiThread {
+                                if (!isCurrent()) return@runOnUiThread
+                                if (cdn == null) fail() else onReady(cdn)
+                            }
+                        }.start()
+                    }
+                }
+                submit()
+            }
         }
     }
 
@@ -2818,7 +3766,8 @@ class MainActivity : AppCompatActivity() {
             status.text = "请确认网盘登录后重试。"
             return
         }
-        val id = ++requestId
+        val id = ++pdfOpenId
+        requestId++
         dismissMediaCaptcha(RequestLane.LIST)
         if (pdfLoading != null) {
             pdfFetcher.cancel()
@@ -2833,7 +3782,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         mediaAddresses.link(key)?.let {
-            downloadPdf(entry, account, key, it, fromCache = true)
+            downloadPdf(entry, account, id, key, it, fromCache = true)
             return
         }
         if (!ready) {
@@ -2844,60 +3793,149 @@ class MainActivity : AppCompatActivity() {
         web.evaluateJavascript(
             "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
         ) { result ->
-            if (id != requestId || isDestroyed) return@evaluateJavascript
+            if (!isCurrentPdf(id, account)) return@evaluateJavascript
             val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
             if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
-                requestPdfLink(entry, viewer)
+                requestPdfLink(entry, viewer, id)
             } else {
                 load(PanApi.viewer()) { json ->
+                    if (!isCurrentPdf(id, account)) return@load
                     val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
                     check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
-                    requestPdfLink(entry, uk)
+                    requestPdfLink(entry, uk, id)
                 }
             }
         }
     }
 
-    private fun requestPdfLink(entry: PanEntry, viewer: String) {
+    private fun isCurrentPdf(id: Int, account: String) =
+        id == pdfOpenId && !isDestroyed && activityVisible &&
+            account == verifiedAccount && hasVerifiedAccount()
+
+    private fun requestPdfLink(entry: PanEntry, viewer: String, id: Int) {
         if (viewer != verifiedAccount) {
             verifyAndRefresh()
             return
         }
         val key = mediaCacheKey(viewer, entry)
-        loadMediaLink(entry, viewer) { link ->
-            downloadPdf(entry, viewer, key, link, fromCache = false)
+        fun receive(link: Uri) {
+            if (!isCurrentPdf(id, viewer)) return
+            mediaAddresses.saveLink(key, link)
+            downloadPdf(entry, viewer, id, key, link, fromCache = false)
+        }
+        if (entry.isDisk) {
+            load(
+                PanApi.diskDocview(entry, viewer), lane = RequestLane.LIST,
+                statusHint = "正在获取文档地址…",
+                onFailure = { requestPdfFallback(entry, viewer, id) },
+            ) { json ->
+                if (!isCurrentPdf(id, viewer)) return@load
+                if (json.optInt("need_passwd", 0) == 1) {
+                    status.text = "该文档需要密码，当前版本暂不支持。"
+                    return@load
+                }
+                val link = runCatching { PanApi.parseDocviewLink(json) }.getOrElse {
+                    requestPdfFallback(entry, viewer, id)
+                    return@load
+                }
+                receive(link)
+            }
+            return
+        }
+        if (entry.owner.isNotEmpty()) {
+            load(
+                PanApi.groupPdfPreview(entry), post = true, form = PanApi.groupPdfPreviewForm(entry),
+                lane = RequestLane.LIST, statusHint = "正在获取文档地址…",
+                onFailure = { requestPdfFallback(entry, viewer, id) },
+            ) { json ->
+                val link = PanApi.parseGroupPreviewLink(json)
+                if (link == null) requestPdfFallback(entry, viewer, id) else receive(link)
+            }
+        } else {
+            requestPdfFallback(entry, viewer, id)
         }
     }
 
-    private fun downloadPdf(entry: PanEntry, account: String, key: String, link: Uri, fromCache: Boolean) {
-        if (!activityVisible || account != verifiedAccount) return
+    /** 预览接口不可用时退回下载取址：群文件走 sharedownload，网盘走 /api/download。 */
+    private fun requestPdfFallback(entry: PanEntry, viewer: String, id: Int) {
+        fun isCurrent() = isCurrentPdf(id, viewer)
+        if (!isCurrent()) return
+        val key = mediaCacheKey(viewer, entry)
+        val fail = { if (isCurrent()) status.text = "文档打开失败，请重试。" }
+        fun receive(link: Uri) {
+            if (!isCurrent()) return
+            mediaAddresses.saveLink(key, link)
+            downloadPdf(entry, viewer, id, key, link, fromCache = false, fromFallback = true)
+        }
+        if (!entry.isDisk) {
+            loadMediaLink(entry, viewer, lane = RequestLane.LIST, onFailure = fail) { receive(it) }
+            return
+        }
+        ensureBdstoken(
+            onReady = { token ->
+                if (isCurrent()) {
+                    requestDiskFileLink(
+                        entry, token, RequestLane.LIST, ::isCurrent, onFailure = fail,
+                    ) { receive(it) }
+                }
+            },
+            onFailure = fail,
+        )
+    }
+
+    private fun downloadPdf(
+        entry: PanEntry,
+        account: String,
+        id: Int,
+        key: String,
+        link: Uri,
+        fromCache: Boolean,
+        fromFallback: Boolean = false,
+    ) {
+        if (!isCurrentPdf(id, account)) return
         pdfLoading?.dismiss()
-        pdfLoading = AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle(entry.name)
             .setMessage("正在下载文档…")
             .setCancelable(false)
             .setNegativeButton("取消") { _, _ ->
+                pdfOpenId++
                 pdfFetcher.cancel()
                 pdfLoading = null
                 status.text = ""
             }
             .show()
+        pdfLoading = dialog
         pdfFetcher.start(link) { result ->
-            pdfLoading?.dismiss()
-            pdfLoading = null
+            if (pdfLoading === dialog) {
+                dialog.dismiss()
+                pdfLoading = null
+            }
+            if (!isCurrentPdf(id, account)) {
+                result.getOrNull()?.let(PdfCache::discard)
+                return@start
+            }
             result.mapCatching { temp ->
                 try {
                     val cached = PdfCache.publish(this, key, temp)
-                    if (activityVisible && account == verifiedAccount) startPdfReader(entry, cached)
+                    startPdfReader(entry, cached)
                 } finally {
                     PdfCache.discard(temp)
                 }
             }.onFailure {
                 if (it is InvalidPdfLink) {
                     mediaAddresses.clearLink(key)
-                    if (fromCache && ready && activityVisible && account == verifiedAccount) {
-                        requestPdfLink(entry, account)
-                        return@onFailure
+                    if (ready) {
+                        when {
+                            fromCache -> {
+                                requestPdfLink(entry, account, id)
+                                return@onFailure
+                            }
+                            !fromFallback -> {
+                                requestPdfFallback(entry, account, id)
+                                return@onFailure
+                            }
+                        }
                     }
                 }
                 status.text = it.message ?: "文档打开失败，请重试。"
@@ -2941,9 +3979,12 @@ class MainActivity : AppCompatActivity() {
             putString("name", entry.name)
             putString("path", entry.path)
             putString("size", entry.size)
+            putString("origin", entry.origin.name)
         }
         val id = audioRequestId
         dispatchedAudioEntry = entry
+        diskRenewAttempts = 0
+        lastDiskRenewAt = 0L
         val result = player.sendCustomCommand(AudioPlaybackService.PLAY_FILE, args)
         result.addListener({
             if (!isDestroyed && !isFinishing && id == audioRequestId) {
@@ -2974,10 +4015,12 @@ class MainActivity : AppCompatActivity() {
         if (!wasHls && !error.isExpiredMediaLink()) return
         val id = extras.getString("playbackId") ?: return
         if (extras.getString("account") != verifiedAccount || id == renewingPlaybackId) return
+        val origin = runCatching { EntryOrigin.valueOf(extras.getString("origin") ?: "GROUP") }
+            .getOrDefault(EntryOrigin.GROUP)
         val entry = PanEntry(
             extras.getString("gid").orEmpty(), extras.getString("message").orEmpty(),
             extras.getString("owner").orEmpty(), item.mediaId, metadata.title?.toString().orEmpty(),
-            "", "", false,
+            extras.getString("path").orEmpty(), extras.getString("size").orEmpty(), false, origin,
         )
         val account = verifiedAccount
         val key = mediaCacheKey(account, entry)
@@ -2992,9 +4035,9 @@ class MainActivity : AppCompatActivity() {
         if (wasHls) mediaAddresses.clearPlaylist(key)
         else mediaAddresses.clearLink(key)
         renewingPlaybackId = id
-        fun finishRenewal() {
+        fun finishRenewal(allowAgain: Boolean = false) {
             renewingPlaybackId = null
-            renewedPlaybackId = id
+            if (!allowAgain) renewedPlaybackId = id
         }
         fun renew(link: Uri) {
             finishRenewal()
@@ -3003,9 +4046,80 @@ class MainActivity : AppCompatActivity() {
                 putString("uri", link.toString())
             })
         }
+        if (entry.isDisk) {
+            if (!wasHls) {
+                fun isCurrent() = !isDestroyed && account == verifiedAccount &&
+                    player.currentMediaItem?.mediaMetadata?.extras?.getString("playbackId") == id
+                ensureBdstoken(
+                    onReady = { token ->
+                        if (isCurrent()) {
+                            requestDiskFileLink(
+                                entry, token, RequestLane.RENEWAL, ::isCurrent, onFailure = { finishRenewal() },
+                            ) { link -> renew(link) }
+                        } else {
+                            finishRenewal()
+                        }
+                    },
+                    onFailure = { finishRenewal() },
+                )
+                return
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastDiskRenewAt < 10_000) {
+                finishRenewal(allowAgain = true)
+                return
+            }
+            if (diskRenewAttempts >= 3) {
+                finishRenewal()
+                updateAudioRequestMessage("播放地址已过期，请重新打开")
+                return
+            }
+            lastDiskRenewAt = now
+            diskRenewAttempts++
+            ensureBdstoken(
+                onReady = { token ->
+                    if (account != verifiedAccount || isDestroyed) {
+                        finishRenewal()
+                        return@ensureBdstoken
+                    }
+                    val uri = PanApi.diskAudioPlaylist(entry, token)
+                    renewalResolver.start(uri, web.settings.userAgentString) { result ->
+                        if (account != verifiedAccount || isDestroyed) {
+                            finishRenewal()
+                            return@start
+                        }
+                        val stream = result.getOrNull()
+                        if (stream == null) {
+                            finishRenewal()
+                            updateAudioRequestMessage(
+                                (result.exceptionOrNull() as? IllegalStateException)?.message
+                                    ?: "播放地址已过期，请重新打开",
+                            )
+                            return@start
+                        }
+                        mediaAddresses.savePlaylist(key, stream)
+                        finishRenewal(allowAgain = true)
+                        player.sendCustomCommand(AudioPlaybackService.RENEW_HLS, Bundle().apply {
+                            putString("playbackId", id)
+                            putString("uri", uri.toString())
+                            putByteArray("playlist", stream.playlist)
+                        })
+                        updateAudioRequestMessage(null)
+                    }
+                },
+                onFailure = {
+                    finishRenewal()
+                    updateAudioRequestMessage("无法续期播放地址，请重新打开")
+                },
+            )
+            return
+        }
         val cachedLink = if (wasHls) mediaAddresses.link(key) else null
         if (cachedLink != null) renew(cachedLink)
-        else loadMediaLink(entry, account, lane = RequestLane.RENEWAL, onFailure = ::finishRenewal, onResult = ::renew)
+        else loadMediaLink(
+            entry, account, lane = RequestLane.RENEWAL,
+            onFailure = { finishRenewal() }, onResult = ::renew,
+        )
     }
 
     private fun cancelPendingAudioRequest() {
@@ -3372,7 +4486,7 @@ class MainActivity : AppCompatActivity() {
             val pagination = entry?.takeIf { index >= 0 }?.let { it to listKey }
             if (pagination != checkedPagination) {
                 checkedPagination = pagination
-                canLoadCourses = pagination?.let { (file, key) -> nextDirectoryPage(file, key) != null } == true
+                canLoadCourses = pagination?.let { (file, key) -> hasMoreCourses(file, key) } == true
             }
             if (index >= 0) courseList.update(queue, index, canLoadCourses, loadingCourses)
             else courseList.update(listOfNotNull(entry), if (entry == null) -1 else 0, false, false)
@@ -3462,7 +4576,7 @@ class MainActivity : AppCompatActivity() {
         native.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_AUTO
         if (!isDestroyed && !isFinishing) {
             updateNowPlaying()
-            renderAudioHistory()
+            renderHomeSections()
         }
     }
 
@@ -3471,12 +4585,14 @@ class MainActivity : AppCompatActivity() {
         PlaybackQueueState.anchor = null
         PlaybackQueueState.entries = emptyList()
         PlaybackQueueState.listKey = null
+        diskRenewAttempts = 0
+        lastDiskRenewAt = 0L
         renderCourseSwitch()
         cancelPendingAudioRequest()
         updateAudioRequestMessage(null)
         controller?.sendCustomCommand(AudioPlaybackService.CLEAR_FILE, Bundle.EMPTY)
         nowPlaying.visibility = View.GONE
-        renderAudioHistory()
+        renderHomeSections()
     }
 
     private fun startVideo(
@@ -3492,7 +4608,7 @@ class MainActivity : AppCompatActivity() {
         videoToRestore = null
         val account = verifiedAccount
         val key = mediaCacheKey(account, entry)
-        val playlist = PanApi.videoPlaylist(entry)
+        val playlist = if (entry.isDisk) PanApi.diskVideoPlaylist(entry) else PanApi.videoPlaylist(entry)
         pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
         loadingVideo = VideoPlaybackPage.Snapshot(
             entry, account, positionMs, playWhenReady, audioOnly, fullscreen, orientationBeforeFullscreen,
@@ -3551,7 +4667,7 @@ class MainActivity : AppCompatActivity() {
                             done(courses, playbackSortLabel(entry, courseListKey))
                         }
                     },
-                    canLoadMoreCourses = { nextDirectoryPage(entry, courseListKey) != null },
+                    canLoadMoreCourses = { hasMoreCourses(entry, courseListKey) },
                     onLoadMoreCourses = { done -> loadMoreCourses(entry, courseListKey, done = done) },
                     onSelectCourse = { target, snapshot ->
                         if (videoLoading == null) startVideo(
@@ -3578,7 +4694,7 @@ class MainActivity : AppCompatActivity() {
                     onClose = { closed ->
                         if (videoPage === closed) {
                             videoPage = null
-                            if (!isDestroyed) renderAudioHistory()
+                            if (!isDestroyed) renderHomeSections()
                         }
                     },
                 )
@@ -3673,7 +4789,7 @@ class MainActivity : AppCompatActivity() {
             val queue = PlaybackQueueState.entries
             val index = queue.indexOfFirst { sameEntry(it, entry) }
             courseList.updateSort(entry.takeIf { index >= 0 }, listKey)
-            if (index >= 0) courseList.update(queue, index, nextDirectoryPage(entry, listKey) != null, loadingCourses)
+            if (index >= 0) courseList.update(queue, index, hasMoreCourses(entry, listKey), loadingCourses)
             else courseList.update(listOf(entry), 0, false, false)
             previousCourse.isEnabled = index > 0
             nextCourse.isEnabled = index in 0 until queue.lastIndex
@@ -3732,7 +4848,7 @@ class MainActivity : AppCompatActivity() {
             ) { result ->
                 val position = result?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
                 if (position != null) saveProgress(position.optInt(0), position.optBoolean(1), position.optInt(2))
-                if (!isDestroyed) renderAudioHistory()
+                if (!isDestroyed) renderHomeSections()
             }
         }
         dialog.show()
@@ -4165,6 +5281,7 @@ class MainActivity : AppCompatActivity() {
         when {
             audioPage != null -> closeAudioPage()
             native.visibility == View.GONE -> showApp()
+            screen == Screen.FAVORITES -> closeFavorites()
             folders.isNotEmpty() -> returnToFolder(folders.lastIndex)
             screen != Screen.HOME -> showScreen(Screen.HOME)
             else -> super.onBackPressed()
@@ -4207,6 +5324,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         activityVisible = false
+        pdfOpenId++
         mediaCaptchaDialog?.second?.dismiss()
         nowPlaying.removeCallbacks(nowPlayingTicker)
         if (pdfLoading != null) {
@@ -4229,6 +5347,7 @@ class MainActivity : AppCompatActivity() {
         audioRequestId++
         audioResolver.close()
         videoResolver.close()
+        renewalResolver.close()
         videoPage?.close()
         pdfFetcher.close()
         pdfLoading?.dismiss()
@@ -4255,6 +5374,14 @@ class MainActivity : AppCompatActivity() {
         text = value
         isAllCaps = false
         setOnClickListener { action() }
+    }
+
+    private companion object {
+        const val STATE_SCREEN = "screen"
+        const val STATE_FILTER = "media_filter"
+        const val STATE_TRANSFERRED_ONLY = "transferred_only"
+        const val STATE_FAVORITES_ORIGIN = "favorites_origin"
+        const val STATE_FOLDERS = "folder_trail"
     }
 }
 

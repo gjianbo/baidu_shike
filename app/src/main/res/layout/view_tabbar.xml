@@ -28,14 +28,14 @@
             android:layout_weight="1" />
 
         <include
-            android:id="@+id/navBrowse"
+            android:id="@+id/navDisk"
             layout="@layout/view_tab_item"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1" />
 
         <include
-            android:id="@+id/navFavorites"
+            android:id="@+id/navGroups"
             layout="@layout/view_tab_item"
             android:layout_width="0dp"
             android:layout_height="wrap_content"

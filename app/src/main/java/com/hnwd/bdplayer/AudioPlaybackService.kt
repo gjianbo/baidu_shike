@@ -88,7 +88,7 @@ class AudioPlaybackService : MediaSessionService() {
                 ): MediaSession.ConnectionResult {
                     val sameApp = controller.uid == applicationInfo.uid
                     val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
-                    if (sameApp) commands.add(PLAY_FILE).add(CLEAR_FILE).add(SYNC_ACCOUNT).add(RENEW_FILE)
+                    if (sameApp) commands.add(PLAY_FILE).add(CLEAR_FILE).add(SYNC_ACCOUNT).add(RENEW_FILE).add(RENEW_HLS)
                     val playerCommands = MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
                         .remove(Player.COMMAND_CHANGE_MEDIA_ITEMS)
                         .remove(Player.COMMAND_SET_MEDIA_ITEM)
@@ -121,6 +121,7 @@ class AudioPlaybackService : MediaSessionService() {
                         controller.uid != applicationInfo.uid -> SessionResult.RESULT_ERROR_PERMISSION_DENIED
                         customCommand == PLAY_FILE -> playFile(args)
                         customCommand == RENEW_FILE -> renewFile(args)
+                        customCommand == RENEW_HLS -> renewHls(args)
                         customCommand == SYNC_ACCOUNT -> {
                             if (entry != null && playbackAccount != AccountScope.current) clearFile()
                             SessionResult.RESULT_SUCCESS
@@ -144,13 +145,17 @@ class AudioPlaybackService : MediaSessionService() {
         if (account.isEmpty() || account != AccountScope.current) return SessionResult.RESULT_ERROR_BAD_VALUE
         val uri = Uri.parse(args.getString("uri").orEmpty())
         val playlist = args.getByteArray("playlist")
+        val origin = runCatching { EntryOrigin.valueOf(args.getString("origin") ?: "GROUP") }
+            .getOrDefault(EntryOrigin.GROUP)
         val next = PanEntry(
             args.getString("gid").orEmpty(), args.getString("message").orEmpty(),
             args.getString("owner").orEmpty(), args.getString("file").orEmpty(),
             args.getString("name").orEmpty(), args.getString("path").orEmpty(),
-            args.getString("size").orEmpty(), false,
+            args.getString("size").orEmpty(), false, origin,
         )
-        if (listOf(next.gid, next.messageId, next.fileId, next.name).any(String::isEmpty)) {
+        if (next.fileId.isEmpty() || next.name.isEmpty() ||
+            (origin == EntryOrigin.GROUP && (next.gid.isEmpty() || next.messageId.isEmpty()))
+        ) {
             return SessionResult.RESULT_ERROR_BAD_VALUE
         }
         if (!isAudioSource(next, uri, playlist)) return SessionResult.RESULT_ERROR_BAD_VALUE
@@ -164,6 +169,7 @@ class AudioPlaybackService : MediaSessionService() {
         val metadata = MediaMetadata.Builder().setTitle(next.name)
             .setExtras(Bundle().apply {
                 putString("account", account)
+                putString("origin", next.origin.name)
                 putString("gid", next.gid)
                 putString("message", next.messageId)
                 putString("owner", next.owner)
@@ -189,7 +195,8 @@ class AudioPlaybackService : MediaSessionService() {
             extras.getBoolean("renewed") || (!wasHls && !error.isExpiredMediaLink())
         ) return SessionResult.RESULT_ERROR_BAD_VALUE
         val uri = Uri.parse(args.getString("uri").orEmpty())
-        if (!PanApi.isFileLink(uri)) return SessionResult.RESULT_ERROR_BAD_VALUE
+        val current = entry ?: return SessionResult.RESULT_ERROR_BAD_VALUE
+        if (!isAudioSource(current, uri, null)) return SessionResult.RESULT_ERROR_BAD_VALUE
 
         val position = player.currentPosition
         val metadata = item.mediaMetadata.buildUpon()
@@ -204,9 +211,43 @@ class AudioPlaybackService : MediaSessionService() {
         return SessionResult.RESULT_SUCCESS
     }
 
+    private fun renewHls(args: Bundle): Int {
+        val item = player.currentMediaItem ?: return SessionResult.RESULT_ERROR_BAD_VALUE
+        val extras = item.mediaMetadata.extras ?: return SessionResult.RESULT_ERROR_BAD_VALUE
+        if (playbackAccount != AccountScope.current ||
+            extras.getString("playbackId") != args.getString("playbackId") ||
+            !extras.getBoolean("hls")
+        ) return SessionResult.RESULT_ERROR_BAD_VALUE
+        val current = entry ?: return SessionResult.RESULT_ERROR_BAD_VALUE
+        if (!current.isDisk) return SessionResult.RESULT_ERROR_BAD_VALUE
+        val uri = Uri.parse(args.getString("uri").orEmpty())
+        val playlist = args.getByteArray("playlist")
+        if (playlist == null || playlist.isEmpty() || !PanApi.isDiskStreaming(uri, current)) {
+            return SessionResult.RESULT_ERROR_BAD_VALUE
+        }
+        val position = player.currentPosition
+        val metadata = item.mediaMetadata.buildUpon()
+            .setExtras(Bundle(extras).apply {
+                putString("playbackId", UUID.randomUUID().toString())
+                putBoolean("hls", true)
+                remove("renewed")
+            })
+            .build()
+        val next = item.buildUpon().setUri(uri).setMediaMetadata(metadata).build()
+        setAudioSource(next, uri, playlist, position)
+        player.prepare()
+        player.play()
+        return SessionResult.RESULT_SUCCESS
+    }
+
     private fun isAudioSource(entry: PanEntry, uri: Uri, playlist: ByteArray?): Boolean =
-        if (playlist == null) PanApi.isFileLink(uri)
-        else playlist.isNotEmpty() && uri == PanApi.audioPlaylist(entry)
+        if (playlist == null) {
+            if (entry.isDisk) PanApi.isCachedFileLink(uri) else PanApi.isFileLink(uri)
+        }
+        else playlist.isNotEmpty() && (
+            if (entry.isDisk) PanApi.isDiskStreaming(uri, entry)
+            else uri == PanApi.audioPlaylist(entry)
+        )
 
     private fun setAudioSource(item: MediaItem, uri: Uri, playlist: ByteArray?, position: Long) {
         if (playlist == null) {
@@ -260,6 +301,7 @@ class AudioPlaybackService : MediaSessionService() {
     companion object {
         internal val PLAY_FILE = SessionCommand("com.hnwd.bdplayer.PLAY_FILE", Bundle.EMPTY)
         internal val RENEW_FILE = SessionCommand("com.hnwd.bdplayer.RENEW_FILE", Bundle.EMPTY)
+        internal val RENEW_HLS = SessionCommand("com.hnwd.bdplayer.RENEW_HLS", Bundle.EMPTY)
         internal val SYNC_ACCOUNT = SessionCommand("com.hnwd.bdplayer.SYNC_ACCOUNT", Bundle.EMPTY)
         internal val CLEAR_FILE = SessionCommand("com.hnwd.bdplayer.CLEAR_FILE", Bundle.EMPTY)
     }

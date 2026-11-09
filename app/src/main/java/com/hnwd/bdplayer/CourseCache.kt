@@ -18,6 +18,9 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 item.getString("gid"), item.getString("message"), item.getString("owner"),
                 item.getString("file"), item.getString("name"), item.optString("path"),
                 item.optString("size"), item.optBoolean("directory"),
+                runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
+                    .getOrDefault(EntryOrigin.GROUP),
+                item.optString("md5"),
             )
         }, data.optLong("syncedAt"), data.optString("nextCursor").takeIf { data.has("nextCursor") },
             data.optBoolean("latestEmpty"),
@@ -40,12 +43,22 @@ internal class CourseCache(private val preferences: SharedPreferences) {
 
     fun directoryContaining(entry: PanEntry): String? {
         val prefix = AccountScope.prefix()
-        val directoryPrefix = "${prefix}dir:${entry.gid}:${entry.messageId}:"
-        val nested = preferences.all.keys.asSequence()
-            .filter { it.startsWith(directoryPrefix) }
-            .map { it.removePrefix(prefix).substringBeforeLast(':') }
-            .distinct()
-        return (nested + "roots:${entry.gid}").firstOrNull { key ->
+        val candidates = if (entry.isDisk) {
+            preferences.all.keys.asSequence()
+                .filter { it.startsWith(prefix) }
+                .map { it.removePrefix(prefix).substringBeforeLast(':') }
+                .filter { it == "disk:roots" || it.startsWith("disk:dir:") }
+                .distinct()
+                .toList()
+        } else {
+            val directoryPrefix = "${prefix}dir:${entry.gid}:${entry.messageId}:"
+            val nested = preferences.all.keys.asSequence()
+                .filter { it.startsWith(directoryPrefix) }
+                .map { it.removePrefix(prefix).substringBeforeLast(':') }
+                .distinct()
+            (nested + sequenceOf("roots:${entry.gid}")).toList()
+        }
+        return candidates.firstOrNull { key ->
             readAll(key).any { idOf(it) == idOf(entry) }
         }
     }
@@ -67,7 +80,9 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 .put("name", it.name)
                 .put("path", it.path)
                 .put("size", it.size)
-                .put("directory", it.directory))
+                .put("directory", it.directory)
+                .put("origin", it.origin.name)
+                .put("md5", it.md5))
         }
         preferences.edit().putString(
             pageKey(key, page),
@@ -80,6 +95,25 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         val existing = readPage(key, page)
         write(key, page, fresh, nextCursor)
         return existing?.entries != fresh || existing.nextCursor != nextCursor
+    }
+
+    /** 已缓存网盘文件的内容指纹（md5:size），用于「已转存」匹配。 */
+    fun diskIndex(): Set<String> {
+        val prefix = AccountScope.prefix()
+        val keys = preferences.all.keys.asSequence()
+            .filter { it.startsWith(prefix) }
+            .map { it.removePrefix(prefix).substringBeforeLast(':') }
+            .filter { it == "disk:roots" || it.startsWith("disk:dir:") }
+            .distinct()
+        val result = HashSet<String>()
+        keys.forEach { key ->
+            readAll(key).forEach { entry ->
+                if (!entry.directory && entry.md5.isNotEmpty()) {
+                    result.add("${PanApi.md5Key(entry.md5)}:${entry.size}")
+                }
+            }
+        }
+        return result
     }
 
     fun lastPage(key: String): Pair<Int, CachedPage>? {
@@ -126,7 +160,8 @@ internal class CourseCache(private val preferences: SharedPreferences) {
 
     private fun pageKey(key: String, page: Int) = AccountScope.key("$key:$page")
 
-    private fun idOf(entry: PanEntry) = "${entry.gid}:${entry.messageId}:${entry.fileId}"
+    private fun idOf(entry: PanEntry) =
+        "${entry.origin}:${entry.sourceId}:${entry.gid}:${entry.messageId}:${entry.fileId}"
 }
 
 internal data class CachedPage(

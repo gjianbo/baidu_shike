@@ -8,7 +8,7 @@ import java.security.MessageDigest
 
 internal fun mediaCacheKey(account: String, entry: PanEntry): String =
     MessageDigest.getInstance("SHA-256")
-        .digest(listOf(account, entry.gid, entry.messageId, entry.owner, entry.fileId)
+        .digest(listOf(account, entry.origin.name, entry.sourceId, entry.gid, entry.messageId, entry.owner, entry.fileId)
             .joinToString("\u0000").toByteArray())
         .joinToString("") { "%02x".format(it) }
 
@@ -23,7 +23,7 @@ internal class MediaAddressCache(context: Context) {
     fun clearPlaylist(key: String) = file(key, "m3u8").delete()
 
     fun link(key: String): Uri? =
-        read(key, "url")?.let { Uri.parse(it.decodeToString()).takeIf(PanApi::isFileLink) }
+        read(key, "url")?.let { Uri.parse(it.decodeToString()).takeIf(PanApi::isCachedFileLink) }
 
     fun saveLink(key: String, uri: Uri) = write(key, "url", uri.toString().encodeToByteArray())
 

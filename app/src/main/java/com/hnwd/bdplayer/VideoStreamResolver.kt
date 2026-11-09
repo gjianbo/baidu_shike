@@ -12,6 +12,8 @@ import org.json.JSONObject
 
 internal data class VideoStream(val uri: Uri, val playlist: ByteArray)
 
+internal class AudioTranscodingPending : IllegalStateException("音频转码准备中，请稍后重试。")
+
 internal class VideoStreamResolver {
     private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
@@ -22,6 +24,8 @@ internal class VideoStreamResolver {
         cancel()
         val id = requestId
         val cookie = CookieManager.getInstance().getCookie(uri.toString())
+            ?.takeIf { it.isNotBlank() }
+            ?: CookieManager.getInstance().getCookie("https://${PanApi.HOST}")
         worker = executor.submit {
             val result = runCatching { fetch(uri, userAgent, cookie) }
             handler.post {
@@ -62,7 +66,7 @@ internal class VideoStreamResolver {
             val code = connection.responseCode
             if (code != 200) {
                 val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                throw IllegalStateException(playlistError(code, errorBody))
+                throw playlistError(code, errorBody)
             }
             val body = connection.inputStream.bufferedReader().use { reader ->
                 val buffer = CharArray(8192)
@@ -75,7 +79,7 @@ internal class VideoStreamResolver {
                 }
                 output.toString()
             }
-            check(isPlaybackPlaylist(body)) { playlistError(200, body) }
+            if (!isPlaybackPlaylist(body)) throw playlistError(200, body)
             return VideoStream(uri, body.toByteArray(Charsets.UTF_8))
         } finally {
             connection.disconnect()
@@ -88,11 +92,11 @@ internal class VideoStreamResolver {
         }
 
     /** 文档 §12：错误码速查，把取址失败翻成人话（只改提示，不改播放链）。 */
-    private fun playlistError(code: Int, body: String): String {
+    private fun playlistError(code: Int, body: String): IllegalStateException {
         val json = runCatching { JSONObject(body) }.getOrNull()
         val errno = json?.optInt("errno")
         val errorCode = json?.optInt("error_code")
-        return when {
+        return IllegalStateException(when {
             errno == -6 -> "请重新登录百度网盘后再试。"
             errno == -20 || errorCode == -20 -> {
                 val message = json.optString("show_msg").trim().take(60)
@@ -100,11 +104,12 @@ internal class VideoStreamResolver {
                 "百度网盘拒绝了视频取址请求（错误码 -20 · 接口 /mbox/msg/streaming）$detail"
             }
             errorCode == 31304 -> "该文件类型不支持此转码档位，请换档位或改用原始文件。"
+            errno == 31341 || errorCode == 31341 -> return AudioTranscodingPending()
             errorCode == 31023 -> "网盘取址参数有误，请重新打开。"
             code == 401 || code == 403 -> "播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）。"
             code != 200 -> "播放清单请求失败（HTTP $code）。"
             else -> "网盘未返回可播放的点播清单。"
-        }
+        })
     }
 
     private companion object {

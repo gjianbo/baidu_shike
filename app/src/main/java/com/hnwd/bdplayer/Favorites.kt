@@ -13,6 +13,9 @@ internal class Favorites(private val preferences: SharedPreferences) {
                 item.getString("gid"), item.getString("message"), item.getString("owner"),
                 item.getString("file"), item.getString("name"), item.optString("path"),
                 item.optString("size"), item.optBoolean("directory"),
+                runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
+                    .getOrDefault(EntryOrigin.GROUP),
+                item.optString("md5"),
             )
         }
     }.getOrDefault(emptyList())
@@ -37,7 +40,9 @@ internal class Favorites(private val preferences: SharedPreferences) {
                 .put("name", it.name)
                 .put("path", it.path)
                 .put("size", it.size)
-                .put("directory", it.directory))
+                .put("directory", it.directory)
+                .put("origin", it.origin.name)
+                .put("md5", it.md5))
         }
         preferences.edit().putString(storageKey(), data.toString()).apply()
         return index < 0
@@ -46,5 +51,6 @@ internal class Favorites(private val preferences: SharedPreferences) {
     private fun storageKey() = AccountScope.key("favorites")
 
     private fun same(first: PanEntry, second: PanEntry): Boolean =
-        first.gid == second.gid && first.messageId == second.messageId && first.fileId == second.fileId
+        first.origin == second.origin && first.gid == second.gid &&
+            first.messageId == second.messageId && first.fileId == second.fileId
 }

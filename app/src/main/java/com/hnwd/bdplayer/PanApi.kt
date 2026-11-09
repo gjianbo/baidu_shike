@@ -7,6 +7,10 @@ import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal enum class EntryOrigin { GROUP, DISK }
+
+internal const val DISK_SOURCE_ID = "disk"
+
 internal data class PanEntry(
     val gid: String,
     val messageId: String,
@@ -16,7 +20,12 @@ internal data class PanEntry(
     val path: String,
     val size: String,
     val directory: Boolean,
-)
+    val origin: EntryOrigin = EntryOrigin.GROUP,
+    val md5: String = "",
+) {
+    val sourceId: String get() = if (origin == EntryOrigin.DISK) DISK_SOURCE_ID else gid
+    val isDisk: Boolean get() = origin == EntryOrigin.DISK
+}
 
 internal data class PanSearchHit(
     val entry: PanEntry,
@@ -189,8 +198,123 @@ internal object PanApi {
         return uri
     }
 
+    /**
+     * 网盘列表/搜索返回的 md5 常把第 10 位换成非十六进制字母做混淆，
+     * 同一文件不同接口可能给出不同字母；比对时去掉这一位，其余 31 位 + size 足够定位。
+     */
+    fun md5Key(raw: String): String {
+        val value = raw.trim().lowercase()
+        if (value.length != 32) return value
+        val marker = value[9]
+        val hex = marker in '0'..'9' || marker in 'a'..'f'
+        return if (hex) value else value.removeRange(9, 10)
+    }
+
     fun isFileLink(uri: Uri): Boolean =
         uri.scheme == "https" && uri.host == "d.pcs.baidu.com" && uri.path.orEmpty().startsWith("/file/")
+
+    fun isCachedFileLink(uri: Uri): Boolean =
+        uri.scheme == "https" && uri.path.orEmpty().startsWith("/file/") &&
+            (uri.host == "d.pcs.baidu.com" || uri.host?.endsWith(".baidupcs.com") == true)
+
+    fun diskList(token: String, dir: String, page: Int, num: Int = 100) = api(
+        "/api/list", "channel" to "chunlei", "bdstoken" to token, "dir" to dir,
+        "order" to "time", "desc" to "1", "num" to num.toString(), "page" to page.toString(),
+    )
+
+    fun parseDiskList(json: JSONObject): List<PanEntry> =
+        json.optJSONArray("list")?.objects().orEmpty().mapNotNull(::diskEntry)
+
+    fun diskSearch(token: String, keyword: String, dir: String = "/", page: Int = 1, num: Int = 100) = api(
+        "/api/search", "channel" to "chunlei", "bdstoken" to token, "dir" to dir,
+        "recursion" to "1", "order" to "time", "desc" to "1", "showempty" to "0",
+        "page" to page.toString(), "num" to num.toString(), "key" to keyword,
+    )
+
+    fun parseDiskSearch(json: JSONObject): List<PanSearchHit> =
+        json.optJSONArray("list")?.objects().orEmpty().mapNotNull { item ->
+            val entry = diskEntry(item) ?: return@mapNotNull null
+            PanSearchHit(entry, entry.path.substringBeforeLast('/').ifEmpty { "/" }, entry.fileId)
+        }
+
+    private fun diskEntry(item: JSONObject): PanEntry? {
+        val fileId = item.optString("fs_id")
+        val name = item.optString("server_filename")
+        val path = readablePath(item.optString("path"))
+        if (fileId.isEmpty() || name.isEmpty() || path.isEmpty()) return null
+        return PanEntry(
+            gid = "", messageId = "", owner = "", fileId = fileId, name = name, path = path,
+            size = item.optString("size"), directory = item.optInt("isdir") == 1,
+            origin = EntryOrigin.DISK, md5 = item.optString("md5"),
+        )
+    }
+
+    fun diskHasMore(json: JSONObject, num: Int): Boolean =
+        json.optJSONArray("list")?.length() == num || json.optInt("has_more") == 1
+
+    fun diskVideoPlaylist(entry: PanEntry): Uri = diskStreaming(entry, "M3U8_AUTO_480", "")
+
+    fun diskAudioPlaylist(entry: PanEntry, token: String): Uri =
+        diskStreaming(entry, "M3U8_MP3_128", token)
+
+    fun diskDownloadSession() = api(
+        "/api/gettemplatevariable",
+        "fields" to "[\"sign1\",\"sign2\",\"sign3\",\"timestamp\",\"is_vip\"]",
+    )
+
+    fun diskDownload(entry: PanEntry, token: String, sign: String, timestamp: String, vip: String) = api(
+        "/api/download", "channel" to "chunlei", "bdstoken" to token, "sign" to sign,
+        "timestamp" to timestamp, "fidlist" to "[${entry.fileId}]", "vip" to vip, "type" to "dlink",
+    )
+
+    fun parseDiskDownloadLink(json: JSONObject): Uri {
+        val uri = Uri.parse(json.getJSONArray("dlink").getJSONObject(0).getString("dlink"))
+        check(isFileLink(uri)) { "网盘未返回有效的原始文件地址。" }
+        return uri
+    }
+
+    private fun diskStreaming(entry: PanEntry, streamType: String, token: String): Uri {
+        val query = mutableListOf(
+            "path" to entry.path, "fsid" to entry.fileId, "channel" to "chunlei",
+            "type" to streamType, "isplayer" to "1", "check_blue" to "1",
+            "adToken" to "", "src_id" to "1",
+        )
+        if (token.isNotEmpty()) query.add("bdstoken" to token)
+        return Uri.parse(api("/api/streaming", *query.toTypedArray()))
+    }
+
+    fun isDiskStreaming(uri: Uri, entry: PanEntry): Boolean =
+        uri.scheme == "https" && uri.host == HOST && uri.path == "/api/streaming" &&
+            uri.getQueryParameter("path") == entry.path &&
+            uri.getQueryParameter("fsid").orEmpty().let { it.isEmpty() || it == entry.fileId }
+
+    fun diskDocview(entry: PanEntry, viewer: String) = api(
+        "/rest/2.0/docview/dlink", "channel" to "chunlei", "scene" to "3", "fuk" to viewer,
+        "path" to entry.path, "fsid" to entry.fileId, "file_type" to "pdf",
+    )
+
+    fun parseDocviewLink(json: JSONObject): Uri {
+        check(json.optInt("errno", -1) == 0) { "网盘未返回文档地址。" }
+        check(json.optInt("need_passwd", 0) == 0) { "该文档需要密码，当前版本暂不支持。" }
+        val uri = Uri.parse(json.optString("dlink"))
+        check(uri.scheme == "https" && !uri.host.isNullOrEmpty()) { "文档地址无效，请重试。" }
+        return uri
+    }
+
+    fun groupPdfPreview(entry: PanEntry) = api(
+        "/mbox/fileinfo/preview", "channel" to "chunlei",
+    )
+
+    fun groupPdfPreviewForm(entry: PanEntry): String = listOf(
+        "fuk" to entry.owner, "scene" to "1", "gid" to entry.gid,
+        "fsid" to entry.fileId, "ftype" to "pdf", "password" to "",
+    ).joinToString("&") { (key, value) -> "$key=${URLEncoder.encode(value, "UTF-8")}" }
+
+    fun parseGroupPreviewLink(json: JSONObject): Uri? {
+        val data = json.optJSONObject("data") ?: return null
+        val uri = Uri.parse(data.optString("dlink"))
+        return uri.takeIf { it.scheme == "https" && !it.host.isNullOrEmpty() }
+    }
 
     // 群目录根接口 listshare 返回的 path 整条是百分号编码（%2F%E5%B7%A5%E4%BD%9C...），
     // recentv2 / shareinfo 返回的是明文中文。只在确认为编码路径时解码，
@@ -236,7 +360,7 @@ internal object PanApi {
         return PanEntry(
             gid, messageId, owner, item.getString(idKey), item.getString("server_filename"),
             readablePath(item.getString("path")), item.optString("size", meta?.optString("size") ?: ""),
-            item.getString("isdir") == "1",
+            item.getString("isdir") == "1", md5 = item.optString("md5", meta?.optString("md5") ?: ""),
         )
     }
 

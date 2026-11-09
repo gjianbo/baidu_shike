@@ -18,7 +18,7 @@ import java.util.Locale
  * 不含 Cookie、播放直链和媒体文件。
  */
 internal object BackupStore {
-    private const val SCHEMA = 1
+    private const val SCHEMA = 2
     private const val APP = "com.hnwd.bdplayer"
     private const val DIR = "backups"
     private const val MAX = 3
@@ -178,7 +178,7 @@ internal object BackupStore {
     }
 
     fun valid(payload: JSONObject?): Boolean {
-        if (payload == null || payload.optInt("schemaVersion", -1) != SCHEMA) return false
+        if (payload == null || payload.optInt("schemaVersion", -1) !in 1..SCHEMA) return false
         if (payload.optString("app", APP).let { it.isNotEmpty() && it != APP }) return false
         val data = payload.optJSONObject("data") ?: return false
         val sources = data.optJSONArray("sources") ?: return false

@@ -89,7 +89,10 @@ internal class VideoPlaybackPage(
         controllerHideOnTouch = false
     }
     private val progress = activity.getSharedPreferences("video_progress", Activity.MODE_PRIVATE)
-    private val progressKey = AccountScope.key("${entry.gid}:${entry.messageId}:${entry.fileId}")
+    private val progressKey = AccountScope.key(
+        "${entry.origin}:${entry.sourceId}:${entry.gid}:${entry.messageId}:${entry.fileId}",
+    )
+    private val legacyProgressKey = AccountScope.key("${entry.gid}:${entry.messageId}:${entry.fileId}")
     private var readyToSave = false
     private var keepOrientationOnClose = false
     private var immersive = false
@@ -342,7 +345,8 @@ internal class VideoPlaybackPage(
         fun replaceCourses(updated: List<PanEntry>) {
             listedCourses = updated
             selectedCourse = updated.indexOfFirst {
-                it.gid == entry.gid && it.messageId == entry.messageId && it.fileId == entry.fileId
+                it.origin == entry.origin && it.fileId == entry.fileId &&
+                    (it.isDisk || (it.gid == entry.gid && it.messageId == entry.messageId))
             }
         }
         sortCourses.setOnClickListener { anchor ->
@@ -543,7 +547,7 @@ internal class VideoPlaybackPage(
                 }
                 if (playbackState == Player.STATE_ENDED) {
                     stopAudioSession()
-                    progress.edit().remove(progressKey).apply()
+                    progress.edit().remove(progressKey).remove(legacyProgressKey).apply()
                     history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
                     readyToSave = false
                     video.post { if (canAutoAdvance()) onEnded(snapshot()) }
@@ -589,7 +593,7 @@ internal class VideoPlaybackPage(
             )
         }
         if (startFullscreen) updateFullscreen(true)
-        player.setMediaSource(source, startPositionMs ?: progress.getLong(progressKey, 0L))
+        player.setMediaSource(source, startPositionMs ?: savedPositionMs())
         player.playWhenReady = playWhenReady
         player.prepare()
     }
@@ -619,6 +623,17 @@ internal class VideoPlaybackPage(
     fun close(keepOrientation: Boolean = false) {
         keepOrientationOnClose = keepOrientation
         dialog.dismiss()
+    }
+
+    private fun savedPositionMs(): Long {
+        val saved = progress.getLong(progressKey, 0L)
+        if (saved > 0 || entry.isDisk) return saved
+        // 旧版本进度键不含来源；首次打开时迁移一次，避免升级后丢失续播位置。
+        val legacy = progress.getLong(legacyProgressKey, 0L)
+        if (legacy > 0) {
+            progress.edit().putLong(progressKey, legacy).remove(legacyProgressKey).apply()
+        }
+        return legacy
     }
 
     private fun saveProgress() {

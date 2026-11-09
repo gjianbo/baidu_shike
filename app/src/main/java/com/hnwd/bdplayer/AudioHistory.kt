@@ -25,16 +25,22 @@ internal fun formatAudioTime(seconds: Int): String =
     "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
 
 internal class AudioHistory(private val preferences: SharedPreferences, private val account: String? = null) {
-    private fun storageKey(gid: String) = AccountScope.key(gid, account ?: AccountScope.current)
+    private fun bucket(entry: PanEntry) =
+        if (entry.origin == EntryOrigin.DISK) DISK_SOURCE_ID else entry.gid
 
-    fun recent(gid: String): List<AudioHistoryItem> = runCatching {
-        val array = JSONArray(preferences.getString(storageKey(gid), "[]") ?: "[]")
+    private fun storageKey(bucket: String) = AccountScope.key(bucket, account ?: AccountScope.current)
+
+    private fun recentBucket(bucket: String, originHint: EntryOrigin? = null): List<AudioHistoryItem> = runCatching {
+        val array = JSONArray(preferences.getString(storageKey(bucket), "[]") ?: "[]")
         List(array.length()) { index ->
             val item = array.getJSONObject(index)
+            val origin = runCatching { EntryOrigin.valueOf(item.optString("origin", "")) }.getOrNull()
+                ?: originHint ?: if (bucket == DISK_SOURCE_ID) EntryOrigin.DISK else EntryOrigin.GROUP
             AudioHistoryItem(
                 PanEntry(
-                    gid, item.getString("message"), item.getString("owner"), item.getString("file"),
-                    item.getString("name"), item.optString("path"), item.optString("size"), false,
+                    if (origin == EntryOrigin.DISK) "" else bucket,
+                    item.getString("message"), item.getString("owner"), item.getString("file"),
+                    item.getString("name"), item.optString("path"), item.optString("size"), false, origin,
                 ),
                 item.getInt("seconds"),
                 item.getBoolean("completed"),
@@ -49,21 +55,23 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
         return preferences.all.keys.asSequence()
             .filter { it.startsWith(prefix) }
             .map { it.removePrefix(prefix) }
-            .flatMap { recent(it).asSequence() }
+            .flatMap { recentBucket(it).asSequence() }
             .sortedByDescending { it.updatedAt }
             .toList()
     }
 
-    fun find(entry: PanEntry): AudioHistoryItem? = recent(entry.gid).firstOrNull {
-        sameFile(it.entry, entry)
-    }
+    fun find(entry: PanEntry): AudioHistoryItem? =
+        recentBucket(bucket(entry)).firstOrNull { sameFile(it.entry, entry) }
 
     fun save(entry: PanEntry, seconds: Int, completed: Boolean, duration: Int = 0) {
         val newest = AudioHistoryItem(entry, seconds, completed, System.currentTimeMillis(), duration)
-        val items = listOf(newest) + recent(entry.gid).filterNot { sameFile(it.entry, entry) }
+        val bucket = bucket(entry)
+        val items = (listOf(newest) + recentBucket(bucket).filterNot { sameFile(it.entry, entry) })
+            .take(MAX_ITEMS)
         val data = JSONArray()
         items.forEach { item ->
             data.put(JSONObject()
+                .put("origin", item.entry.origin.name)
                 .put("message", item.entry.messageId)
                 .put("owner", item.entry.owner)
                 .put("file", item.entry.fileId)
@@ -75,7 +83,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
                 .put("duration", item.duration)
                 .put("updatedAt", item.updatedAt))
         }
-        preferences.edit().putString(storageKey(entry.gid), data.toString()).apply()
+        preferences.edit().putString(storageKey(bucket), data.toString()).apply()
     }
 
     fun clear() {
@@ -86,5 +94,10 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
     }
 
     private fun sameFile(first: PanEntry, second: PanEntry): Boolean =
-        first.gid == second.gid && first.messageId == second.messageId && first.fileId == second.fileId
+        first.origin == second.origin && first.gid == second.gid &&
+            first.messageId == second.messageId && first.fileId == second.fileId
+
+    private companion object {
+        const val MAX_ITEMS = 300
+    }
 }
