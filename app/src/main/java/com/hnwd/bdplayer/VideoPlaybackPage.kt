@@ -201,7 +201,9 @@ internal class VideoPlaybackPage(
         val next = iconButton(R.drawable.ic_skip_next, "下一节", padding = 14) {
             onSwitch(1, snapshot())
         }
-        val fullscreen = iconButton(R.drawable.ic_fullscreen, "横屏全屏") { updateFullscreen(!immersive) }
+        fun shouldRotateForFullscreen() = !activity.isInMultiWindowMode && !activity.hasWideWindow &&
+            activity.resources.configuration.smallestScreenWidthDp < WIDE_WINDOW_DP
+        val fullscreen = iconButton(R.drawable.ic_fullscreen, "全屏") { updateFullscreen(!immersive) }
         val speed = button("") {}
         fun paintSpeed() {
             val value = player.playbackParameters.speed
@@ -256,10 +258,10 @@ internal class VideoPlaybackPage(
         }
         val actionsContainer = video.findViewById<FrameLayout>(R.id.videoActions)
         actionsContainer.addView(actions, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
-        actionsContainer.addOnLayoutChangeListener { _, left, _, right, _, oldLeft, _, oldRight, _ ->
-            val width = right - left
-            if (width > 0 && width != oldRight - oldLeft) {
-                actions.layoutParams = actions.layoutParams.apply { this.width = minOf(width, dp(480)) }
+        actionsContainer.addOnLayoutChangeListener { _, left, _, right, _, _, _, _, _ ->
+            val width = minOf(right - left, dp(if (activity.hasWideWindow) 720 else 480))
+            if (width > 0 && actions.layoutParams.width != width) {
+                actions.layoutParams = actions.layoutParams.apply { this.width = width }
             }
         }
         var courseDialog: AlertDialog? = null
@@ -295,7 +297,7 @@ internal class VideoPlaybackPage(
             }, LinearLayout.LayoutParams(-1, dp(52)))
             addView(courseRows, LinearLayout.LayoutParams(-1, 0, 1f))
         }
-        val portraitCourses = FrameLayout(activity).apply {
+        val embeddedCourses = FrameLayout(activity).apply {
             addView(coursePanel, FrameLayout.LayoutParams(-1, -1))
         }
         val courseAdapter = object : BaseAdapter() {
@@ -378,7 +380,7 @@ internal class VideoPlaybackPage(
         if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
         val courseButton = iconButton(R.drawable.ic_layers, "课程列表") {
             val holder = FrameLayout(activity)
-            portraitCourses.removeView(coursePanel)
+            embeddedCourses.removeView(coursePanel)
             val rows = listedCourses.size.coerceIn(1, 6)
             val dialogHeight = minOf(
                 (video.height * 0.72f).toInt(),
@@ -394,7 +396,7 @@ internal class VideoPlaybackPage(
             sheet.setOnDismissListener {
                 courseDialog = null
                 holder.removeView(coursePanel)
-                portraitCourses.addView(coursePanel, FrameLayout.LayoutParams(-1, -1))
+                embeddedCourses.addView(coursePanel, FrameLayout.LayoutParams(-1, -1))
                 video.controllerShowTimeoutMs = if (immersive) 3_000 else 0
             }
             sheet.show()
@@ -436,7 +438,7 @@ internal class VideoPlaybackPage(
                 }
             }
             addView(content, FrameLayout.LayoutParams(-1, -1).apply { topMargin = dp(52) })
-            addView(portraitCourses, FrameLayout.LayoutParams(-1, -1))
+            addView(embeddedCourses, FrameLayout.LayoutParams(-1, -1))
             addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
         }
         val videoFrame = video.findViewById<View>(androidx.media3.ui.R.id.exo_content_frame)
@@ -446,14 +448,18 @@ internal class VideoPlaybackPage(
             val availableWidth = root.width - root.paddingLeft - root.paddingRight
             val availableHeight = root.height - root.paddingTop - root.paddingBottom - top
             val landscape = immersive || availableWidth > availableHeight + top
-            val inlineCourses = !landscape && listedCourses.isNotEmpty()
+            val hasCourses = listedCourses.isNotEmpty()
+            val inlineCourses = !landscape && hasCourses
+            val sideCourses = !immersive && landscape && availableWidth >= dp(EXPANDED_WINDOW_DP) && hasCourses
+            val sideWidth = if (sideCourses) dp(320) else 0
             val stageHeight = if (inlineCourses && availableWidth > 0 && availableHeight > 0) {
                 minOf(availableWidth * 9 / 16 + controlsHeight, (availableHeight * 0.58f).toInt())
             } else -1
             val stage = content.layoutParams as FrameLayout.LayoutParams
-            if (stage.height != stageHeight || stage.topMargin != top) {
+            if (stage.height != stageHeight || stage.topMargin != top || stage.rightMargin != sideWidth) {
                 stage.height = stageHeight
                 stage.topMargin = top
+                stage.rightMargin = sideWidth
                 content.layoutParams = stage
             }
             val frame = videoFrame.layoutParams as FrameLayout.LayoutParams
@@ -462,15 +468,25 @@ internal class VideoPlaybackPage(
                 frame.bottomMargin = margin
                 videoFrame.layoutParams = frame
             }
-            val list = portraitCourses.layoutParams as FrameLayout.LayoutParams
+            val list = embeddedCourses.layoutParams as FrameLayout.LayoutParams
             val showInline = inlineCourses && stageHeight > 0
-            val listTop = if (showInline) top + stageHeight else 0
-            if (list.topMargin != listTop) {
+            val listTop = if (showInline) top + stageHeight else top
+            val listWidth = if (sideCourses) sideWidth else -1
+            if (list.topMargin != listTop || list.width != listWidth) {
                 list.topMargin = listTop
-                portraitCourses.layoutParams = list
+                list.width = listWidth
+                list.gravity = Gravity.RIGHT
+                embeddedCourses.layoutParams = list
             }
-            portraitCourses.visibility = if (showInline) View.VISIBLE else View.GONE
-            courseButton.visibility = if (landscape && listedCourses.isNotEmpty()) View.VISIBLE else View.GONE
+            val showEmbeddedCourses = showInline || sideCourses
+            if (showEmbeddedCourses && courseDialog?.isShowing == true) courseDialog?.dismiss()
+            embeddedCourses.visibility = if (showEmbeddedCourses) View.VISIBLE else View.GONE
+            courseButton.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
+            fullscreen.contentDescription = when {
+                immersive -> "退出全屏"
+                shouldRotateForFullscreen() -> "横屏全屏"
+                else -> "全屏"
+            }
         }
         refreshArrange = { arrangePlayer() }
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> arrangePlayer() }
@@ -478,15 +494,20 @@ internal class VideoPlaybackPage(
         video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
             topBar.visibility = if (immersive) visibility else View.VISIBLE
         })
+        var orientationRequested = startFullscreen && activity.requestedOrientation != orientationBeforeFullscreen
         updateFullscreen = { enabled ->
             immersive = enabled
             arrangePlayer()
             fullscreen.setImageResource(if (enabled) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
-            fullscreen.contentDescription = if (enabled) "退出全屏" else "横屏全屏"
             video.controllerHideOnTouch = enabled
             video.controllerShowTimeoutMs = if (enabled) 3_000 else 0
-            activity.requestedOrientation = if (enabled) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-            else orientationBeforeFullscreen
+            if (enabled && shouldRotateForFullscreen()) {
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                orientationRequested = true
+            } else if (!enabled && orientationRequested) {
+                activity.requestedOrientation = orientationBeforeFullscreen
+                orientationRequested = false
+            }
             updateSystemBars()
             video.showController()
             topBar.visibility = View.VISIBLE
@@ -501,7 +522,7 @@ internal class VideoPlaybackPage(
         dialog.setOnDismissListener {
             courseDialog?.dismiss()
             stopAudioSession()
-            if (immersive && !keepOrientationOnClose && !activity.isDestroyed && !activity.isFinishing) {
+            if (orientationRequested && !keepOrientationOnClose && !activity.isDestroyed && !activity.isFinishing) {
                 activity.requestedOrientation = orientationBeforeFullscreen
             }
             video.removeCallbacks(checkpoint)

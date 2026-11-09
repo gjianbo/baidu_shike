@@ -10,8 +10,8 @@
         android:layout_height="58dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingLeft="8dp"
-        android:paddingRight="18dp">
+        android:paddingStart="8dp"
+        android:paddingEnd="@dimen/page_pad">
 
         <ImageView
             android:id="@+id/backupBack"
@@ -42,9 +42,9 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:paddingLeft="18dp"
+            android:paddingStart="@dimen/page_pad"
             android:paddingTop="6dp"
-            android:paddingRight="18dp"
+            android:paddingEnd="@dimen/page_pad"
             android:paddingBottom="24dp">
 
             <LinearLayout

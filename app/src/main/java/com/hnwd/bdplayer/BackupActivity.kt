@@ -45,7 +45,7 @@ class BackupActivity : AppCompatActivity() {
             isAppearanceLightStatusBars = !ThemeStore.isDark(this@BackupActivity)
             isAppearanceLightNavigationBars = !ThemeStore.isDark(this@BackupActivity)
         }
-        setContentView(R.layout.activity_backup)
+        setContentView(centeredContent(layoutInflater.inflate(R.layout.activity_backup, null)))
         includes = findViewById(R.id.backupIncludes)
         list = findViewById(R.id.backupList)
         countView = findViewById(R.id.backupCount)

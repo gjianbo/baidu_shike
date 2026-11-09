@@ -7,11 +7,13 @@
     android:orientation="vertical">
 
     <View
+        android:id="@+id/tabDivider"
         android:layout_width="match_parent"
         android:layout_height="1dp"
         android:background="@color/line" />
 
     <LinearLayout
+        android:id="@+id/tabItems"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"

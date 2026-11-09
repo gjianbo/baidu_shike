@@ -5,7 +5,6 @@ import android.app.Dialog
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
-import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
@@ -42,11 +41,6 @@ internal class LoginDialog(
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            setLayout(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                (host.resources.displayMetrics.heightPixels * 0.94f).toInt(),
-            )
-            setGravity(Gravity.BOTTOM)
         }
         setCanceledOnTouchOutside(false)
         setOnDismissListener {

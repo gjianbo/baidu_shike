@@ -11,8 +11,8 @@
         android:layout_height="46dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingLeft="18dp"
-        android:paddingRight="10dp">
+        android:paddingStart="@dimen/page_pad"
+        android:paddingEnd="10dp">
 
         <TextView
             android:id="@+id/brandLogo"
@@ -94,12 +94,13 @@
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/titleRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
         android:orientation="horizontal"
-        android:paddingStart="18dp"
-        android:paddingEnd="18dp">
+        android:paddingStart="@dimen/page_pad"
+        android:paddingEnd="@dimen/page_pad">
 
         <ImageView
             android:id="@+id/btnBack"
@@ -171,8 +172,8 @@
         android:id="@+id/appSub"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:paddingStart="18dp"
-        android:paddingEnd="18dp"
+        android:paddingStart="@dimen/page_pad"
+        android:paddingEnd="@dimen/page_pad"
         android:maxLines="2"
         android:textColor="@color/ink3"
         android:textSize="11.5sp" />
@@ -218,8 +219,8 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:paddingLeft="18dp"
-                    android:paddingRight="18dp"
+                    android:paddingLeft="@dimen/page_pad"
+                    android:paddingRight="@dimen/page_pad"
                     android:paddingTop="6dp" />
 
                 <LinearLayout
@@ -229,8 +230,8 @@
                     android:layout_marginTop="12dp"
                     android:gravity="center_vertical"
                     android:orientation="horizontal"
-                    android:paddingLeft="18dp"
-                    android:paddingRight="18dp">
+                    android:paddingLeft="@dimen/page_pad"
+                    android:paddingRight="@dimen/page_pad">
 
                     <TextView
                         android:id="@+id/sectionTitle"
@@ -273,8 +274,8 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="6dp"
                     android:clipToPadding="false"
-                    android:paddingLeft="18dp"
-                    android:paddingRight="18dp"
+                    android:paddingLeft="@dimen/page_pad"
+                    android:paddingRight="@dimen/page_pad"
                     android:scrollbars="none"
                     android:visibility="gone">
 
@@ -296,8 +297,8 @@
                     android:id="@+id/status"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:paddingLeft="18dp"
-                    android:paddingRight="18dp"
+                    android:paddingLeft="@dimen/page_pad"
+                    android:paddingRight="@dimen/page_pad"
                     android:paddingTop="4dp"
                     android:paddingBottom="2dp"
                     android:textColor="@color/ink3"
@@ -308,16 +309,16 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:paddingLeft="18dp"
+                    android:paddingLeft="@dimen/page_pad"
                     android:paddingTop="2dp"
-                    android:paddingRight="18dp"
+                    android:paddingRight="@dimen/page_pad"
                     android:paddingBottom="84dp" />
             </LinearLayout>
         </ScrollView>
 
         <include
             layout="@layout/view_mini_player"
-            android:layout_width="300dp"
+            android:layout_width="@dimen/mini_player_width"
             android:layout_height="wrap_content"
             android:layout_gravity="bottom|end"
             android:layout_marginEnd="14dp"
@@ -328,9 +329,9 @@
         layout="@layout/view_course_switch"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginLeft="18dp"
+        android:layout_marginLeft="@dimen/page_pad"
         android:layout_marginTop="8dp"
-        android:layout_marginRight="18dp" />
+        android:layout_marginRight="@dimen/page_pad" />
 
     <include
         layout="@layout/view_tabbar"

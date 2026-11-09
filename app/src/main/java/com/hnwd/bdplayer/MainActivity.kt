@@ -4,6 +4,7 @@ import android.app.Dialog
 import android.content.ComponentName
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Rect
@@ -198,8 +199,10 @@ class MainActivity : AppCompatActivity() {
     }
     private var screen = Screen.HOME
     private var recent = true
-    private val wide: Boolean
-        get() = resources.configuration.screenWidthDp >= 600
+    private lateinit var shell: LinearLayout
+    private lateinit var navigationRail: ScrollView
+    private var railVisible = false
+    private val sheetHeights = java.util.WeakHashMap<Dialog, (Int) -> Int>()
     private var activityVisible = false
     private var ready = false
     private var requestId = 0
@@ -357,11 +360,19 @@ class MainActivity : AppCompatActivity() {
         native.tag = webControls
         setContentView(frame)
 
-        val shell = layoutInflater.inflate(R.layout.app_main, native, false)
-        val shellWidth = if (wide) minOf(resources.displayMetrics.widthPixels, dp(760)) else -1
-        native.addView(shell, LinearLayout.LayoutParams(shellWidth, -1).apply {
-            if (wide) gravity = Gravity.CENTER_HORIZONTAL
-        })
+        shell = layoutInflater.inflate(R.layout.app_main, native, false) as LinearLayout
+        navigationRail = ScrollView(this).apply {
+            visibility = View.GONE
+            isFillViewport = true
+            setBackgroundColor(color(R.color.surface))
+        }
+        val shellRow = row().apply {
+            addView(navigationRail, LinearLayout.LayoutParams(
+                resources.getDimensionPixelSize(R.dimen.navigation_rail_width), -1,
+            ))
+            addView(shell, LinearLayout.LayoutParams(0, -1, 1f))
+        }
+        native.addView(centeredContent(shellRow), LinearLayout.LayoutParams(-1, -1))
         title = shell.findViewById(R.id.appTitle)
         appSub = shell.findViewById(R.id.appSub)
         sourceName = shell.findViewById(R.id.sourceName)
@@ -491,6 +502,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
         restoreNavigationState(savedInstanceState)
+        updateWindowLayout()
         refresh()
         web.loadUrl(API_PAGE)
         val token = SessionToken(this, ComponentName(this, AudioPlaybackService::class.java))
@@ -955,18 +967,15 @@ class MainActivity : AppCompatActivity() {
                 onSelect?.invoke(choice)
             }
         }
-        val metrics = resources.displayMetrics
-        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
-        val maxHeight = minOf((metrics.heightPixels * 0.70f).toInt(), dp(640), metrics.heightPixels - dp(24))
-        val minHeight = minOf(dp(260), maxHeight)
-        val height = (dp(120) + minOf(choices.size, 8) * dp(56) + footerHeight + dp(12))
-            .coerceIn(minHeight, maxHeight)
+        sizeSheet(dialog) { available ->
+            val maxHeight = sheetMaxHeight(available)
+            (dp(132) + minOf(choices.size, 8) * dp(56) + footerHeight)
+                .coerceIn(minOf(dp(260), maxHeight), maxHeight)
+        }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
-            setLayout(width, height)
             setWindowAnimations(R.style.SearchSheetAnimation)
         }
         dialog.setCanceledOnTouchOutside(true)
@@ -1234,14 +1243,11 @@ class MainActivity : AppCompatActivity() {
             if (disk) "搜索我的网盘中所有文件" else "搜索整个群文件库"
         val dialog = Dialog(this)
         dialog.setContentView(view)
-        val metrics = resources.displayMetrics
-        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
+        sizeSheet(dialog) { WindowManager.LayoutParams.WRAP_CONTENT }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
-            setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT)
             setSoftInputMode(
                 WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
@@ -1324,19 +1330,14 @@ class MainActivity : AppCompatActivity() {
 
         val dialog = Dialog(this)
         dialog.setContentView(view)
-        val metrics = resources.displayMetrics
-        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
-        val height = minOf(
-            (metrics.heightPixels * 0.70f).toInt().coerceAtLeast(dp(320)),
-            dp(640),
-            metrics.heightPixels - dp(24),
-        )
+        sizeSheet(dialog) { available ->
+            minOf((available * 0.70f).toInt().coerceIn(dp(320), dp(640)), available - dp(24))
+                .coerceAtLeast(1)
+        }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
-            setLayout(width, height)
             setWindowAnimations(R.style.SearchSheetAnimation)
         }
         dialog.setCanceledOnTouchOutside(true)
@@ -1472,19 +1473,14 @@ class MainActivity : AppCompatActivity() {
 
         val dialog = Dialog(this)
         dialog.setContentView(view)
-        val metrics = resources.displayMetrics
-        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
-        val height = minOf(
-            (metrics.heightPixels * 0.70f).toInt().coerceAtLeast(dp(320)),
-            dp(640),
-            metrics.heightPixels - dp(24),
-        )
+        sizeSheet(dialog) { available ->
+            minOf((available * 0.70f).toInt().coerceIn(dp(320), dp(640)), available - dp(24))
+                .coerceAtLeast(1)
+        }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
-            setLayout(width, height)
             setWindowAnimations(R.style.SearchSheetAnimation)
         }
         dialog.setCanceledOnTouchOutside(true)
@@ -1734,6 +1730,59 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!::shell.isInitialized) return
+        updateWindowLayout()
+        sheetHeights.entries.removeAll { !it.key.isShowing }
+        sheetHeights.forEach { (dialog, height) -> dialog.window?.sizeBottomSheet(this, height) }
+    }
+
+    private fun updateWindowLayout() {
+        val pagePad = resources.getDimensionPixelSize(R.dimen.page_pad)
+        shell.findViewById<View>(R.id.brandRow).apply {
+            setPaddingRelative(pagePad, paddingTop, paddingEnd, paddingBottom)
+        }
+        listOf(shell.findViewById<View>(R.id.titleRow), appSub, historyPanel, sectionRow, filterBar, status, content)
+            .forEach { it.setPaddingRelative(pagePad, it.paddingTop, pagePad, it.paddingBottom) }
+        courseSwitch.layoutParams = (courseSwitch.layoutParams as LinearLayout.LayoutParams).apply {
+            marginStart = pagePad
+            marginEnd = pagePad
+        }
+        nowPlaying.layoutParams = nowPlaying.layoutParams.apply {
+            width = resources.getDimensionPixelSize(R.dimen.mini_player_width)
+        }
+        shell.requestLayout()
+        if (railVisible == hasWideWindow) return
+
+        railVisible = hasWideWindow
+        val tabBar = (if (railVisible) shell else navigationRail).findViewById<LinearLayout>(R.id.tabBar)
+        (tabBar.parent as ViewGroup).removeView(tabBar)
+        val tabItems = tabBar.findViewById<LinearLayout>(R.id.tabItems)
+        tabItems.orientation = if (railVisible) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        tabBar.findViewById<View>(R.id.tabDivider).visibility = if (railVisible) View.GONE else View.VISIBLE
+        navRoots.forEach { tab ->
+            tab.layoutParams = if (railVisible) LinearLayout.LayoutParams(-1, dp(64))
+            else LinearLayout.LayoutParams(0, -2, 1f)
+        }
+        if (railVisible) {
+            navigationRail.addView(tabBar, FrameLayout.LayoutParams(-1, -2))
+            navigationRail.visibility = View.VISIBLE
+        } else {
+            navigationRail.visibility = View.GONE
+            shell.addView(tabBar, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
+        redrawFilteredRows?.invoke()
+    }
+
+    private fun sizeSheet(dialog: Dialog, height: (Int) -> Int) {
+        sheetHeights[dialog] = height
+        dialog.window?.sizeBottomSheet(this, height)
+    }
+
+    private fun sheetMaxHeight(available: Int): Int =
+        minOf((available * 0.70f).toInt(), dp(640), available - dp(24)).coerceAtLeast(1)
+
     private fun refresh(force: Boolean = false, cachedFirst: Boolean = false) {
         if (screen == Screen.FAVORITES) {
             refreshFavoritesPage()
@@ -1916,6 +1965,7 @@ class MainActivity : AppCompatActivity() {
         filterBar.visibility = View.GONE
         sortButton.visibility = View.GONE
         crumbsScroll.visibility = View.GONE
+        redrawFilteredRows = null
         content.removeAllViews()
         status.text = ""
         if (!hasVerifiedAccount()) {
@@ -2904,7 +2954,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             emptyMap()
         }
-        if (!wide) {
+        if (!hasWideWindow) {
             entries.forEach { container.addView(courseRow(it, entries, transferred, favoriteKeys, sourceNames)) }
             return
         }
@@ -3054,7 +3104,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showLoginDialog() {
-        LoginDialog(this, web.settings.userAgentString) { showApp(recheck = true) }.show()
+        val dialog = LoginDialog(this, web.settings.userAgentString) { showApp(recheck = true) }
+        sizeSheet(dialog) { available -> (available * 0.94f).toInt() }
+        dialog.show()
     }
 
     private fun currentPlaybackListKey(): String {
@@ -3331,17 +3383,15 @@ class MainActivity : AppCompatActivity() {
         list.adapter = adapter
         val dialog = Dialog(this)
         dialog.setContentView(view)
-        val metrics = resources.displayMetrics
-        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
-        val maxHeight = minOf((metrics.heightPixels * 0.70f).toInt(), dp(640), metrics.heightPixels - dp(24))
-        val minHeight = minOf(dp(280), maxHeight)
-        val height = (dp(120) + minOf(items.size, 8) * dp(88) + dp(16)).coerceIn(minHeight, maxHeight)
+        sizeSheet(dialog) { available ->
+            val maxHeight = sheetMaxHeight(available)
+            (dp(136) + minOf(items.size, 8) * dp(88))
+                .coerceIn(minOf(dp(280), maxHeight), maxHeight)
+        }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
-            setLayout(width, height)
             setWindowAnimations(R.style.SearchSheetAnimation)
         }
         dialog.setCanceledOnTouchOutside(true)
@@ -3364,7 +3414,11 @@ class MainActivity : AppCompatActivity() {
         page.findViewById<View>(R.id.favEmpty).visibility =
             if (items.isEmpty()) View.VISIBLE else View.GONE
         val transferred = if (items.any { !it.isDisk }) transferredIndex() else emptySet()
-        addCourseRows(list, items, transferred)
+        redrawFilteredRows = {
+            list.removeAllViews()
+            addCourseRows(list, items, transferred)
+        }
+        redrawFilteredRows?.invoke()
         page.findViewById<TextView>(R.id.favGoBrowse).setOnClickListener {
             showScreen(Screen.GROUPS)
         }
@@ -4425,15 +4479,7 @@ class MainActivity : AppCompatActivity() {
                 topMargin = dp(16)
             })
         }
-        val page = column().apply {
-            setBackgroundColor(color(R.color.bg))
-            isClickable = true
-            accessibilityPaneTitle = "音频播放"
-            addView(topBar, LinearLayout.LayoutParams(-1, dp(52)))
-            addView(View(this@MainActivity).apply {
-                setBackgroundColor(color(R.color.line))
-                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-            }, LinearLayout.LayoutParams(-1, dp(1)))
+        val playbackControls = column().apply {
             addView(header)
             addView(column().apply {
                 setBackgroundResource(R.drawable.bg_audio_controls)
@@ -4444,11 +4490,40 @@ class MainActivity : AppCompatActivity() {
             }, LinearLayout.LayoutParams(-1, -2).apply {
                 setMargins(dp(12), 0, dp(12), dp(12))
             })
+        }
+        val controlsScroll = ScrollView(this).apply {
+            addView(playbackControls, FrameLayout.LayoutParams(-1, -2))
+        }
+        val playbackBody = column().apply {
+            addView(controlsScroll, LinearLayout.LayoutParams(-1, -2))
             addView(courseList.view, LinearLayout.LayoutParams(-1, 0, 1f))
         }
+        val playbackContent = column().apply {
+            isClickable = true
+            accessibilityPaneTitle = "音频播放"
+            addView(topBar, LinearLayout.LayoutParams(-1, dp(52)))
+            addView(View(this@MainActivity).apply {
+                setBackgroundColor(color(R.color.line))
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(-1, dp(1)))
+            addView(playbackBody, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        val page = centeredContent(playbackContent).apply { isClickable = true }
         var compactHeader = false
-        page.addOnLayoutChangeListener { _, _, top, _, bottom, _, _, _, _ ->
-            val compact = bottom - top < dp(440)
+        page.addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
+            val width = right - left
+            val height = bottom - top
+            val split = width >= dp(EXPANDED_WINDOW_DP) ||
+                (width >= dp(WIDE_WINDOW_DP) && height < dp(360))
+            val orientation = if (split) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+            if (playbackBody.orientation != orientation) {
+                playbackBody.orientation = orientation
+                controlsScroll.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
+                else LinearLayout.LayoutParams(-1, -2)
+                courseList.view.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
+                else LinearLayout.LayoutParams(-1, 0, 1f)
+            }
+            val compact = height < dp(440)
             if (compact != compactHeader) {
                 compactHeader = compact
                 cover.visibility = if (compact) View.GONE else View.VISIBLE
