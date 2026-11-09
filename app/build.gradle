@@ -23,7 +23,7 @@ android {
         minSdk 29
         targetSdk 35
         versionCode 24
-        versionName '0.1.23'
+        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('0.1.23')
     }
 
     compileOptions {
