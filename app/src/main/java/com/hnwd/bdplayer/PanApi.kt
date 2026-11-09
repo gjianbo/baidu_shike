@@ -1,7 +1,9 @@
 package com.hnwd.bdplayer
 
 import android.net.Uri
+import android.util.Base64
 import java.net.URLEncoder
+import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,6 +18,12 @@ internal data class PanEntry(
     val directory: Boolean,
 )
 
+internal data class PanSearchHit(
+    val entry: PanEntry,
+    val parentPath: String,
+    val shareFsId: String,
+)
+
 /** 文档《媒体取址技术方案》§2：按扩展名分流后的媒体类别。 */
 internal enum class MediaKind { VIDEO, AUDIO, PDF, DOCUMENT, DIRECTORY, OTHER }
 
@@ -23,6 +31,7 @@ internal object PanApi {
     const val HOST = "pan.baidu.com"
     const val MOBILE_HOME = "https://pan.baidu.com/wap/home#/"
     const val CONTACTS = "https://pan.baidu.com/disk/main#/im/addrBook"
+    private const val SEARCH_SIGN_SALT = "D3BA5E6D3B16D9202E10DE5D662CFC15"
 
     /** §5.3 / §6.3：dlink 直链要带这个 UA 才 302 到 CDN；签名自带，不需要 Cookie。 */
     const val DLINK_USER_AGENT = "pan.baidu.com"
@@ -78,6 +87,47 @@ internal object PanApi {
         "fs_id" to directoryId, "type" to "2", "page" to page.toString(),
         "num" to "100", "limit" to "100", "desc" to "1",
     )
+
+    fun searchGroup(gid: String, keyword: String): String {
+        val data = JSONObject()
+            .put("gid", JSONArray().put(gid))
+            .put("key_word", keyword)
+            .put("sign", searchSign(gid, keyword))
+            .toString()
+        return api("/basembox/group/search", "data" to data)
+    }
+
+    fun parseSearch(json: JSONObject, gid: String): List<PanSearchHit> =
+        json.optJSONArray("result")?.objects().orEmpty().mapNotNull { item ->
+            val group = item.optString("groupId").ifEmpty { gid }
+            if (group != gid) return@mapNotNull null
+            val fileId = item.optString("fsid").ifEmpty { item.optString("fs_id") }
+            val name = item.optString("server_filename")
+            val path = readablePath(item.optString("path"))
+            if (fileId.isEmpty() || name.isEmpty() || path.isEmpty()) return@mapNotNull null
+            PanSearchHit(
+                entry = PanEntry(
+                    gid = group,
+                    messageId = item.optString("msgId").ifEmpty { item.optString("msg_id") },
+                    owner = item.optString("uk").ifEmpty { item.optString("from_uk") },
+                    fileId = fileId,
+                    name = name,
+                    path = path,
+                    size = item.optString("size"),
+                    directory = item.optInt("is_dir") == 1,
+                ),
+                parentPath = readablePath(item.optString("parent_path"))
+                    .ifEmpty { path.substringBeforeLast('/') },
+                shareFsId = item.optString("share_fs_id"),
+            )
+        }
+
+    private fun searchSign(gid: String, keyword: String): String {
+        val hex = MessageDigest.getInstance("MD5")
+            .digest((SEARCH_SIGN_SALT + "_" + gid + keyword).toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        return Base64.encodeToString(hex.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+    }
 
     fun viewer() = api("/api/gettemplatevariable", "fields" to "[\"uk\"]")
 

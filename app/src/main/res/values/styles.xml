@@ -81,6 +81,11 @@
         <item name="android:lineSpacingMultiplier">1.2</item>
     </style>
 
+    <style name="SearchSheetAnimation">
+        <item name="android:windowEnterAnimation">@anim/slide_in_up</item>
+        <item name="android:windowExitAnimation">@anim/slide_out_down</item>
+    </style>
+
     <!-- PdfViewerFragment 的 ToolBoxView 使用 Material3 属性 -->
     <style name="PdfReaderTheme" parent="Theme.Material3.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/white</item>

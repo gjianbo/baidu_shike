@@ -235,7 +235,11 @@ class AudioPlaybackService : MediaSessionService() {
         val current = entry ?: return
         if (!hasPlayed) return
         val player = session.player
-        val progress = (player.currentPosition / 1000).toInt() to (player.playbackState == Player.STATE_ENDED)
+        val seconds = (player.currentPosition / 1000).toInt()
+        val ended = player.playbackState == Player.STATE_ENDED
+        // 自动切歌时 clearFile 可能用 0 秒快照覆盖刚写完的完成记录。
+        if (!ended && seconds == 0 && history?.find(current)?.completed == true) return
+        val progress = seconds to ended
         if (progress == lastSaved) return
         val durationMs = player.duration
         val duration = if (durationMs > 0) (durationMs / 1000).toInt() else 0

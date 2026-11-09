@@ -546,7 +546,7 @@ internal class VideoPlaybackPage(
                     progress.edit().remove(progressKey).apply()
                     history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
                     readyToSave = false
-                    if (next.isEnabled) video.post { if (dialog.isShowing) onEnded(snapshot()) }
+                    video.post { if (canAutoAdvance()) onEnded(snapshot()) }
                 }
                 if (player.playerError != null) return
                 message.visibility = if (listening || !rendered || playbackState == Player.STATE_BUFFERING) {
@@ -603,6 +603,9 @@ internal class VideoPlaybackPage(
         val fullscreen: Boolean,
         val orientationBeforeFullscreen: Int,
     )
+
+    fun canAutoAdvance(): Boolean =
+        dialog.isShowing && player.playbackState == Player.STATE_ENDED && player.playWhenReady
 
     fun snapshot() = Snapshot(
         entry, account, player.currentPosition, player.playWhenReady, listening, immersive, orientationBeforeFullscreen,

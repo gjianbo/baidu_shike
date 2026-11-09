@@ -1,11 +1,14 @@
 package com.hnwd.bdplayer
 
+import android.app.Dialog
 import android.content.ComponentName
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -15,6 +18,9 @@ import android.os.SystemClock
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceResponse
@@ -39,6 +45,7 @@ import androidx.annotation.OptIn
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
+import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
@@ -76,6 +83,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var appSub: TextView
     private lateinit var sourceName: TextView
     private lateinit var sourceButton: View
+    private lateinit var searchButton: View
     private lateinit var refreshButton: View
     private lateinit var sectionRow: View
     private lateinit var sectionTitle: TextView
@@ -152,7 +160,15 @@ class MainActivity : AppCompatActivity() {
     private val folders = mutableListOf<PanEntry>()
     private val courseEntries = mutableListOf<PanEntry>()
     private var courseParentKey = ""
-    private enum class RequestLane { LIST, AUDIO, RENEWAL }
+    private data class FolderPosition(val scrollY: Int, val filter: MediaFilter, val unheardOnly: Boolean)
+    private val folderPositions = mutableMapOf<List<String>, FolderPosition>()
+    private enum class RequestLane { LIST, SEARCH, COURSE, AUDIO, RENEWAL }
+    private var searchRequestId = 0
+    private var searchDialog: Dialog? = null
+    private var courseRequestId = 0
+    private var automaticCourseLoad: PanEntry? = null
+    private var historyRefreshScheduled = false
+    private var historyRefreshPending = false
 
     private var audioRequestId = 0
     private var audioPlayToken: Long? = null
@@ -203,6 +219,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var addSourceButton: View
 
     private data class ShareSource(val id: String, val name: String, val sessionUrl: String = "")
+
+    private data class SheetChoice(
+        val title: String,
+        val meta: String = "",
+        val checked: Boolean = false,
+        val tag: Any? = null,
+    )
 
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -370,12 +393,19 @@ class MainActivity : AppCompatActivity() {
         nowPlaying = shell.findViewById(R.id.miniPlayer)
         historyPanel = shell.findViewById(R.id.historyPanel)
         content = shell.findViewById(R.id.content)
-        contentScroll = shell.findViewById(R.id.contentScroll)
+        contentScroll = shell.findViewById<ScrollView>(R.id.contentScroll).apply {
+            setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
+                if (oldScrollY > dp(24) && scrollY <= dp(24)) refreshHistoryIfPending()
+            }
+        }
         courseSwitch = shell.findViewById(R.id.courseSwitch)
         btnPrev = shell.findViewById(R.id.btnPrev)
         btnNext = shell.findViewById(R.id.btnNext)
         courseHint = shell.findViewById(R.id.courseHint)
         sourceButton.setOnClickListener { chooseSource() }
+        searchButton = shell.findViewById<View>(R.id.btnSearch).apply {
+            setOnClickListener { showFileSearch() }
+        }
         refreshButton = shell.findViewById(R.id.btnRefresh)
         refreshButton.setOnClickListener {
             when {
@@ -421,12 +451,22 @@ class MainActivity : AppCompatActivity() {
                         if (hasVerifiedAccount()) player.sendCustomCommand(AudioPlaybackService.SYNC_ACCOUNT, Bundle.EMPTY)
                         player.addListener(object : Player.Listener {
                             override fun onEvents(player: Player, events: Player.Events) {
-                                if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) syncAudioAnchor(player)
+                                if (events.contains(Player.EVENT_MEDIA_ITEM_TRANSITION)) {
+                                    syncAudioAnchor(player)
+                                    scheduleHistoryRefresh()
+                                }
                                 updateNowPlaying()
                             }
 
+                            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                                if (!isPlaying) scheduleHistoryRefresh()
+                            }
+
                             override fun onPlaybackStateChanged(playbackState: Int) {
-                                if (playbackState == Player.STATE_ENDED) advanceAudioIfEnded(player)
+                                if (playbackState == Player.STATE_ENDED) {
+                                    advanceAudioIfEnded(player)
+                                    scheduleHistoryRefresh()
+                                }
                             }
 
                             override fun onPlayerError(error: PlaybackException) {
@@ -446,10 +486,35 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun advanceAudioIfEnded(player: Player) {
-        if (pendingAudioEntry != null || player.playbackState != Player.STATE_ENDED || !player.playWhenReady) return
         val ended = currentAudioEntry(player) ?: return
-        if (PlaybackQueueState.anchor?.let { sameEntry(it, ended) } == true) {
+        val mediaItem = player.currentMediaItem
+        advanceAfterEnd(
+            ended,
+            isCurrent = {
+                pendingAudioEntry == null && videoLoading == null && videoPage == null &&
+                    player.playbackState == Player.STATE_ENDED && player.playWhenReady &&
+                    player.currentMediaItem == mediaItem && ownsAudio(player)
+            },
+        ) {
             playSibling(ended, 1, automatic = true)
+        }
+    }
+
+    private fun scheduleHistoryRefresh() {
+        historyRefreshPending = true
+        if (historyRefreshScheduled) return
+        historyRefreshScheduled = true
+        content.postDelayed({
+            historyRefreshScheduled = false
+            refreshHistoryIfPending()
+        }, 350)
+    }
+
+    private fun refreshHistoryIfPending() {
+        if (historyRefreshPending && !historyRefreshScheduled && !isDestroyed && hasVerifiedAccount() &&
+            screen == Screen.HOME && folders.isEmpty() && audioPage == null && contentScroll.scrollY <= dp(24)
+        ) {
+            renderAudioHistory()
         }
     }
 
@@ -525,6 +590,7 @@ class MainActivity : AppCompatActivity() {
         recent = target == Screen.HOME
         unheardOnly = false
         folders.clear()
+        folderPositions.clear()
         courseEntries.clear()
         courseParentKey = ""
         contentScroll.scrollTo(0, 0)
@@ -581,6 +647,7 @@ class MainActivity : AppCompatActivity() {
         sourceButton.visibility = if (browsing) View.VISIBLE else View.GONE
         appSub.visibility = if (browsing && (folders.isNotEmpty() || !hasVerifiedAccount())) View.VISIBLE else View.GONE
         refreshButton.visibility = if (browsing) View.VISIBLE else View.GONE
+        searchButton.visibility = if (browsing && gid.isNotEmpty() && hasVerifiedAccount()) View.VISIBLE else View.GONE
         title.setTextSize(if (screen == Screen.HOME) 30f else 26f)
         crumbsScroll.visibility = if (screen == Screen.BROWSE) View.VISIBLE else View.GONE
         sectionRow.visibility = if (browsing || folders.isNotEmpty()) View.VISIBLE else View.GONE
@@ -615,36 +682,155 @@ class MainActivity : AppCompatActivity() {
             })
         }
         addCrumb("根目录", folders.isEmpty()) {
-            if (folders.isNotEmpty()) {
-                folders.clear()
-                refresh()
-            }
+            if (folders.isNotEmpty()) returnToFolder(0)
         }
         folders.forEachIndexed { index, entry ->
             addSeparator()
             addCrumb(entry.name, index == folders.lastIndex) {
                 if (index < folders.lastIndex) {
-                    while (folders.size > index + 1) folders.removeAt(folders.size - 1)
-                    refresh()
+                    returnToFolder(index + 1)
                 }
             }
         }
         crumbsScroll.visibility = if (screen == Screen.BROWSE) View.VISIBLE else View.GONE
     }
 
+    private fun showChoiceSheet(
+        title: String,
+        subtitle: String? = null,
+        choices: List<SheetChoice>,
+        multi: Boolean = false,
+        confirmLabel: String? = null,
+        onSelect: ((SheetChoice) -> Unit)? = null,
+        onConfirm: ((List<SheetChoice>) -> Unit)? = null,
+        footerActions: List<Pair<String, () -> Unit>> = emptyList(),
+    ) {
+        if (choices.isEmpty()) return
+        val checked = BooleanArray(choices.size) { choices[it].checked }
+        val view = layoutInflater.inflate(R.layout.dialog_choice_sheet, null, false)
+        view.findViewById<TextView>(R.id.choiceTitle).text = title
+        val subtitleView = view.findViewById<TextView>(R.id.choiceSubtitle)
+        if (subtitle.isNullOrEmpty()) {
+            subtitleView.visibility = View.GONE
+        } else {
+            subtitleView.text = subtitle
+            subtitleView.visibility = View.VISIBLE
+        }
+        val list = view.findViewById<ListView>(R.id.choiceList)
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = choices.size
+            override fun getItem(position: Int) = choices[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView ?: layoutInflater.inflate(R.layout.item_choice, parent, false)
+                val choice = choices[position]
+                val label = row.findViewById<TextView>(R.id.choiceLabel)
+                label.text = choice.title
+                label.setTextColor(color(if (checked[position]) R.color.accentInk else R.color.ink))
+                val meta = row.findViewById<TextView>(R.id.choiceMeta)
+                if (choice.meta.isEmpty()) {
+                    meta.visibility = View.GONE
+                } else {
+                    meta.text = choice.meta
+                    meta.visibility = View.VISIBLE
+                }
+                row.findViewById<View>(R.id.choiceCheck).visibility =
+                    if (checked[position]) View.VISIBLE else View.GONE
+                row.findViewById<View>(R.id.choiceDivider).visibility =
+                    if (position == choices.lastIndex) View.GONE else View.VISIBLE
+                return row
+            }
+        }
+        list.adapter = adapter
+        val dialog = Dialog(this)
+        dialog.setContentView(view)
+        val footer = view.findViewById<LinearLayout>(R.id.choiceFooter)
+        val actions = view.findViewById<LinearLayout>(R.id.choiceActions)
+        var footerHeight = 0
+        fun addAction(label: String, primary: Boolean, action: () -> Unit) {
+            val button = TextView(this@MainActivity).apply {
+                text = label
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                gravity = Gravity.CENTER
+                minHeight = dp(44)
+                setPadding(dp(18), 0, dp(18), 0)
+                if (primary) {
+                    setBackgroundResource(R.drawable.bg_search_action)
+                    setTextColor(color(R.color.onAccent))
+                } else {
+                    setBackgroundResource(R.drawable.bg_chip)
+                    setTextColor(color(R.color.ink2))
+                }
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    dialog.dismiss()
+                    action()
+                }
+            }
+            val params = LinearLayout.LayoutParams(-2, dp(44))
+            if (actions.childCount > 0) params.marginStart = dp(8)
+            actions.addView(button, params)
+        }
+        if (multi && confirmLabel != null) {
+            addAction("取消", false) { }
+            addAction(confirmLabel, true) {
+                onConfirm?.invoke(choices.filterIndexed { index, _ -> checked[index] })
+            }
+            footer.visibility = View.VISIBLE
+            footerHeight = dp(66)
+        } else if (footerActions.isNotEmpty()) {
+            footerActions.forEachIndexed { index, pair ->
+                addAction(pair.first, index == footerActions.lastIndex) { pair.second() }
+            }
+            footer.visibility = View.VISIBLE
+            footerHeight = dp(66)
+        }
+        list.setOnItemClickListener { _, _, position, _ ->
+            val choice = choices[position]
+            if (multi) {
+                checked[position] = !checked[position]
+                adapter.notifyDataSetChanged()
+            } else {
+                dialog.dismiss()
+                onSelect?.invoke(choice)
+            }
+        }
+        val metrics = resources.displayMetrics
+        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
+        val maxHeight = minOf((metrics.heightPixels * 0.70f).toInt(), dp(640), metrics.heightPixels - dp(24))
+        val minHeight = minOf(dp(260), maxHeight)
+        val height = (dp(120) + minOf(choices.size, 8) * dp(56) + footerHeight + dp(12))
+            .coerceIn(minHeight, maxHeight)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.45f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
+            setLayout(width, height)
+            setWindowAnimations(R.style.SearchSheetAnimation)
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        view.findViewById<ImageView>(R.id.choiceClose).setOnClickListener { dialog.dismiss() }
+        dialog.show()
+    }
+
     private fun showThemeDialog() {
         val modes = listOf(ThemeStore.SYSTEM, ThemeStore.LIGHT, ThemeStore.DARK)
-        val labels = modes.map { ThemeStore.label(it) }
         val current = modes.indexOf(ThemeStore.mode(this)).coerceAtLeast(0)
-        AlertDialog.Builder(this)
-            .setTitle("外观")
-            .setSingleChoiceItems(labels.toTypedArray(), current) { dialog, index ->
-                dialog.dismiss()
-                ThemeStore.set(this, modes[index], screen.name)
-                findViewById<TextView>(R.id.setThemeValue)?.text = ThemeStore.label(modes[index])
-            }
-            .setNegativeButton("取消", null)
-            .show()
+        showChoiceSheet(
+            title = "外观",
+            subtitle = "选择界面配色",
+            choices = modes.mapIndexed { index, mode ->
+                SheetChoice(ThemeStore.label(mode), checked = index == current, tag = mode)
+            },
+            onSelect = { choice ->
+                val mode = choice.tag as String
+                ThemeStore.set(this, mode, screen.name)
+                findViewById<TextView>(R.id.setThemeValue)?.text = ThemeStore.label(mode)
+            },
+        )
     }
 
     private fun isUnfinishedMedia(entry: PanEntry): Boolean = when (PanApi.kindOf(entry)) {
@@ -684,20 +870,21 @@ class MainActivity : AppCompatActivity() {
             discoverGroups()
             return
         }
-        AlertDialog.Builder(this)
-            .setTitle("切换群组")
-            .setSingleChoiceItems(sources.map { it.name }.toTypedArray(), sources.indexOfFirst { it.id == gid }) { dialog, index ->
-                dialog.dismiss()
+        showChoiceSheet(
+            title = "切换群组",
+            subtitle = "选择要浏览的群文件库",
+            choices = sources.map { SheetChoice(it.name, checked = it.id == gid, tag = it) },
+            onSelect = { choice ->
                 if (hasVerifiedAccount() && verifiedAccount == account) {
-                    val source = sources[index]
-                    if (source.sessionUrl.isNotEmpty()) showWeb(source.sessionUrl)
-                    else activateGroup(source.id)
+                    val source = choice.tag as ShareSource
+                    if (source.sessionUrl.isNotEmpty()) showWeb(source.sessionUrl) else activateGroup(source.id)
                 }
-            }
-            .setPositiveButton("从网盘添加群组") { _, _ -> discoverGroups() }
-            .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
-            .setNegativeButton("取消", null)
-            .show()
+            },
+            footerActions = listOf(
+                "从网盘添加群组" to { discoverGroups() },
+                "打开网页通讯录" to { openContacts() },
+            ),
+        )
     }
 
     private fun discoverGroups() {
@@ -760,27 +947,29 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val existing = shareSources().associateBy { it.id }
-        val checked = BooleanArray(candidates.size) { candidates[it].id in existing }
-        AlertDialog.Builder(this)
-            .setTitle("勾选共享来源")
-            .setMultiChoiceItems(candidates.map { it.name }.toTypedArray(), checked) { _, index, selected ->
-                checked[index] = selected
-            }
-            .setNegativeButton("取消", null)
-            .setPositiveButton("保存") { _, _ ->
-                if (!hasVerifiedAccount() || verifiedAccount != account) return@setPositiveButton
-                val candidateIds = candidates.map { it.id }.toSet()
-                val selected = candidates.filterIndexed { index, _ -> checked[index] }
-                    .map { existing[it.id]?.takeUnless { source -> source.name == "原群文件库" } ?: it }
-                val retained = shareSources().filterNot { it.id in candidateIds }
-                val sources = retained + selected
-                val nextGroup = gid.takeIf { current -> sources.any { it.id == current } }
-                    ?: selected.firstOrNull()?.id
-                    ?: retained.firstOrNull { it.sessionUrl.isEmpty() }?.id.orEmpty()
-                saveShareSources(sources, nextGroup)
-                activateGroup(nextGroup)
-            }
-            .show()
+        showChoiceSheet(
+            title = "勾选共享来源",
+            subtitle = "可多选，保存后显示在首页",
+            choices = candidates.map { source ->
+                SheetChoice(source.name, checked = source.id in existing, tag = source)
+            },
+            multi = true,
+            confirmLabel = "保存",
+            onConfirm = { selected ->
+                if (hasVerifiedAccount() && verifiedAccount == account) {
+                    val candidateIds = candidates.map { it.id }.toSet()
+                    val selectedSources = selected.mapNotNull { it.tag as? ShareSource }
+                        .map { existing[it.id]?.takeUnless { source -> source.name == "原群文件库" } ?: it }
+                    val retained = shareSources().filterNot { it.id in candidateIds }
+                    val sources = retained + selectedSources
+                    val nextGroup = gid.takeIf { current -> sources.any { it.id == current } }
+                        ?: selectedSources.firstOrNull()?.id
+                        ?: retained.firstOrNull { it.sessionUrl.isEmpty() }?.id.orEmpty()
+                    saveShareSources(sources, nextGroup)
+                    activateGroup(nextGroup)
+                }
+            },
+        )
     }
 
     private fun saveShareSources(sources: List<ShareSource>, activeGroup: String) {
@@ -847,6 +1036,7 @@ class MainActivity : AppCompatActivity() {
             screen = Screen.HOME
             recent = true
             folders.clear()
+            folderPositions.clear()
             showApp()
         } else {
             showScreen(screen)
@@ -854,7 +1044,367 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun refresh(force: Boolean = false) {
+    private fun showFileSearch() {
+        if (!ready || !hasVerifiedAccount()) {
+            toast("网盘正在连接，请稍后再试")
+            return
+        }
+        val group = gid
+        val scope = shareSources().firstOrNull { it.id == group }?.name ?: "当前文件库"
+        val account = verifiedAccount
+        val view = layoutInflater.inflate(R.layout.dialog_search_input, null, false)
+        val input = view.findViewById<EditText>(R.id.searchInput)
+        view.findViewById<TextView>(R.id.searchInputSubtitle).text = "在「$scope」中搜索"
+        val dialog = Dialog(this)
+        dialog.setContentView(view)
+        val metrics = resources.displayMetrics
+        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.45f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
+            setLayout(width, WindowManager.LayoutParams.WRAP_CONTENT)
+            setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
+            )
+            setWindowAnimations(R.style.SearchSheetAnimation)
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        fun submit() {
+            val keyword = input.text.toString().trim()
+            if (keyword.isEmpty()) {
+                toast("请输入关键词")
+                input.requestFocus()
+                return
+            }
+            getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(input.windowToken, 0)
+            dialog.dismiss()
+            if (ready && hasVerifiedAccount() && verifiedAccount == account && gid == group) {
+                searchFiles(group, keyword)
+            } else {
+                toast("群组连接已变化，请重新搜索")
+            }
+        }
+        view.findViewById<TextView>(R.id.searchInputCancel).setOnClickListener { dialog.dismiss() }
+        view.findViewById<TextView>(R.id.searchInputSubmit).setOnClickListener { submit() }
+        input.setOnEditorActionListener { _, action, _ ->
+            if (action != EditorInfo.IME_ACTION_SEARCH) return@setOnEditorActionListener false
+            submit()
+            true
+        }
+        dialog.show()
+        input.requestFocus()
+        dialog.window?.setSoftInputMode(
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE or
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
+        )
+    }
+
+    private fun searchFiles(group: String, keyword: String) {
+        val hits = mutableListOf<PanSearchHit>()
+        val view = layoutInflater.inflate(R.layout.dialog_search_results, null, false)
+        val eyebrow = view.findViewById<TextView>(R.id.searchEyebrow)
+        val keywordTitle = view.findViewById<TextView>(R.id.searchTitle)
+        val summary = view.findViewById<TextView>(R.id.searchSummary)
+        val loading = view.findViewById<View>(R.id.searchLoading)
+        val list = view.findViewById<ListView>(R.id.searchResults)
+        val empty = view.findViewById<View>(R.id.searchEmpty)
+        val emptyTitle = view.findViewById<TextView>(R.id.searchEmptyTitle)
+        val emptyHint = view.findViewById<TextView>(R.id.searchEmptyHint)
+        val scope = shareSources().firstOrNull { it.id == group }?.name ?: "当前文件库"
+        eyebrow.text = "搜索 · $scope"
+        keywordTitle.text = keyword
+        summary.text = "正在搜索…"
+        loading.visibility = View.VISIBLE
+
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = hits.size
+            override fun getItem(position: Int) = hits[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView ?: layoutInflater.inflate(R.layout.item_search_hit, parent, false)
+                val hit = hits[position]
+                val kind = PanApi.kindOf(hit.entry)
+                paintMediaIcon(row.findViewById<ImageView>(R.id.searchIcon), kind, hit.entry.directory)
+                row.findViewById<TextView>(R.id.searchName).text = hit.entry.name
+                val location = if (hit.entry.directory) hit.entry.path else hit.parentPath
+                row.findViewById<TextView>(R.id.searchMeta).text =
+                    listOf(mediaKindLabel(kind, hit.entry.directory, formatOf(hit.entry)), location.ifEmpty { "/" })
+                        .filter { it.isNotEmpty() }
+                        .joinToString(" · ")
+                row.findViewById<View>(R.id.searchDivider).visibility =
+                    if (position == hits.lastIndex) View.GONE else View.VISIBLE
+                return row
+            }
+        }
+        list.adapter = adapter
+
+        val dialog = Dialog(this)
+        dialog.setContentView(view)
+        val metrics = resources.displayMetrics
+        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
+        val height = minOf(
+            (metrics.heightPixels * 0.70f).toInt().coerceAtLeast(dp(320)),
+            dp(640),
+            metrics.heightPixels - dp(24),
+        )
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.45f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
+            setLayout(width, height)
+            setWindowAnimations(R.style.SearchSheetAnimation)
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        searchDialog = dialog
+        dialog.setOnDismissListener {
+            searchRequestId++
+            searchDialog = null
+        }
+        view.findViewById<ImageView>(R.id.searchClose).setOnClickListener { dialog.dismiss() }
+
+        fun showEmpty(titleText: String, hintText: String, summaryText: String) {
+            loading.visibility = View.GONE
+            list.visibility = View.GONE
+            empty.visibility = View.VISIBLE
+            emptyTitle.text = titleText
+            emptyHint.text = hintText
+            summary.text = summaryText
+        }
+
+        list.setOnItemClickListener { _, _, index, _ ->
+            val hit = hits.getOrNull(index) ?: return@setOnItemClickListener
+            list.isEnabled = false
+            list.alpha = 0.55f
+            loading.visibility = View.VISIBLE
+            summary.text = "正在定位目录…"
+            locateSearchHit(group, hit) { ok, message ->
+                if (searchDialog !== dialog || !dialog.isShowing) return@locateSearchHit
+                if (ok) {
+                    dialog.dismiss()
+                } else {
+                    loading.visibility = View.GONE
+                    list.isEnabled = true
+                    list.alpha = 1f
+                    summary.text = message ?: "定位失败，请稍后重试"
+                }
+            }
+        }
+        dialog.show()
+
+        load(
+            PanApi.searchGroup(group, keyword),
+            post = true,
+            lane = RequestLane.SEARCH,
+            onCancelled = {
+                loading.visibility = View.GONE
+                summary.text = "已取消"
+            },
+            onFailure = { showEmpty("搜索失败", "请稍后重试", "无法完成搜索") },
+        ) { json ->
+            hits.clear()
+            hits.addAll(PanApi.parseSearch(json, group))
+            adapter.notifyDataSetChanged()
+            loading.visibility = View.GONE
+            if (hits.isEmpty()) {
+                showEmpty("没有找到匹配的文件", "换个关键词，或减少关键词长度", "0 个结果")
+            } else {
+                empty.visibility = View.GONE
+                list.visibility = View.VISIBLE
+                list.alpha = 1f
+                list.isEnabled = true
+                list.setSelection(0)
+                summary.text = if (hits.size >= 800) {
+                    "找到 800 个结果（上限）· 建议输入更精确的关键词"
+                } else {
+                    "找到 ${hits.size} 个结果 · 点选进入目录"
+                }
+            }
+        }
+    }
+
+    private fun locateSearchHit(group: String, hit: PanSearchHit, done: (Boolean, String?) -> Unit) {
+        if (!hasVerifiedAccount() || group != gid) {
+            done(false, "群组连接已变化，请重新搜索")
+            return
+        }
+        val shareFsId = hit.shareFsId.takeIf { it.isNotEmpty() }
+        if (shareFsId == null || hit.entry.messageId.isEmpty() || hit.entry.owner.isEmpty()) {
+            done(false, "搜索结果缺少目录信息，无法定位")
+            return
+        }
+        val targetPath = (if (hit.entry.directory) hit.entry.path else hit.parentPath)
+            .trimEnd('/').ifEmpty { "/" }
+        if (hit.entry.directory && hit.entry.fileId == shareFsId) {
+            openFolderTrail(group, listOf(hit.entry))
+            done(true, null)
+            return
+        }
+
+        var settled = false
+        fun finish(ok: Boolean, message: String? = null) {
+            if (settled) return
+            settled = true
+            done(ok, message)
+        }
+        fun fail(message: String) = finish(false, message)
+        fun dialogOpen() = searchDialog?.isShowing == true
+        fun open(trail: List<PanEntry>) {
+            if (!hasVerifiedAccount() || group != gid) {
+                fail("群组连接已变化，请重新搜索")
+                return
+            }
+            openFolderTrail(group, trail)
+            finish(true)
+        }
+        fun scanDirectory(
+            entry: PanEntry,
+            page: Int,
+            seen: MutableSet<String>,
+            match: (PanEntry) -> PanEntry?,
+            onFound: (PanEntry) -> Unit,
+            onMissing: () -> Unit,
+        ) {
+            if (!dialogOpen()) return
+            load(
+                PanApi.children(entry, page),
+                post = true,
+                lane = RequestLane.SEARCH,
+                onCancelled = { finish(false) },
+                onFailure = { fail("读取目录失败，请稍后重试") },
+            ) { json ->
+                if (!dialogOpen()) return@load
+                val entries = PanApi.parseChildren(json, entry)
+                val fresh = entries.filter { seen.add(entryKey(it)) }
+                for (child in fresh) {
+                    val found = match(child)
+                    if (found != null) {
+                        onFound(found)
+                        return@load
+                    }
+                }
+                if (json.optInt("has_more") != 0 && fresh.isNotEmpty()) {
+                    scanDirectory(entry, page + 1, seen, match, onFound, onMissing)
+                } else {
+                    onMissing()
+                }
+            }
+        }
+
+        val fileHit = !hit.entry.directory
+        val root = PanEntry(
+            gid = group,
+            messageId = hit.entry.messageId,
+            owner = hit.entry.owner,
+            fileId = shareFsId,
+            name = "文件库",
+            path = "",
+            size = "",
+            directory = true,
+        )
+        scanDirectory(
+            entry = root,
+            page = 1,
+            seen = mutableSetOf(),
+            match = { child ->
+                val childPath = child.path.trimEnd('/')
+                when {
+                    fileHit && !child.directory && child.fileId == hit.entry.fileId -> child
+                    child.directory && childPath == targetPath -> child
+                    child.directory && childPath.isNotEmpty() && targetPath.startsWith("$childPath/") -> child
+                    else -> null
+                }
+            },
+            onFound = { found ->
+                val foundPath = found.path.trimEnd('/')
+                var rootPath = foundPath.substringBeforeLast('/', "")
+                if (rootPath.isEmpty()) rootPath = "/"
+                val rootName = if (rootPath == "/") "文件库" else rootPath.substringAfterLast('/').ifEmpty { "文件库" }
+                val actualRoot = root.copy(name = rootName, path = rootPath)
+                when {
+                    targetPath == rootPath -> open(listOf(actualRoot))
+                    found.directory && foundPath == targetPath -> open(listOf(actualRoot, found))
+                    else -> {
+                        val parts = targetPath.removePrefix(rootPath).trim('/')
+                            .split('/').filter { it.isNotEmpty() }
+                        if (parts.isEmpty()) {
+                            fail("目录结构已变化，无法定位")
+                        } else {
+                            val trail = mutableListOf(actualRoot, found)
+                            fun walk(index: Int) {
+                                if (!dialogOpen()) return
+                                if (index >= parts.size) {
+                                    open(trail)
+                                    return
+                                }
+                                val current = trail.last()
+                                val expected = current.path.trimEnd('/') + "/" + parts[index]
+                                scanDirectory(
+                                    entry = current,
+                                    page = 1,
+                                    seen = mutableSetOf(),
+                                    match = { child ->
+                                        if (child.directory && child.path.trimEnd('/') == expected) child else null
+                                    },
+                                    onFound = { child ->
+                                        trail.add(child)
+                                        if (child.path.trimEnd('/') == targetPath) open(trail) else walk(index + 1)
+                                    },
+                                    onMissing = { fail("目录结构已变化，无法定位") },
+                                )
+                            }
+                            walk(1)
+                        }
+                    }
+                }
+            },
+            onMissing = {
+                fail(if (fileHit) "未找到文件所在目录，可能已被移动" else "未找到该目录，可能已被移动")
+            },
+        )
+    }
+
+    private fun openFolderTrail(group: String, trail: List<PanEntry>) {
+        if (!hasVerifiedAccount() || group != gid) return
+        if (screen == Screen.BROWSE && trail.take(folders.size).map(::entryKey) == folders.map(::entryKey) && trail.size > folders.size) {
+            rememberFolderPosition()
+        }
+        if (screen != Screen.BROWSE) folderPositions.clear()
+        screen = Screen.BROWSE
+        recent = false
+        folders.clear()
+        folders.addAll(trail)
+        mediaFilter = MediaFilter.ALL
+        unheardOnly = false
+        refresh()
+    }
+
+    private fun rememberFolderPosition() {
+        folderPositions[folders.map(::entryKey)] = FolderPosition(contentScroll.scrollY, mediaFilter, unheardOnly)
+    }
+
+    private fun returnToFolder(depth: Int) {
+        folders.subList(depth, folders.size).clear()
+        val path = folders.map(::entryKey)
+        val position = folderPositions.remove(path)
+        folderPositions.keys.removeAll { it.size > depth }
+        mediaFilter = position?.filter ?: MediaFilter.ALL
+        unheardOnly = position?.unheardOnly ?: false
+        refresh(cachedFirst = true)
+        scrollAfterLayout(position?.scrollY ?: 0)
+    }
+
+    private fun scrollAfterLayout(y: Int) {
+        val renderedRequest = requestId
+        contentScroll.doOnPreDraw {
+            if (requestId == renderedRequest) contentScroll.scrollTo(0, y)
+        }
+    }
+
+    private fun refresh(force: Boolean = false, cachedFirst: Boolean = false) {
         requestId++
         clearHomeUpdatePrompt()
         homeDisplayedEntries = emptyList()
@@ -955,7 +1505,7 @@ class MainActivity : AppCompatActivity() {
         } else ""
         if (homeRootKey != null && recentIsEmpty) {
             renderHomeDirectory(homeRootKey)
-        } else if (cached.isNotEmpty()) {
+        } else if (cached.isNotEmpty() || (cachedFirst && courseCache.readPage(cacheKey, 1) != null)) {
             if (parent != null) {
                 courseEntries.clear()
                 courseEntries.addAll(cached)
@@ -965,8 +1515,7 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (parent != null) {
             content.addView(headAction("← 返回上一级") {
-                folders.removeAt(folders.lastIndex)
-                refresh()
+                returnToFolder(folders.lastIndex)
             })
         }
         when {
@@ -974,6 +1523,16 @@ class MainActivity : AppCompatActivity() {
             screen == Screen.SETTINGS -> renderSettings()
             parent == null && gid.isEmpty() -> {
                 status.text = "请从网盘勾选共享来源"
+            }
+            cachedFirst && courseCache.readPage(cacheKey, 1) != null -> {
+                when {
+                    parent != null -> renderChildMore(parent, cacheKey)
+                    showingHomeDirectory && homeRootKey != null -> {
+                        if (courseCache.readPage(homeRootKey, 1) != null) renderRootMore(homeRootKey)
+                        else loadRoots(homeRootKey)
+                    }
+                    screen == Screen.BROWSE -> renderRootMore(cacheKey)
+                }
             }
             !ready -> {
                 status.text = if (cached.isNotEmpty()) "$cacheNote · 正在连接网盘"
@@ -1208,6 +1767,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun invalidateAccount() {
         accountProbeId++
+        courseRequestId++
+        automaticCourseLoad = null
+        historyRefreshPending = false
+        searchDialog?.dismiss()
         renewalRequestId++
         homeCheckToken++
         homeCheckInFlight = false
@@ -1303,6 +1866,7 @@ class MainActivity : AppCompatActivity() {
                         videoPage?.close()
                         closeAudioPage()
                         folders.clear()
+                        folderPositions.clear()
                         courseEntries.clear()
                         courseParentKey = ""
                         pendingQueue = pendingQueue?.takeIf { videoToRestore?.account == verifiedAccount }
@@ -1363,17 +1927,21 @@ class MainActivity : AppCompatActivity() {
             cacheNote = "已同步 ${courseCache.syncLabel(key)}"
             renderCourse()
             if (!changed) status.text = "$cacheNote · 无更新"
-            if (hasMore) {
-                val more = headAction("加载更多") {}
-                more.setBackgroundResource(R.drawable.bg_load_more)
-                more.setTextColor(color(R.color.ink3))
-                more.setOnClickListener {
-                    more.isEnabled = false
-                    loadChildren(parent, page + 1, more, key)
-                }
-                content.addView(more)
-            }
+            renderChildMore(parent, key)
         }
+    }
+
+    private fun renderChildMore(parent: PanEntry, key: String) {
+        val (page, cached) = courseCache.lastPage(key) ?: return
+        if (cached.nextCursor.isNullOrEmpty()) return
+        val more = headAction("加载更多") {}
+        more.setBackgroundResource(R.drawable.bg_load_more)
+        more.setTextColor(color(R.color.ink3))
+        more.setOnClickListener {
+            more.isEnabled = false
+            loadChildren(parent, page + 1, more, key)
+        }
+        content.addView(more)
     }
 
     private fun renderSourcePicker() {
@@ -1427,17 +1995,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun showCourseSort() {
         val options = CourseOrder.entries
-        AlertDialog.Builder(this)
-            .setTitle("排序")
-            .setSingleChoiceItems(options.map { it.label }.toTypedArray(), courseOrder.ordinal) { dialog, index ->
-                courseOrder = options[index]
+        showChoiceSheet(
+            title = "排序",
+            choices = options.map { SheetChoice(it.label, checked = it == courseOrder, tag = it) },
+            onSelect = { choice ->
+                courseOrder = choice.tag as CourseOrder
                 ThemeStore.setCourseOrder(this, courseOrder.name)
                 sortButton.text = courseOrder.label
-                dialog.dismiss()
                 redrawFilteredRows?.invoke()
-            }
-            .setNegativeButton("取消", null)
-            .show()
+            },
+        )
     }
 
     private fun orderCourses(entries: List<PanEntry>, order: CourseOrder = courseOrder): List<PanEntry> = when (order) {
@@ -1528,28 +2095,47 @@ class MainActivity : AppCompatActivity() {
         return PanApi.children(entry, page + 1, directoryId)
     }
 
-    private fun loadMoreCourses(entry: PanEntry, listKey: String?, done: (List<PanEntry>?) -> Unit) {
+    private fun loadMoreCourses(
+        entry: PanEntry,
+        listKey: String?,
+        isCurrentCourse: () -> Boolean = { PlaybackQueueState.anchor?.let { sameEntry(it, entry) } == true },
+        done: (List<PanEntry>?) -> Unit,
+    ) {
         val key = directoryCacheKey(entry, listKey) ?: return done(null)
         val (page, cached) = courseCache.lastPage(key) ?: return done(null)
         val url = nextDirectoryPage(entry, listKey) ?: return done(null)
         val nested = key.startsWith("dir:")
-        load(url, post = nested, onCancelled = { done(null) }, onFailure = { done(null) }) { json ->
+        var finished = false
+        fun complete(entries: List<PanEntry>?) {
+            if (finished) return
+            finished = true
+            done(entries)
+        }
+        load(
+            url, post = nested, lane = RequestLane.COURSE,
+            onCancelled = { complete(null) }, onFailure = { complete(null) },
+        ) { json ->
             val files = if (nested) PanApi.parseChildren(json, entry) else PanApi.parseRoots(json, entry.gid)
             val next = if (nested) {
-                if (json.optInt("has_more") != 0 && files.isNotEmpty()) "more" else ""
+                if (json.optInt("has_more") != 0 && files.isNotEmpty() && files != cached.entries) "more" else ""
             } else {
                 nextRootCursor(json, cached.nextCursor.orEmpty())
             }
-            courseCache.writeIfChanged(key, page + 1, files, next)
-            if (PlaybackQueueState.listKey != listKey ||
-                PlaybackQueueState.anchor?.let { sameEntry(it, entry) } != true) {
-                done(null)
+            val last = courseCache.lastPage(key)
+            if (last?.first == page && last.second == cached) {
+                courseCache.writeIfChanged(key, page + 1, files, next)
+            } else if (last == null || last.first <= page) {
+                complete(null)
+                return@load
+            }
+            if (PlaybackQueueState.listKey != listKey || !isCurrentCourse()) {
+                complete(null)
                 return@load
             }
             val courses = orderCourses(sameMediaKind(entry, courseCache.readAll(key)), playbackOrder(entry, listKey))
             PlaybackQueueState.entries = courses
             renderCourseSwitch()
-            done(courses)
+            complete(courses)
         }
     }
 
@@ -1616,41 +2202,16 @@ class MainActivity : AppCompatActivity() {
         val format = formatOf(entry)
         val kind = PanApi.kindOf(entry)
         val row = layoutInflater.inflate(R.layout.item_course, content, false)
+        row.tag = entryKey(entry)
         val fmt = row.findViewById<ImageView>(R.id.fmt)
-        when (kind) {
-            MediaKind.AUDIO -> {
-                fmt.setImageResource(R.drawable.ic_music)
-                fmt.setBackgroundResource(R.drawable.bg_fmt_audio)
-                fmt.setColorFilter(color(R.color.accentInk))
-            }
-            MediaKind.VIDEO -> {
-                fmt.setImageResource(R.drawable.ic_video)
-                fmt.setBackgroundResource(R.drawable.bg_fmt_video)
-                fmt.setColorFilter(color(R.color.accentInk))
-            }
-            MediaKind.PDF, MediaKind.DOCUMENT -> {
-                fmt.setImageResource(R.drawable.ic_file)
-                fmt.setBackgroundResource(R.drawable.bg_fmt_pdf)
-                fmt.setColorFilter(color(R.color.pdfInk))
-            }
-            else -> {
-                fmt.setImageResource(if (entry.directory) R.drawable.ic_folder else R.drawable.ic_file)
-                fmt.setBackgroundResource(R.drawable.bg_fmt_folder)
-                fmt.setColorFilter(color(R.color.folderInk))
-            }
-        }
+        paintMediaIcon(fmt, kind, entry.directory)
         row.findViewById<TextView>(R.id.itemTitle).text = entry.name
         // 兼容旧收藏/历史里已持久化的编码路径；无斜杠时不再把整串路径回显到 meta
         val folder = PanApi.readablePath(entry.path)
             .substringBeforeLast('/', "")
             .substringAfterLast('/')
         val size = entry.size.toLongOrNull()?.let { if (it >= 1024 * 1024) "${it / 1024 / 1024} MB" else "" }.orEmpty()
-        val kindName = when (kind) {
-            MediaKind.AUDIO -> "音频"
-            MediaKind.VIDEO -> "视频"
-            MediaKind.PDF, MediaKind.DOCUMENT -> "文档"
-            else -> if (entry.directory) "目录" else format.lowercase()
-        }
+        val kindName = mediaKindLabel(kind, entry.directory, format)
         row.findViewById<TextView>(R.id.itemMeta).text =
             listOf(kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
         val side = row.findViewById<ImageView>(R.id.itemSide)
@@ -1682,7 +2243,9 @@ class MainActivity : AppCompatActivity() {
         if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) selectPlayback(entry, entries, listKey)
         when (kind) {
             MediaKind.DIRECTORY -> {
+                rememberFolderPosition()
                 folders.add(entry)
+                contentScroll.scrollTo(0, 0)
                 refresh()
             }
             MediaKind.VIDEO -> startVideo(entry)
@@ -1807,6 +2370,32 @@ class MainActivity : AppCompatActivity() {
         btnNext.setOnClickListener { playSibling(anchor, 1) }
     }
 
+    private fun advanceAfterEnd(entry: PanEntry, isCurrent: () -> Boolean, playNext: () -> Unit) {
+        val listKey = PlaybackQueueState.listKey
+        fun canAdvance() = ready && hasVerifiedAccount() && !isFinishing && !isDestroyed &&
+            PlaybackQueueState.listKey == listKey && isCurrent() &&
+            PlaybackQueueState.entries.any { sameEntry(it, entry) }
+
+        fun tryNext() {
+            if (!canAdvance()) return
+            if (siblingOf(entry, 1) != null) {
+                playNext()
+                return
+            }
+            if (automaticCourseLoad?.let { sameEntry(it, entry) } == true ||
+                nextDirectoryPage(entry, listKey) == null
+            ) return
+            automaticCourseLoad = entry
+            loadMoreCourses(entry, listKey, ::canAdvance) { courses ->
+                if (automaticCourseLoad === entry) {
+                    automaticCourseLoad = null
+                    if (courses != null) tryNext()
+                }
+            }
+        }
+        tryNext()
+    }
+
     private fun playSibling(
         entry: PanEntry,
         delta: Int,
@@ -1834,7 +2423,43 @@ class MainActivity : AppCompatActivity() {
     private fun formatOf(entry: PanEntry): String =
         if (entry.directory) "目录" else entry.name.substringAfterLast('.', "文件").uppercase()
 
+    private fun paintMediaIcon(icon: ImageView, kind: MediaKind, directory: Boolean) {
+        when (kind) {
+            MediaKind.AUDIO -> {
+                icon.setImageResource(R.drawable.ic_music)
+                icon.setBackgroundResource(R.drawable.bg_fmt_audio)
+                icon.setColorFilter(color(R.color.accentInk))
+            }
+            MediaKind.VIDEO -> {
+                icon.setImageResource(R.drawable.ic_video)
+                icon.setBackgroundResource(R.drawable.bg_fmt_video)
+                icon.setColorFilter(color(R.color.accentInk))
+            }
+            MediaKind.PDF, MediaKind.DOCUMENT -> {
+                icon.setImageResource(R.drawable.ic_file)
+                icon.setBackgroundResource(R.drawable.bg_fmt_pdf)
+                icon.setColorFilter(color(R.color.pdfInk))
+            }
+            else -> {
+                icon.setImageResource(if (directory) R.drawable.ic_folder else R.drawable.ic_file)
+                icon.setBackgroundResource(R.drawable.bg_fmt_folder)
+                icon.setColorFilter(color(R.color.folderInk))
+            }
+        }
+    }
+
+    private fun mediaKindLabel(kind: MediaKind, directory: Boolean, format: String): String = when (kind) {
+        MediaKind.AUDIO -> "音频"
+        MediaKind.VIDEO -> "视频"
+        MediaKind.PDF, MediaKind.DOCUMENT -> "文档"
+        else -> if (directory) "目录" else format.lowercase()
+    }
+
     private fun resumeFromHistory(entry: PanEntry) {
+        playbackDirectory(entry, null)?.let { (queueKey, queue) ->
+            openEntry(entry, queue, queueKey)
+            return
+        }
         val listKey = PlaybackQueueState.listKey
         val directoryQueue = PlaybackQueueState.entries.filter { it.gid == entry.gid }
         val isDirectory = listKey == "BROWSE:${entry.gid}" || listKey?.startsWith("${entry.gid}:") == true
@@ -1845,24 +2470,29 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun currentHistoryItems(): List<AudioHistoryItem> =
+        (audioHistory.recentAcrossGroups() + videoHistory.recentAcrossGroups())
+            .sortedByDescending { it.updatedAt }
+
+    private fun historyMeta(item: AudioHistoryItem, sourceNames: Map<String, String>): String {
+        val isVideo = PanApi.kindOf(item.entry) == MediaKind.VIDEO
+        val progress = when {
+            item.completed -> if (isVideo) "已看完" else "已听完"
+            item.seconds > 0 -> "${if (isVideo) "看到" else "听到"} ${formatAudioTime(item.seconds)}"
+            else -> "未播放"
+        }
+        return listOfNotNull(sourceNames[item.entry.gid], progress).joinToString(" · ")
+    }
+
     private fun renderAudioHistory(allowUnverified: Boolean = false) {
         historyPanel.removeAllViews()
         if ((!allowUnverified && !hasVerifiedAccount()) || screen != Screen.HOME || folders.isNotEmpty()) return
-        val all = (audioHistory.recentAcrossGroups() + videoHistory.recentAcrossGroups())
-            .sortedByDescending { it.updatedAt }
+        historyRefreshPending = false
+        val all = currentHistoryItems()
         if (all.isEmpty()) return
-        val recentItems = all.take(10)
         val resumeItems = all.filter { !it.completed && it.seconds > 0 }.take(3)
+        val homeItems = resumeItems.ifEmpty { all.take(3) }
         val sourceNames = shareSources().associate { it.id to it.name }
-        fun itemMeta(item: AudioHistoryItem): String {
-            val isVideo = PanApi.kindOf(item.entry) == MediaKind.VIDEO
-            val progress = when {
-                item.completed -> if (isVideo) "已看完" else "已听完"
-                item.seconds > 0 -> "${if (isVideo) "看到" else "听到"} ${formatAudioTime(item.seconds)}"
-                else -> "未播放"
-            }
-            return listOfNotNull(sourceNames[item.entry.gid], progress).joinToString(" · ")
-        }
         val header = row().apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(TextView(this@MainActivity).apply {
@@ -1880,21 +2510,13 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(color(R.color.accentInk))
                 setBackgroundResource(android.R.drawable.list_selector_background)
                 isFocusable = true
-                setOnClickListener {
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("最近播放记录")
-                        .setItems(recentItems.map { "${it.entry.name}\n${itemMeta(it)}" }.toTypedArray()) { _, index ->
-                            resumeFromHistory(recentItems[index].entry)
-                        }
-                        .setNegativeButton("关闭", null)
-                        .show()
-                }
+                setOnClickListener { showPlayHistory() }
             })
         }
         historyPanel.addView(header)
-        if (resumeItems.isEmpty()) return
+        if (homeItems.isEmpty()) return
         val resumeList = column().apply { setBackgroundResource(R.drawable.bg_rec_card) }
-        resumeItems.forEach { item ->
+        homeItems.forEach { item ->
             val isVideo = PanApi.kindOf(item.entry) == MediaKind.VIDEO
             val card = layoutInflater.inflate(R.layout.view_rec_card, resumeList, false)
             card.findViewById<ImageView>(R.id.recIcon).apply {
@@ -1903,11 +2525,60 @@ class MainActivity : AppCompatActivity() {
                 setColorFilter(color(R.color.accentInk))
             }
             card.findViewById<TextView>(R.id.recName).text = item.entry.name
-            card.findViewById<TextView>(R.id.recMeta).text = itemMeta(item)
+            card.findViewById<TextView>(R.id.recMeta).text = historyMeta(item, sourceNames)
             card.setOnClickListener { resumeFromHistory(item.entry) }
             resumeList.addView(card)
         }
         historyPanel.addView(resumeList)
+    }
+
+    private fun showPlayHistory() {
+        if (!hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
+        val items = currentHistoryItems().take(10)
+        if (items.isEmpty()) return
+        val sourceNames = shareSources().associate { it.id to it.name }
+        val view = layoutInflater.inflate(R.layout.dialog_play_history, null, false)
+        view.findViewById<TextView>(R.id.historySubtitle).text = "最近 ${items.size} 条 · 点选继续播放"
+        val list = view.findViewById<ListView>(R.id.historyList)
+        val adapter = object : BaseAdapter() {
+            override fun getCount() = items.size
+            override fun getItem(position: Int) = items[position]
+            override fun getItemId(position: Int) = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val row = convertView ?: layoutInflater.inflate(R.layout.item_play_history, parent, false)
+                val item = items[position]
+                paintMediaIcon(row.findViewById<ImageView>(R.id.historyIcon), PanApi.kindOf(item.entry), false)
+                row.findViewById<TextView>(R.id.historyName).text = item.entry.name
+                row.findViewById<TextView>(R.id.historyMeta).text = historyMeta(item, sourceNames)
+                row.findViewById<View>(R.id.historyDivider).visibility =
+                    if (position == items.lastIndex) View.GONE else View.VISIBLE
+                return row
+            }
+        }
+        list.adapter = adapter
+        val dialog = Dialog(this)
+        dialog.setContentView(view)
+        val metrics = resources.displayMetrics
+        val width = if (wide) minOf(metrics.widthPixels - dp(48), dp(560)) else metrics.widthPixels
+        val maxHeight = minOf((metrics.heightPixels * 0.70f).toInt(), dp(640), metrics.heightPixels - dp(24))
+        val minHeight = minOf(dp(280), maxHeight)
+        val height = (dp(120) + minOf(items.size, 8) * dp(88) + dp(16)).coerceIn(minHeight, maxHeight)
+        dialog.window?.apply {
+            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setDimAmount(0.45f)
+            addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+            setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
+            setLayout(width, height)
+            setWindowAnimations(R.style.SearchSheetAnimation)
+        }
+        dialog.setCanceledOnTouchOutside(true)
+        view.findViewById<ImageView>(R.id.historyClose).setOnClickListener { dialog.dismiss() }
+        list.setOnItemClickListener { _, _, position, _ ->
+            val item = items.getOrNull(position) ?: return@setOnItemClickListener
+            dialog.dismiss()
+            resumeFromHistory(item.entry)
+        }
+        dialog.show()
     }
 
     @Suppress("DEPRECATION")
@@ -2881,7 +3552,7 @@ class MainActivity : AppCompatActivity() {
                         }
                     },
                     canLoadMoreCourses = { nextDirectoryPage(entry, courseListKey) != null },
-                    onLoadMoreCourses = { done -> loadMoreCourses(entry, courseListKey, done) },
+                    onLoadMoreCourses = { done -> loadMoreCourses(entry, courseListKey, done = done) },
                     onSelectCourse = { target, snapshot ->
                         if (videoLoading == null) startVideo(
                             target, audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
@@ -2889,7 +3560,13 @@ class MainActivity : AppCompatActivity() {
                     },
                     onSwitch = { delta, snapshot -> playSibling(entry, delta, videoState = snapshot) },
                     onEnded = { snapshot ->
-                        if (videoLoading == null) playSibling(entry, 1, automatic = true, videoState = snapshot)
+                        val endedPage = videoPage
+                        advanceAfterEnd(entry, isCurrent = {
+                            activityVisible && videoLoading == null && videoPage === endedPage &&
+                                endedPage?.canAutoAdvance() == true
+                        }) {
+                            playSibling(entry, 1, automatic = true, videoState = snapshot)
+                        }
                     },
                     isFavorite = favorites.has(entry),
                     onFavorite = { account == verifiedAccount && toggleFavorite(entry) },
@@ -2947,7 +3624,9 @@ class MainActivity : AppCompatActivity() {
     private fun playAudio(entry: PanEntry, uri: Uri, resumeSeconds: Int?) {
         val account = verifiedAccount
         val source = JSONObject.quote(uri.toString())
+        var webAudioEnded = false
         val controls = AudioControls(this, entry.name) { playing ->
+            webAudioEnded = false
             val action = if (playing) "a.play().catch(() => {})" else "a.pause()"
             web.evaluateJavascript(
                 "(() => { const a = window.__groupPlayerAudio; if (a) $action; })()",
@@ -3060,6 +3739,7 @@ class MainActivity : AppCompatActivity() {
         val toggle = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
         toggle.isEnabled = false
         toggle.setOnClickListener {
+            webAudioEnded = false
             web.evaluateJavascript(
                 "(() => { const a = window.__groupPlayerAudio; if (a) { if (a.paused) a.play().catch(() => {}); else a.pause(); } })()",
                 null,
@@ -3113,9 +3793,15 @@ class MainActivity : AppCompatActivity() {
                         if (ended || paused || SystemClock.elapsedRealtime() - lastSavedAt >= 5_000) {
                             saveProgress(seconds, ended, state.optInt(5))
                         }
-                        if (ended && activityVisible && siblingOf(entry, 1) != null) {
-                            switchWebAudio(dialog, 1, automatic = true)
-                            return@evaluateJavascript
+                        val justEnded = ended && !webAudioEnded
+                        webAudioEnded = ended
+                        if (justEnded && activityVisible) {
+                            advanceAfterEnd(entry, isCurrent = {
+                                dialog.isShowing && activityVisible && webAudioEnded && account == verifiedAccount
+                            }) {
+                                switchWebAudio(dialog, 1, automatic = true)
+                            }
+                            if (!dialog.isShowing) return@evaluateJavascript
                         }
                         controls.update(!paused && !ended, seconds)
                         toggle.isEnabled = true
@@ -3141,7 +3827,7 @@ class MainActivity : AppCompatActivity() {
         val form = PanApi.mediaLinkBody(entry, viewer)
         fun stop(message: String) {
             when (lane) {
-                RequestLane.LIST, RequestLane.RENEWAL -> status.text = message
+                RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL -> status.text = message
                 RequestLane.AUDIO -> failAudioRequest(message)
             }
             onFailure()
@@ -3314,6 +4000,8 @@ class MainActivity : AppCompatActivity() {
         }
         val id = when (lane) {
             RequestLane.LIST -> ++requestId
+            RequestLane.SEARCH -> ++searchRequestId
+            RequestLane.COURSE -> ++courseRequestId
             RequestLane.AUDIO -> ++audioRequestId
             RequestLane.RENEWAL -> ++renewalRequestId
         }
@@ -3321,6 +4009,8 @@ class MainActivity : AppCompatActivity() {
         val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
         fun isCurrent() = !isDestroyed && id == when (lane) {
             RequestLane.LIST -> requestId
+            RequestLane.SEARCH -> searchRequestId
+            RequestLane.COURSE -> courseRequestId
             RequestLane.AUDIO -> audioRequestId
             RequestLane.RENEWAL -> renewalRequestId
         } && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
@@ -3329,7 +4019,7 @@ class MainActivity : AppCompatActivity() {
             when (lane) {
                 RequestLane.LIST -> status.text = text
                 RequestLane.AUDIO -> failAudioRequest(text)
-                RequestLane.RENEWAL -> Unit
+                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL -> Unit
             }
         }
         if (lane == RequestLane.LIST) status.text = statusHint ?: "正在读取…"
@@ -3409,6 +4099,11 @@ class MainActivity : AppCompatActivity() {
                         onCancelled()
                         return@evaluateJavascript
                     }
+                    // 2156 是网盘明确返回的“未搜到结果”，不是请求失败。
+                    if (lane == RequestLane.SEARCH && errno == 2156) {
+                        if (onCurrentResult != null) onCurrentResult(json, ::isCurrent) else onResult(json)
+                        return@evaluateJavascript
+                    }
                     if (errno == -20 && onCaptcha != null) {
                         onCaptcha(json, ::isCurrent)
                     } else {
@@ -3470,10 +4165,7 @@ class MainActivity : AppCompatActivity() {
         when {
             audioPage != null -> closeAudioPage()
             native.visibility == View.GONE -> showApp()
-            folders.isNotEmpty() -> {
-                folders.removeAt(folders.lastIndex)
-                refresh()
-            }
+            folders.isNotEmpty() -> returnToFolder(folders.lastIndex)
             screen != Screen.HOME -> showScreen(Screen.HOME)
             else -> super.onBackPressed()
         }
@@ -3531,6 +4223,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        searchDialog?.dismiss()
         requestId++
         audioPlayToken?.let(AudioPlayRequestGate::cancel)
         audioRequestId++
