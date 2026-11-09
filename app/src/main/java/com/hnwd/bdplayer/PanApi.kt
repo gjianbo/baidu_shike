@@ -10,6 +10,9 @@ import org.json.JSONObject
 internal enum class EntryOrigin { GROUP, DISK }
 
 internal const val DISK_SOURCE_ID = "disk"
+internal const val CONTACT_SOURCE_PREFIX = "contact-"
+internal fun isContactSource(id: String) = id.startsWith(CONTACT_SOURCE_PREFIX)
+internal fun isShareSourceId(id: String) = id.matches(Regex("(?:contact-)?[0-9]{1,24}"))
 
 internal data class PanEntry(
     val gid: String,
@@ -25,6 +28,10 @@ internal data class PanEntry(
 ) {
     val sourceId: String get() = if (origin == EntryOrigin.DISK) DISK_SOURCE_ID else gid
     val isDisk: Boolean get() = origin == EntryOrigin.DISK
+    val isContact: Boolean get() = isContactSource(gid)
+
+    fun contactRecipient(viewer: String): String =
+        if (owner == viewer) gid.removePrefix(CONTACT_SOURCE_PREFIX) else viewer
 }
 
 internal data class PanSearchHit(
@@ -85,17 +92,28 @@ internal object PanApi {
     )
 
     fun roots(gid: String, cursor: String = ""): String {
+        if (isContactSource(gid)) {
+            val query = mutableListOf("to_uk" to gid.removePrefix(CONTACT_SOURCE_PREFIX), "type" to "2")
+            if (cursor.isNotEmpty()) query.add("cursor" to cursor)
+            return api("/mbox/msg/sessioninfo", *query.toTypedArray())
+        }
         val query = mutableListOf("gid" to gid, "type" to "2", "limit" to "50", "desc" to "1")
         if (cursor.isNotEmpty()) query.add("last_msg_time" to cursor)
         return api("/mbox/group/listshare", *query.toTypedArray())
     }
 
-    fun children(entry: PanEntry, page: Int, directoryId: String = entry.fileId) = api(
-        "/mbox/msg/shareinfo",
-        "gid" to entry.gid, "msg_id" to entry.messageId, "from_uk" to entry.owner,
-        "fs_id" to directoryId, "type" to "2", "page" to page.toString(),
-        "num" to "100", "limit" to "100", "desc" to "1",
-    )
+    fun children(entry: PanEntry, page: Int, directoryId: String = entry.fileId): String {
+        val query = mutableListOf(
+            "msg_id" to entry.messageId, "from_uk" to entry.owner, "fs_id" to directoryId,
+            "page" to page.toString(), "num" to "100",
+        )
+        if (entry.isContact) {
+            query += listOf("type" to "1", "to_uk" to entry.contactRecipient(AccountScope.current))
+        } else {
+            query += listOf("type" to "2", "gid" to entry.gid, "limit" to "100", "desc" to "1")
+        }
+        return api("/mbox/msg/shareinfo", *query.toTypedArray())
+    }
 
     fun searchGroup(gid: String, keyword: String): String {
         val data = JSONObject()
@@ -147,6 +165,11 @@ internal object PanApi {
         "start" to start.toString(), "limit" to limit.toString(),
     )
 
+    fun contacts(token: String, start: Int, limit: Int) = api(
+        "/mbox/relation/getfollowlist", "channel" to "chunlei", "bdstoken" to token,
+        "start" to start.toString(), "limit" to limit.toString(),
+    )
+
     fun mediaLinkRequest() = api("/api/sharedownload", "sign" to "", "timestamp" to "")
 
     fun mediaCaptchaRequest() = api(
@@ -179,7 +202,10 @@ internal object PanApi {
         "vcode_input=${URLEncoder.encode(answer, "UTF-8")}&vcode_str=${URLEncoder.encode(captcha.token, "UTF-8")}"
 
     fun mediaLinkBody(entry: PanEntry, viewer: String): String {
-        val extra = JSONObject().put("type", "group").put("gid", entry.gid)
+        val extra = if (entry.isContact) {
+            JSONObject().put("type", "single").put("from_uk", entry.owner)
+                .put("to_uk", entry.contactRecipient(viewer))
+        } else JSONObject().put("type", "group").put("gid", entry.gid)
         return listOf(
             "encrypt" to "0", "uk" to viewer, "product" to "mbox", "timestamp" to "",
             "sign" to "", "primaryid" to entry.messageId,
@@ -328,8 +354,10 @@ internal object PanApi {
 
     private fun playlist(entry: PanEntry, streamType: String): Uri = Uri.parse(api(
         "/mbox/msg/streaming",
-        "from_uk" to entry.owner, "to" to entry.gid, "msg_id" to entry.messageId,
-        "fs_id" to entry.fileId, "type" to "2", "stream_type" to streamType,
+        "from_uk" to entry.owner,
+        "to" to if (entry.isContact) entry.contactRecipient(AccountScope.current) else entry.gid,
+        "msg_id" to entry.messageId, "fs_id" to entry.fileId,
+        "type" to if (entry.isContact) "1" else "2", "stream_type" to streamType,
     ))
 
     fun parseRecent(json: JSONObject): List<PanEntry> {
@@ -341,12 +369,25 @@ internal object PanApi {
         }
     }
 
-    fun parseRoots(json: JSONObject, gid: String): List<PanEntry> =
-        json.getJSONObject("records").getJSONArray("msg_list").objects().flatMap { message ->
+    fun parseRoots(json: JSONObject, gid: String): List<PanEntry> {
+        val records = json.getJSONObject("records")
+        if (isContactSource(gid)) {
+            return records.getJSONArray("list").objects().flatMap { message ->
+                val files = message.optJSONObject("filelist")?.optJSONArray("list")
+                    ?: message.optJSONObject("xfilelist")?.optJSONArray("list")
+                    ?: message.optJSONArray("file_list")
+                val messageId = message.optString("msg_id")
+                val owner = message.optString("from_uk")
+                if (messageId.isBlank() || owner.isBlank()) return@flatMap emptyList()
+                files?.objects().orEmpty().map { file -> entry(file, gid, messageId, owner) }
+            }
+        }
+        return records.getJSONArray("msg_list").objects().flatMap { message ->
             message.getJSONArray("file_list").objects().map { file ->
                 entry(file, gid, message.getString("msg_id"), message.getString("uk"))
             }
         }
+    }
 
     fun parseChildren(json: JSONObject, parent: PanEntry): List<PanEntry> =
         json.getJSONArray("records").objects().map { file ->

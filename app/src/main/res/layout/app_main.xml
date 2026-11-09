@@ -154,7 +154,7 @@
                 android:maxWidth="116dp"
                 android:ellipsize="end"
                 android:singleLine="true"
-                android:text="选择群组"
+                android:text="选择文件库"
                 android:textColor="@color/ink2"
                 android:textSize="12.5sp"
                 android:textStyle="bold" />

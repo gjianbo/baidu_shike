@@ -190,11 +190,11 @@ internal object BackupStore {
         for (index in 0 until sources.length()) {
             val source = sources.optJSONObject(index) ?: return false
             val id = source.opt("id") as? String ?: return false
-            if (!id.matches(Regex("[0-9]{1,24}")) || source.opt("name") !is String) return false
+            if (!isShareSourceId(id) || source.opt("name") !is String) return false
             if (!sourceIds.add(id)) return false
         }
         // Older exports can have a current group without a saved source entry.
-        if (groupId.isNotEmpty() && !groupId.matches(Regex("[0-9]{1,24}"))) return false
+        if (groupId.isNotEmpty() && !isShareSourceId(groupId)) return false
         val favoriteFields = listOf("gid", "message", "owner", "file", "name")
         return (0 until favorites.length()).all { index ->
             val favorite = favorites.optJSONObject(index)

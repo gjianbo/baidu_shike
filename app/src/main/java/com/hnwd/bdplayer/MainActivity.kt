@@ -768,7 +768,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateNav() {
         val screens = listOf(Screen.HOME, Screen.DISK, Screen.GROUPS, Screen.SETTINGS)
         val active = if (screen == Screen.FAVORITES) screens.indexOf(favoritesOrigin) else screens.indexOf(screen)
-        val titles = listOf("首页", "网盘", "群组", "设置")
+        val titles = listOf("首页", "网盘", "文件库", "设置")
         val icons = listOf(R.drawable.ic_home, R.drawable.ic_cloud, R.drawable.ic_users, R.drawable.ic_settings)
         navRoots.forEachIndexed { index, root ->
             val on = index == active
@@ -799,7 +799,7 @@ class MainActivity : AppCompatActivity() {
         }
         refreshButton.visibility = if (browsing) View.VISIBLE else View.GONE
         searchButton.visibility = if (hasVerifiedAccount() &&
-            ((screen == Screen.GROUPS && gid.isNotEmpty()) || screen == Screen.DISK)
+            ((screen == Screen.GROUPS && gid.isNotEmpty() && !isContactSource(gid)) || screen == Screen.DISK)
         ) View.VISIBLE else View.GONE
         title.setTextSize(
             if (screen == Screen.HOME ||
@@ -847,7 +847,7 @@ class MainActivity : AppCompatActivity() {
         }
         val rootLabel = when (screen) {
             Screen.DISK -> "我的网盘"
-            Screen.GROUPS -> shareSources().firstOrNull { it.id == gid }?.name ?: "群组"
+            Screen.GROUPS -> shareSources().firstOrNull { it.id == gid }?.name ?: "共享文件库"
             else -> "根目录"
         }
         addCrumb(rootLabel, folders.isEmpty()) {
@@ -1030,13 +1030,16 @@ class MainActivity : AppCompatActivity() {
         val account = verifiedAccount
         val sources = shareSources()
         if (sources.isEmpty()) {
-            discoverGroups()
+            manageSources()
             return
         }
         showChoiceSheet(
-            title = "切换群组",
-            subtitle = "选择要浏览的群文件库",
-            choices = sources.map { SheetChoice(it.name, checked = it.id == gid, tag = it) },
+            title = "切换文件库",
+            subtitle = "选择要浏览的共享来源",
+            choices = sources.map {
+                SheetChoice(it.name, meta = if (isContactSource(it.id)) "联系人" else "群组",
+                    checked = it.id == gid, tag = it)
+            },
             onSelect = { choice ->
                 if (hasVerifiedAccount() && verifiedAccount == account) {
                     val source = choice.tag as ShareSource
@@ -1044,14 +1047,29 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             footerActions = listOf(
-                "从网盘添加群组" to { discoverGroups() },
+                "管理通讯录来源" to { manageSources() },
                 "打开网页通讯录" to { openContacts() },
             ),
         )
     }
 
-    private fun discoverGroups() {
+    private fun manageSources() {
+        if (!ready || !hasVerifiedAccount()) {
+            toast("请先确认百度网盘登录")
+            return
+        }
+        showChoiceSheet(
+            title = "管理通讯录来源",
+            subtitle = "勾选要在 App 中浏览的文件库",
+            choices = listOf(SheetChoice("群组"), SheetChoice("联系人")),
+            onSelect = { discoverSources(contacts = it.title == "联系人") },
+            footerActions = listOf("打开网页通讯录" to { openContacts() }),
+        )
+    }
+
+    private fun discoverSources(contacts: Boolean) {
         if (!ready || !hasVerifiedAccount()) return
+        val label = if (contacts) "联系人" else "群组"
         val account = verifiedAccount
         val candidates = linkedMapOf<String, ShareSource>()
         val pageSize = 20
@@ -1059,60 +1077,66 @@ class MainActivity : AppCompatActivity() {
         fun failed() {
             if (!hasVerifiedAccount() || verifiedAccount != account) return
             AlertDialog.Builder(this)
-                .setTitle("无法读取网盘群组")
+                .setTitle("无法读取网盘${label}")
                 .setMessage(status.text)
-                .setPositiveButton("重试") { _, _ -> discoverGroups() }
+                .setPositiveButton("重试") { _, _ -> discoverSources(contacts) }
                 .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
                 .setNegativeButton("取消", null)
                 .show()
         }
 
         fun nextPage(token: String, start: Int) {
-            load(PanApi.groups(token, start, pageSize), statusHint = "正在读取网盘群组…", onFailure = ::failed) { json ->
+            val url = if (contacts) PanApi.contacts(token, start, pageSize) else PanApi.groups(token, start, pageSize)
+            load(url, statusHint = "正在读取网盘${label}…", onFailure = ::failed) { json ->
                 val records = json.getJSONArray("records")
-                val previousCount = candidates.size
                 for (index in 0 until records.length()) {
                     val item = records.getJSONObject(index)
-                    val id = item.optString("gid")
-                    if (id.matches(Regex("[0-9]{1,24}"))) {
-                        candidates[id] = ShareSource(id, item.optString("name").ifBlank { "群组 $id" })
-                    }
+                    val id = item.optString(if (contacts) "uk" else "gid")
+                    if (!id.matches(Regex("[0-9]{1,24}"))) continue
+                    if (contacts && item.optInt("black_flag") != 0) continue
+                    val sourceId = if (contacts) CONTACT_SOURCE_PREFIX + id else id
+                    val name = if (contacts) sequenceOf("remark", "display_name", "nick_name", "uname")
+                        .map { item.optString(it, "") }.firstOrNull { it.isNotBlank() } else item.optString("name")
+                    candidates[sourceId] = ShareSource(sourceId, name?.takeIf { it.isNotBlank() } ?: "$label $id")
                 }
                 val nextStart = start + records.length()
                 val hasMore = if (json.has("has_more")) json.optInt("has_more") != 0
                     else json.optInt("count", nextStart) > nextStart || records.length() == pageSize
-                if (hasMore && candidates.size > previousCount) nextPage(token, nextStart)
-                else showGroupPicker(account, candidates.values.toList())
+                if (hasMore && records.length() > 0) nextPage(token, nextStart)
+                else showSourcePicker(account, contacts, candidates.values.toList())
             }
         }
 
-        load(PanApi.groupListSession(), statusHint = "正在读取网盘群组…", onFailure = ::failed) { json ->
+        load(PanApi.groupListSession(), statusHint = "正在读取网盘${label}…", onFailure = ::failed) { json ->
             val session = json.getJSONObject("result")
             if (session.optString("uk") != account) {
                 verifyAndRefresh()
             } else {
                 val token = session.optString("bdstoken")
-                check(token.isNotBlank()) { "网盘未返回群组列表所需的会话参数，请重新登录。" }
+                check(token.isNotBlank()) { "网盘未返回通讯录所需的会话参数，请重新登录。" }
                 nextPage(token, 0)
             }
         }
     }
 
-    private fun showGroupPicker(account: String, candidates: List<ShareSource>) {
+    private fun showSourcePicker(account: String, contacts: Boolean, discovered: List<ShareSource>) {
         status.text = ""
+        val label = if (contacts) "联系人" else "群组"
+        val existing = shareSources().associateBy { it.id }
+        val candidates = (discovered + existing.values.filter { isContactSource(it.id) == contacts })
+            .distinctBy { it.id }
         if (candidates.isEmpty()) {
             AlertDialog.Builder(this)
-                .setTitle("网盘群组")
-                .setMessage("这个账号的群组列表为空。")
+                .setTitle("网盘${label}")
+                .setMessage("这个账号的${label}列表为空。")
                 .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
                 .setPositiveButton("关闭", null)
                 .show()
             return
         }
-        val existing = shareSources().associateBy { it.id }
         showChoiceSheet(
-            title = "勾选共享来源",
-            subtitle = "可多选，保存后显示在首页",
+            title = "管理${label}文件库",
+            subtitle = "可多选，取消勾选可从 App 移除",
             choices = candidates.map { source ->
                 SheetChoice(source.name, checked = source.id in existing, tag = source)
             },
@@ -1150,7 +1174,7 @@ class MainActivity : AppCompatActivity() {
         pickingSource = true
         observedGroup = null
         showWeb(PanApi.CONTACTS)
-        toast("打开群里的文件库，再点「关联当前会话」")
+        toast("群文件库可在这里关联，联系人文件库可在 App 设置中勾选")
     }
 
     private fun associateCurrentSession() {
@@ -1803,7 +1827,8 @@ class MainActivity : AppCompatActivity() {
         showAvailableMediaFilters(emptySet())
         styleContent()
         val earlyParent = folders.lastOrNull()
-        val earlyKey = if (screen == Screen.HOME && earlyParent == null && gid.isNotEmpty()) "recent:$gid" else ""
+        val homeSourceKey = if (isContactSource(gid)) "roots:$gid" else "recent:$gid"
+        val earlyKey = if (screen == Screen.HOME && earlyParent == null && gid.isNotEmpty()) homeSourceKey else ""
         val earlyCached = if (!hasVerifiedAccount() && (checkingAccount || !ready) && earlyKey.isNotEmpty()) {
             courseCache.readAll(earlyKey)
         } else {
@@ -1830,7 +1855,7 @@ class MainActivity : AppCompatActivity() {
             title.text = when (screen) {
                 Screen.SETTINGS -> "设置"
                 Screen.DISK -> "我的网盘"
-                Screen.GROUPS -> "群组"
+                Screen.GROUPS -> "文件库"
                 else -> "首页"
             }
             appSub.text = when (screen) {
@@ -1855,7 +1880,7 @@ class MainActivity : AppCompatActivity() {
         val cacheKey = when {
             parent != null -> "dir:${parent.gid}:${parent.messageId}:${parent.fileId}"
             screen == Screen.FAVORITES || screen == Screen.SETTINGS -> ""
-            screen == Screen.HOME -> "recent:$gid"
+            screen == Screen.HOME -> homeSourceKey
             else -> "roots:$gid"
         }
         val key = parent?.let { "${it.gid}:${it.messageId}:${it.fileId}" }.orEmpty()
@@ -1871,7 +1896,7 @@ class MainActivity : AppCompatActivity() {
             Screen.FAVORITES -> "收藏"
             Screen.SETTINGS -> "设置"
             Screen.DISK -> parent?.name ?: "我的网盘"
-            Screen.GROUPS -> parent?.name ?: "群组"
+            Screen.GROUPS -> parent?.name ?: "文件库"
             else -> parent?.name ?: "首页"
         }
         appSub.text = when {
@@ -1879,7 +1904,7 @@ class MainActivity : AppCompatActivity() {
             screen == Screen.FAVORITES -> "仅保存在本机"
             screen == Screen.SETTINGS -> "外观、备份与本机数据"
             screen == Screen.DISK -> "个人文件 · 已转存内容可直接播放"
-            screen == Screen.GROUPS -> "群组目录"
+            screen == Screen.GROUPS -> "共享文件库"
             else -> ""
         }
         renderCrumbs()
@@ -1889,7 +1914,10 @@ class MainActivity : AppCompatActivity() {
             renderSourcePicker()
         }
         val cached = if (cacheKey.isNotEmpty()) courseCache.readAll(cacheKey) else emptyList()
-        val homeRootKey = if (screen == Screen.HOME && parent == null && gid.isNotEmpty()) "roots:$gid" else null
+        val contactHome = screen == Screen.HOME && parent == null && isContactSource(gid)
+        val homeRootKey = if (screen == Screen.HOME && !contactHome && parent == null && gid.isNotEmpty()) "roots:$gid" else null
+        showingHomeDirectory = contactHome
+        if (contactHome) sectionTitle.text = "联系人文件库"
         val recentPage = homeRootKey?.let { courseCache.readPage(cacheKey, 1) }
         val recentIsEmpty = recentPage?.let { it.latestEmpty || it.entries.isEmpty() } == true
         cacheNote = if (cached.isNotEmpty()) {
@@ -1898,7 +1926,7 @@ class MainActivity : AppCompatActivity() {
         if (homeRootKey != null && recentIsEmpty) {
             showingHomeDirectory = false
             status.text = "群内暂无更新"
-            content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
+            content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
         } else if (cached.isNotEmpty() || (cachedFirst && courseCache.readPage(cacheKey, 1) != null)) {
             if (parent != null) {
                 courseEntries.clear()
@@ -1925,7 +1953,7 @@ class MainActivity : AppCompatActivity() {
                         if (courseCache.readPage(homeRootKey, 1) != null) renderRootMore(homeRootKey)
                         else loadRoots(homeRootKey)
                     }
-                    screen == Screen.GROUPS -> renderRootMore(cacheKey)
+                    screen == Screen.GROUPS || contactHome -> renderRootMore(cacheKey)
                 }
             }
             !ready -> {
@@ -2192,7 +2220,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun entrySourceName(entry: PanEntry): String =
-        if (entry.isDisk) "我的网盘" else shareSources().firstOrNull { it.id == entry.gid }?.name ?: "群组"
+        if (entry.isDisk) "我的网盘" else shareSources().firstOrNull { it.id == entry.gid }?.name ?: "共享文件库"
 
     private fun openFavoriteEntry(entry: PanEntry) {
         if (entry.directory) {
@@ -2206,7 +2234,7 @@ class MainActivity : AppCompatActivity() {
         val target = if (entry.isDisk) Screen.DISK else Screen.GROUPS
         if (!entry.isDisk) {
             if (shareSources().none { it.id == entry.gid }) {
-                toast("来源群组已移除，请重新关联")
+                toast("共享来源已移除，请重新关联")
                 return
             }
             if (entry.gid != gid) setActiveGroup(entry.gid)
@@ -2245,7 +2273,7 @@ class MainActivity : AppCompatActivity() {
                     status.text = "无法检查更新，请稍后重试"
                 } else if (cached.isEmpty()) {
                     status.text = "无法加载群内更新，请稍后重试"
-                    content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
+                    content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
                 } else cacheFailure(cacheKey)
             },
         ) { json ->
@@ -2255,7 +2283,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun maybeCheckHomeInBackground() {
         if (!ready || !hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
-        if (homeCheckInFlight || pendingHomeUpdate != null) return
+        if (isContactSource(gid) || homeCheckInFlight || pendingHomeUpdate != null) return
         if (System.currentTimeMillis() - lastHomeCheckAt < HOME_RECHECK_COOLDOWN_MS) return
         val cacheKey = "recent:$gid"
         val cached = courseCache.readAll(cacheKey)
@@ -2289,7 +2317,7 @@ class MainActivity : AppCompatActivity() {
             filterCount.text = ""
             sortButton.visibility = View.GONE
             status.text = "群内暂无更新"
-            content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
+            content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
             return
         }
         showingHomeDirectory = false
@@ -2362,7 +2390,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadHomeDirectory(key: String, force: Boolean) {
         if (!showingHomeDirectory) renderHomeDirectory(key)
-        else status.text = if (courseCache.readPage(key, 1)?.entries?.isEmpty() == true) "群目录暂无内容" else ""
+        else status.text = if (courseCache.readPage(key, 1)?.entries?.isEmpty() == true) "文件库暂无内容" else ""
         if (!force && courseCache.isFresh(key, CACHE_TTL_MS) && courseCache.readPage(key, 1)?.nextCursor != null) {
             renderRootMore(key)
         } else {
@@ -2375,12 +2403,14 @@ class MainActivity : AppCompatActivity() {
         redrawFilteredRows = null
         content.removeAllViews()
         renderSourcePicker()
-        content.addView(label("近期没有更新，可以从群目录打开已有内容。", 13f))
-        content.addView(headAction("打开群目录") { showScreen(Screen.GROUPS) })
-        sectionTitle.text = "群目录内容"
+        if (!isContactSource(gid)) {
+            content.addView(label("近期没有更新，可以从文件库打开已有内容。", 13f))
+            content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
+        }
+        sectionTitle.text = if (isContactSource(gid)) "联系人文件库" else "文件库内容"
         val entries = courseCache.readAll(key)
         addFilteredCourseRows(entries, sortable = true)
-        status.text = if (courseCache.readPage(key, 1) != null && entries.isEmpty()) "群目录暂无内容" else ""
+        status.text = if (courseCache.readPage(key, 1) != null && entries.isEmpty()) "文件库暂无内容" else ""
     }
 
     private fun loadRoots(key: String, page: Int = 1, cursor: String = "", previousButton: View? = null) {
@@ -2388,7 +2418,8 @@ class MainActivity : AppCompatActivity() {
         val homeDirectory = showingHomeDirectory
         load(
             PanApi.roots(group, cursor),
-            statusHint = if (homeDirectory) "正在读取群目录…"
+            post = isContactSource(group),
+            statusHint = if (homeDirectory) "正在读取文件库…"
             else if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else null,
             onCancelled = { previousButton?.isEnabled = true },
             onFailure = {
@@ -2400,7 +2431,7 @@ class MainActivity : AppCompatActivity() {
             },
         ) { json ->
             val entries = PanApi.parseRoots(json, group)
-            val next = nextRootCursor(json, cursor)
+            val next = nextRootCursor(json, group, cursor)
             courseCache.writeIfChanged(key, page, entries, next)
             courseCache.clearAfter(key, page)
             cacheNote = "已同步 ${courseCache.syncLabel(key)}"
@@ -2412,18 +2443,26 @@ class MainActivity : AppCompatActivity() {
                 display(courseCache.readAll(key))
             }
             renderRootMore(key)
-            if (next.isEmpty() && json.optInt("has_more") != 0) {
+            val pagination = if (isContactSource(group)) json.getJSONObject("records") else json
+            if (next.isEmpty() && pagination.optInt("has_more") != 0) {
                 status.text = "网盘未返回可用的分页游标，请刷新后重试。"
             }
         }
     }
 
-    private fun nextRootCursor(json: JSONObject, cursor: String): String =
-        json.optString("last_msg_time").takeIf {
+    private fun nextRootCursor(json: JSONObject, sourceId: String, cursor: String): String {
+        if (isContactSource(sourceId)) {
+            val records = json.getJSONObject("records")
+            return records.optString("cursor", "").takeIf {
+                records.optInt("has_more") != 0 && !records.isNull("cursor") && it != cursor
+            }.orEmpty()
+        }
+        return json.optString("last_msg_time").takeIf {
             val time = it.toLongOrNull()
             json.optInt("has_more") != 0 && time != null && time > 0 &&
                 time < (cursor.toLongOrNull() ?: Long.MAX_VALUE)
         }.orEmpty()
+    }
 
     private fun renderRootMore(key: String) {
         val (page, cached) = courseCache.lastPage(key) ?: return
@@ -2632,17 +2671,22 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderSourcePicker() {
         val name = shareSources().firstOrNull { it.id == gid }?.name
-        sourceName.text = name ?: "选择群组"
-        sourceButton.contentDescription = name?.let { "切换群组，当前为 $it" } ?: "选择群组"
-        homeGroupChip?.text = name ?: "选择群组"
-        homeGroupChip?.contentDescription = name?.let { "切换群组，当前为 $it" } ?: "选择群组"
+        sourceName.text = name ?: "选择文件库"
+        sourceButton.contentDescription = name?.let { "切换文件库，当前为 $it" } ?: "选择文件库"
+        homeGroupChip?.text = name ?: "选择文件库"
+        homeGroupChip?.contentDescription = name?.let { "切换文件库，当前为 $it" } ?: "选择文件库"
     }
 
     private fun display(entries: List<PanEntry>) {
         if (screen == Screen.HOME && folders.isEmpty()) homeDisplayedEntries = entries
-        status.text = if (entries.isEmpty()) "没有条目" else cacheNote
-        sectionTitle.text = if (screen == Screen.HOME) "群最新更新" else "文件"
-        addFilteredCourseRows(entries, sortable = screen == Screen.GROUPS)
+        val contactLibrary = isContactSource(gid)
+        status.text = if (entries.isEmpty()) "文件库暂无内容" else cacheNote
+        sectionTitle.text = when {
+            screen == Screen.HOME && contactLibrary -> "联系人文件库"
+            screen == Screen.HOME -> "群最新更新"
+            else -> "文件"
+        }
+        addFilteredCourseRows(entries, sortable = screen == Screen.GROUPS || contactLibrary)
     }
 
     private fun renderCourse() {
@@ -2819,14 +2863,14 @@ class MainActivity : AppCompatActivity() {
             done(entries)
         }
         load(
-            url, post = nested, lane = RequestLane.COURSE,
+            url, post = nested || entry.isContact, lane = RequestLane.COURSE,
             onCancelled = { complete(null) }, onFailure = { complete(null) },
         ) { json ->
             val files = if (nested) PanApi.parseChildren(json, entry) else PanApi.parseRoots(json, entry.gid)
             val next = if (nested) {
                 if (json.optInt("has_more") != 0 && files.isNotEmpty() && files != cached.entries) "more" else ""
             } else {
-                nextRootCursor(json, cached.nextCursor.orEmpty())
+                nextRootCursor(json, entry.gid, cached.nextCursor.orEmpty())
             }
             val last = courseCache.lastPage(key)
             if (last?.first == page && last.second == cached) {
@@ -2993,7 +3037,7 @@ class MainActivity : AppCompatActivity() {
         val source = when {
             screen != Screen.FAVORITES -> ""
             entry.isDisk -> "我的网盘"
-            else -> sourceNames[entry.gid] ?: "群组"
+            else -> sourceNames[entry.gid] ?: "共享文件库"
         }
         val transferredLabel = if (matchesTransferred(entry, transferred)) "已转存" else ""
         row.findViewById<TextView>(R.id.itemMeta).text =
@@ -3438,7 +3482,7 @@ class MainActivity : AppCompatActivity() {
         page.findViewById<View>(R.id.setLoginRow).setOnClickListener { showLoginDialog() }
         page.findViewById<TextView>(R.id.setGroupValue).text =
             shareSources().size.takeIf { it > 0 }?.let { "$it 个来源" } ?: "未关联"
-        page.findViewById<View>(R.id.setGroupRow).setOnClickListener { discoverGroups() }
+        page.findViewById<View>(R.id.setGroupRow).setOnClickListener { manageSources() }
         page.findViewById<TextView>(R.id.setClearValue).text =
             "${audioHistory.recentAcrossGroups().size + videoHistory.recentAcrossGroups().size} 条"
         page.findViewById<View>(R.id.setClearRow).setOnClickListener { confirmClearHistory() }
@@ -3459,7 +3503,7 @@ class MainActivity : AppCompatActivity() {
     private fun confirmClearHistory() {
         AlertDialog.Builder(this)
             .setTitle("清除播放记录")
-            .setMessage("将清除当前账号在本机所有群组的播放记录和音视频续播点。网盘文件会保留。")
+            .setMessage("将清除当前账号在本机的播放记录和音视频续播点。网盘文件会保留。")
             .setNegativeButton("取消", null)
             .setPositiveButton("清除") { _, _ ->
                 audioHistory.clear()
@@ -3896,7 +3940,7 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-        if (entry.owner.isNotEmpty()) {
+        if (!entry.isContact && entry.owner.isNotEmpty()) {
             load(
                 PanApi.groupPdfPreview(entry), post = true, form = PanApi.groupPdfPreviewForm(entry),
                 lane = RequestLane.LIST, statusHint = "正在获取文档地址…",

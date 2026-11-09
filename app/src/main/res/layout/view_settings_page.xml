@@ -103,14 +103,14 @@
                     style="@style/SettingTitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="已关联的群组" />
+                    android:text="通讯录文件库" />
 
                 <TextView
                     style="@style/SettingSub"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
-                    android:text="勾选网盘群组，切换当前来源" />
+                    android:text="管理群组和联系人来源" />
             </LinearLayout>
 
             <TextView

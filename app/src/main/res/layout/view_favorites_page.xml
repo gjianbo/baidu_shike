@@ -72,7 +72,7 @@
             android:gravity="center"
             android:paddingLeft="20dp"
             android:paddingRight="20dp"
-            android:text="去群目录看看"
+            android:text="去文件库看看"
             android:textColor="@color/accentInk"
             android:textSize="12.5sp"
             android:textStyle="bold" />
