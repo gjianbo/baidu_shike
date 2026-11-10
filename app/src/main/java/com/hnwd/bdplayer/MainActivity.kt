@@ -271,6 +271,20 @@ class MainActivity : AppCompatActivity() {
     private var lastHomeCheckAt = 0L
 
     private fun hasVerifiedAccount() = verifiedAccount.isNotEmpty() && verifiedAccount == AccountScope.current
+
+    /** 当前页面按哪个网盘算会话：网盘页看 diskProvider，首页/群组看活跃来源前缀。 */
+    private fun currentPageProvider(): SourceProvider =
+        if (screen == Screen.DISK) DriveSourceRouter.diskProvider()
+        else DriveSourceRouter.providerOf(DriveSourceRouter.activeSourceId())
+
+    /** 统一会话门禁。百度侧仍是 ready + 已校验账号；夸克侧只看登录 Cookie。 */
+    private fun hasActiveSession(p: SourceProvider = currentPageProvider()): Boolean =
+        when (p) {
+            SourceProvider.BAIDU -> ready && hasVerifiedAccount()
+            SourceProvider.QUARK -> QuarkPersonalDrive.hasLoginCookie(
+                CookieManager.getInstance().getCookie(QuarkPersonalDrive.HOME),
+            )
+        }
     private var observedGroup: Pair<String, String>? = null
     private lateinit var addSourceButton: View
 
@@ -305,6 +319,7 @@ class MainActivity : AppCompatActivity() {
         }
         PdfCache.prune(this)
         AccountScope.init(this)
+        DriveSourceRouter.bindActiveSource { gid }
         audioHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE))
         videoHistory = AudioHistory(getSharedPreferences("video_history", MODE_PRIVATE))
         favorites = Favorites(getSharedPreferences("favorites", MODE_PRIVATE))
@@ -862,15 +877,15 @@ class MainActivity : AppCompatActivity() {
         appSub.visibility = when {
             screen == Screen.HOME && hasVerifiedAccount() && verifiedAccountName.isNotBlank() -> View.VISIBLE
             screen == Screen.DISK -> View.VISIBLE
-            browsing && (folders.isNotEmpty() || !hasVerifiedAccount()) -> View.VISIBLE
+            browsing && (folders.isNotEmpty() || !hasActiveSession()) -> View.VISIBLE
             else -> View.GONE
         }
         refreshButton.visibility = if (browsing) View.VISIBLE else View.GONE
-        searchButton.visibility = if (hasVerifiedAccount() &&
+        searchButton.visibility = if (hasActiveSession() &&
             ((screen == Screen.GROUPS && gid.isNotEmpty() && !isContactSource(gid)) || screen == Screen.DISK)
         ) View.VISIBLE else View.GONE
         if (::btnDiskNewFolder.isInitialized) {
-            val diskManage = screen == Screen.DISK && hasVerifiedAccount()
+            val diskManage = screen == Screen.DISK && hasActiveSession()
             btnDiskNewFolder.visibility = if (diskManage) View.VISIBLE else View.GONE
         }
         title.setTextSize(
@@ -2158,7 +2173,7 @@ class MainActivity : AppCompatActivity() {
         val earlyParent = folders.lastOrNull()
         val homeSourceKey = if (isContactSource(gid)) "roots:$gid" else "recent:$gid"
         val earlyKey = if (screen == Screen.HOME && earlyParent == null && gid.isNotEmpty()) homeSourceKey else ""
-        val earlyCached = if (!hasVerifiedAccount() && (checkingAccount || !ready) && earlyKey.isNotEmpty()) {
+        val earlyCached = if (!hasActiveSession() && (checkingAccount || !ready) && earlyKey.isNotEmpty()) {
             courseCache.readAll(earlyKey)
         } else {
             emptyList()
@@ -2177,7 +2192,7 @@ class MainActivity : AppCompatActivity() {
             status.text = cacheNote
             return
         }
-        if (!hasVerifiedAccount()) {
+        if (!hasActiveSession()) {
             historyPanel.removeAllViews()
             filterBar.visibility = View.GONE
             sectionRow.visibility = View.GONE
@@ -2347,7 +2362,7 @@ class MainActivity : AppCompatActivity() {
         styleContent()
         updateNowPlaying()
         updateNav()
-        if (!hasVerifiedAccount()) {
+        if (!hasActiveSession()) {
             filterBar.visibility = View.GONE
             sectionRow.visibility = View.GONE
             title.text = "我的网盘"
@@ -2620,7 +2635,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun maybeCheckHomeInBackground() {
-        if (!ready || !hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
+        if (!hasActiveSession() || screen != Screen.HOME || folders.isNotEmpty()) return
         if (isContactSource(gid) || homeCheckInFlight || pendingHomeUpdate != null) return
         if (System.currentTimeMillis() - lastHomeCheckAt < HOME_RECHECK_COOLDOWN_MS) return
         val cacheKey = "recent:$gid"
@@ -3502,7 +3517,7 @@ class MainActivity : AppCompatActivity() {
 
     /** 需要 bdstoken 的网盘写操作统一入口。 */
     private fun runDiskWrite(block: (token: String) -> Unit) {
-        if (!hasVerifiedAccount()) {
+        if (!hasActiveSession()) {
             toast("请先登录百度网盘")
             return
         }
@@ -3622,7 +3637,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun promptNewFolder() {
-        if (screen != Screen.DISK || !hasVerifiedAccount()) return
+        if (screen != Screen.DISK || !hasActiveSession()) return
         val dir = currentDiskDir()
         promptDiskName("新建文件夹", "创建", "") { name ->
             runDiskWrite { token ->
