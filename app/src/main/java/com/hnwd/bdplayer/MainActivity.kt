@@ -116,6 +116,9 @@ class MainActivity : AppCompatActivity() {
     /** 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。 */
     private val diskWrites by lazy { DiskMutationSection(MutationHost()) }
 
+    /** 媒体取址（群组 sharedownload / 我的网盘下载签名 / 验证码），三条预览链共用。 */
+    private val mediaLinks by lazy { MediaLinkSection(MediaLinkHostAdapter()) }
+
     /** 搜索（输入弹窗 / 结果面板 / 定位）；按需创建，销毁时只碰已存在的实例。 */
     private var searchSectionRef: SearchSection? = null
     private val searchSection: SearchSection
@@ -160,8 +163,7 @@ class MainActivity : AppCompatActivity() {
                 else openImage(entry, imageViewerEntries)
             }
         }
-    private var mediaCaptchaDialog: Pair<RequestLane, AlertDialog>? = null
-    private var videoLoading: AlertDialog? = null
+        private var videoLoading: AlertDialog? = null
     private var videoPage: VideoPlaybackPage? = null
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
@@ -2510,7 +2512,7 @@ class MainActivity : AppCompatActivity() {
         writeRequestId++
         deleteCheckRequestId++
         resetSectionGuards()
-        mediaCaptchaDialog?.second?.dismiss()
+        mediaLinks.dismissAnyCaptcha()
         videoResolver.cancel()
         renewalResolver.cancel()
         videoLoading?.dismiss()
@@ -3962,7 +3964,7 @@ class MainActivity : AppCompatActivity() {
         audioPlayToken = token
         pendingAudioEntry = entry
         audioResolver.cancel()
-        dismissMediaCaptcha(RequestLane.AUDIO)
+        mediaLinks.dismissCaptcha(RequestLane.AUDIO)
         updateAudioRequestMessage("正在打开 ${entry.name}…")
         val key = mediaCacheKey(verifiedAccount, entry)
         if (route == PlaybackRoute.AUDIO) {
@@ -4035,7 +4037,7 @@ class MainActivity : AppCompatActivity() {
         pendingAudioEntry = entry
         dispatchedAudioEntry = null
         audioResolver.cancel()
-        dismissMediaCaptcha(RequestLane.AUDIO)
+        mediaLinks.dismissCaptcha(RequestLane.AUDIO)
         updateAudioRequestMessage("正在打开 ${entry.name}…")
         val account = verifiedAccount
         val key = mediaCacheKey(account, entry)
@@ -4076,7 +4078,7 @@ class MainActivity : AppCompatActivity() {
                                 attempt < 4 -> web.postDelayed({ fetch() }, 2_000)
                                 else -> {
                                     updateAudioRequestMessage("正在打开原始音频…")
-                                    requestDiskFileLink(
+                                    mediaLinks.requestDiskLink(
                                         entry, bd, RequestLane.AUDIO, ::isCurrentPlayback,
                                         onFailure = { failAudioRequest("无法打开原始音频，请稍后重试。") },
                                     ) { link -> startBackgroundAudio(entry, link, openPlayer) }
@@ -4095,108 +4097,6 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun requestDiskFileLink(
-        entry: PanEntry,
-        bdstoken: String,
-        lane: RequestLane,
-        isCurrent: () -> Boolean,
-        onFailure: () -> Unit,
-        onReady: (Uri) -> Unit,
-    ) {
-        val fail = { if (isCurrent()) onFailure() }
-        fun stop(message: String) {
-            if (!isCurrent()) return
-            if (lane == RequestLane.AUDIO) {
-                failAudioRequest(message)
-            } else {
-                onFailure()
-                status.text = message
-            }
-        }
-        load(PanApi.diskDownloadSession(), lane = lane, onCancelled = fail, onFailure = fail) { json ->
-            if (!isCurrent()) return@load
-            val session = json.getJSONObject("result")
-            val sign1 = JSONObject.quote(session.getString("sign1"))
-            val sign2 = JSONObject.quote(session.getString("sign2"))
-            val sign3 = JSONObject.quote(session.getString("sign3"))
-            val timestamp = session.getString("timestamp")
-            val vip = session.getString("is_vip")
-            val script = """
-                (() => {
-                    if (location.origin !== 'https://pan.baidu.com') return '';
-                    try {
-                        const sign = new Function('return ' + $sign2)();
-                        return btoa(sign($sign3, $sign1));
-                    } catch (_) {
-                        return '';
-                    }
-                })()
-            """.trimIndent()
-            web.evaluateJavascript(script) { raw ->
-                if (!isCurrent()) return@evaluateJavascript
-                val sign = runCatching { JSONTokener(raw.orEmpty()).nextValue() as? String }.getOrNull()
-                if (sign.isNullOrEmpty()) {
-                    stop("无法生成下载签名，请重新登录后重试。")
-                    return@evaluateJavascript
-                }
-                fun submit(verification: String = "") {
-                    load(
-                        PanApi.diskDownload(entry, bdstoken, sign, timestamp, vip) + verification,
-                        lane = lane, onCancelled = fail, onFailure = fail,
-                        onCaptcha = { captchaJson, current ->
-                            if (!activityVisible) {
-                                stop("需要输入网盘验证码，请返回应用后重试。")
-                            } else {
-                                val message = if (verification.isEmpty()) "请输入图片中的验证码"
-                                else "验证码错误或已失效，请重新输入"
-                                val captcha = PanApi.parseMediaCaptcha(captchaJson)
-                                if (captcha == null) {
-                                    stop("网盘要求输入验证码，请在网页版网盘打开一次后重试。")
-                                } else {
-                                    showMediaCaptcha(
-                                        lane, captcha, message, { current() && isCurrent() }, ::stop,
-                                    ) { answer ->
-                                        submit("&" + PanApi.mediaCaptchaForm(captcha, answer))
-                                    }
-                                }
-                            }
-                        },
-                    ) { download ->
-                        if (!isCurrent()) return@load
-                        val link = runCatching { PanApi.parseDiskDownloadLink(download) }.getOrElse {
-                            stop(it.message ?: "网盘未返回有效的原始文件地址。")
-                            return@load
-                        }
-                        val cookies = CookieManager.getInstance()
-                        val cookie = cookies.getCookie(link.toString()) ?: cookies.getCookie("https://pan.baidu.com")
-                        val userAgent = web.settings.userAgentString
-                        Thread {
-                            val cdn = runCatching {
-                                val connection = URL(link.toString()).openConnection() as HttpURLConnection
-                                try {
-                                    connection.instanceFollowRedirects = false
-                                    connection.connectTimeout = 6_000
-                                    connection.readTimeout = 6_000
-                                    connection.setRequestProperty("User-Agent", userAgent)
-                                    if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
-                                    check(connection.responseCode == HttpURLConnection.HTTP_MOVED_TEMP)
-                                    Uri.parse(connection.getHeaderField("Location").orEmpty())
-                                        .also { check(PanApi.isCachedFileLink(it)) }
-                                } finally {
-                                    connection.disconnect()
-                                }
-                            }.getOrNull()
-                            runOnUiThread {
-                                if (!isCurrent()) return@runOnUiThread
-                                if (cdn == null) fail() else onReady(cdn)
-                            }
-                        }.start()
-                    }
-                }
-                submit()
-            }
-        }
-    }
 
     private fun resolveAudioFile(
         entry: PanEntry,
@@ -4243,7 +4143,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
         }
-        loadMediaLink(entry, viewer, lane = RequestLane.AUDIO) { uri ->
+        mediaLinks.resolve(entry, viewer, lane = RequestLane.AUDIO) { uri ->
             openAudioLink(entry, uri, route, openPlayer, webResumeSeconds)
         }
     }
@@ -4276,7 +4176,7 @@ class MainActivity : AppCompatActivity() {
         }
         val id = ++pdfOpenId
         requestId++
-        dismissMediaCaptcha(RequestLane.LIST)
+        mediaLinks.dismissCaptcha(RequestLane.LIST)
         if (pdfLoading != null) {
             pdfFetcher.cancel()
             pdfLoading?.dismiss()
@@ -4384,13 +4284,13 @@ class MainActivity : AppCompatActivity() {
             downloadPdf(entry, viewer, id, key, link, fromCache = false, fromFallback = true)
         }
         if (!entry.isDisk) {
-            loadMediaLink(entry, viewer, lane = RequestLane.LIST, onFailure = fail) { receive(it) }
+            mediaLinks.resolve(entry, viewer, lane = RequestLane.LIST, onFailure = fail) { receive(it) }
             return
         }
         ensureBdstoken(
             onReady = { token ->
                 if (isCurrent()) {
-                    requestDiskFileLink(
+                    mediaLinks.requestDiskLink(
                         entry, token, RequestLane.LIST, ::isCurrent, onFailure = fail,
                     ) { receive(it) }
                 }
@@ -4515,7 +4415,7 @@ class MainActivity : AppCompatActivity() {
         cancelImageLoading()
         val id = imageOpenId
         requestId++
-        dismissMediaCaptcha(RequestLane.LIST)
+        mediaLinks.dismissCaptcha(RequestLane.LIST)
         val account = playbackAccount(entry)
         val key = mediaCacheKey(account, entry)
         val ext = ImageTypes.ext(entry.name)
@@ -4570,7 +4470,7 @@ class MainActivity : AppCompatActivity() {
             ensureBdstoken(
                 onReady = { token ->
                     if (isCurrent()) {
-                        requestDiskFileLink(
+                        mediaLinks.requestDiskLink(
                             entry, token, RequestLane.LIST, { isCurrent() }, onFailure = { fail() },
                         ) { receive(it) }
                     }
@@ -4578,7 +4478,7 @@ class MainActivity : AppCompatActivity() {
                 onFailure = { fail() },
             )
         } else {
-            loadMediaLink(entry, viewer, lane = RequestLane.LIST, onFailure = { fail() }) { receive(it) }
+            mediaLinks.resolve(entry, viewer, lane = RequestLane.LIST, onFailure = { fail() }) { receive(it) }
         }
     }
 
@@ -4767,7 +4667,7 @@ class MainActivity : AppCompatActivity() {
                 ensureBdstoken(
                     onReady = { token ->
                         if (isCurrent()) {
-                            requestDiskFileLink(
+                            mediaLinks.requestDiskLink(
                                 entry, token, RequestLane.RENEWAL, ::isCurrent, onFailure = { finishRenewal() },
                             ) { link -> renew(link) }
                         } else {
@@ -4830,7 +4730,7 @@ class MainActivity : AppCompatActivity() {
         }
         val cachedLink = if (wasHls) mediaAddresses.link(key) else null
         if (cachedLink != null) renew(cachedLink)
-        else loadMediaLink(
+        else mediaLinks.resolve(
             entry, account, lane = RequestLane.RENEWAL,
             onFailure = { finishRenewal() }, onResult = ::renew,
         )
@@ -4842,7 +4742,7 @@ class MainActivity : AppCompatActivity() {
         dispatchedAudioEntry = null
         audioRequestId++
         audioResolver.cancel()
-        dismissMediaCaptcha(RequestLane.AUDIO)
+        mediaLinks.dismissCaptcha(RequestLane.AUDIO)
         pendingAudioEntry = null
         pendingAudioPage = null
         updateAudioRequestMessage(null)
@@ -5738,157 +5638,6 @@ class MainActivity : AppCompatActivity() {
         pollAudio()
     }
 
-    private fun loadMediaLink(
-        entry: PanEntry,
-        viewer: String,
-        lane: RequestLane = RequestLane.LIST,
-        onFailure: () -> Unit = {},
-        onResult: (Uri) -> Unit,
-    ) {
-        val form = PanApi.mediaLinkBody(entry, viewer)
-        fun stop(message: String) {
-            when (lane) {
-                RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK -> status.text = message
-                RequestLane.AUDIO -> failAudioRequest(message)
-            }
-            onFailure()
-        }
-
-        fun submit(verification: String = "") {
-            load(
-                PanApi.mediaLinkRequest(), post = true, form = form + verification, lane = lane,
-                onFailure = onFailure,
-                onCaptcha = { json, isCurrent ->
-                    if (!activityVisible) {
-                        stop("需要输入网盘验证码，请返回应用后重试。")
-                    } else {
-                        val message = if (verification.isEmpty()) "请输入图片中的验证码"
-                        else "验证码错误或已失效，请重新输入"
-                        fun show(captcha: PanApi.MediaCaptcha, current: () -> Boolean) {
-                            showMediaCaptcha(lane, captcha, message, current, ::stop) { answer ->
-                                submit("&" + PanApi.mediaCaptchaForm(captcha, answer))
-                            }
-                        }
-                        val captcha = PanApi.parseMediaCaptcha(json)
-                        if (captcha != null) show(captcha, isCurrent)
-                        else load(
-                            PanApi.mediaCaptchaRequest(), lane = lane,
-                            statusHint = "正在获取网盘验证码…",
-                            onFailure = { stop("无法获取网盘验证码，请重试。") },
-                            onCurrentResult = { result, current ->
-                                val challenge = PanApi.parseMediaCaptcha(result)
-                                if (challenge == null) stop("网盘未返回可用的验证码，请重试。")
-                                else show(challenge, current)
-                            },
-                        ) {}
-                    }
-                },
-            ) { json ->
-                val link = PanApi.parseMediaLink(json, entry)
-                mediaAddresses.saveLink(mediaCacheKey(viewer, entry), link)
-                onResult(link)
-            }
-        }
-        submit()
-    }
-
-    private fun showMediaCaptcha(
-        lane: RequestLane,
-        captcha: PanApi.MediaCaptcha,
-        message: String,
-        isCurrent: () -> Boolean,
-        onCancelled: (String) -> Unit,
-        onAnswer: (String) -> Unit,
-    ) {
-        if (!activityVisible || mediaCaptchaDialog != null) {
-            onCancelled("需要输入网盘验证码，请稍后重试。")
-            return
-        }
-        val image = ImageView(this).apply {
-            contentDescription = "百度网盘验证码图片"
-            scaleType = ImageView.ScaleType.FIT_CENTER
-        }
-        val answer = EditText(this).apply {
-            hint = "验证码"
-            isSingleLine = true
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        }
-        val views = column().apply {
-            setPadding(dp(24), 0, dp(24), 0)
-            addView(image, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(72)))
-            addView(answer)
-        }
-        var submitted = false
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("百度网盘验证码")
-            .setMessage("正在加载验证码图片…")
-            .setView(views)
-            .setPositiveButton("验证并重试", null)
-            .setNegativeButton("取消", null)
-            .create()
-        mediaCaptchaDialog = lane to dialog
-        dialog.setOnDismissListener {
-            if (mediaCaptchaDialog?.second === dialog) mediaCaptchaDialog = null
-            if (!submitted && isCurrent()) onCancelled("已取消网盘验证。")
-        }
-        dialog.show()
-        val submit = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
-        submit.isEnabled = false
-        submit.setOnClickListener {
-            if (!isCurrent()) {
-                dialog.dismiss()
-                return@setOnClickListener
-            }
-            val value = answer.text.toString().trim()
-            if (value.isEmpty()) {
-                answer.error = "请输入验证码"
-                return@setOnClickListener
-            }
-            submitted = true
-            mediaCaptchaDialog = null
-            dialog.dismiss()
-            onAnswer(value)
-        }
-
-        val url = captcha.image.toString()
-        val cookie = CookieManager.getInstance().getCookie(url)
-        val userAgent = web.settings.userAgentString
-        Thread {
-            val bitmap = runCatching {
-                val connection = URL(url).openConnection() as HttpURLConnection
-                try {
-                    connection.instanceFollowRedirects = false
-                    connection.connectTimeout = 10_000
-                    connection.readTimeout = 10_000
-                    connection.useCaches = false
-                    connection.setRequestProperty("User-Agent", userAgent)
-                    if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
-                    check(connection.responseCode == 200)
-                    connection.inputStream.use { BitmapFactory.decodeStream(it) }
-                } finally {
-                    connection.disconnect()
-                }
-            }.getOrNull()
-            runOnUiThread {
-                if (!dialog.isShowing) return@runOnUiThread
-                if (!isCurrent()) {
-                    dialog.dismiss()
-                } else if (bitmap == null) {
-                    dialog.setMessage("验证码图片加载失败，请关闭后重试。")
-                } else {
-                    image.setImageBitmap(bitmap)
-                    dialog.setMessage(message)
-                    submit.isEnabled = true
-                }
-            }
-        }.start()
-    }
-
-    private fun dismissMediaCaptcha(lane: RequestLane) {
-        val dialog = mediaCaptchaDialog?.takeIf { it.first == lane }?.second ?: return
-        mediaCaptchaDialog = null
-        dialog.dismiss()
-    }
 
     private fun apiError(url: String, errno: Int, json: JSONObject): String {
         val path = Uri.parse(url).path.orEmpty()
@@ -5929,7 +5678,7 @@ class MainActivity : AppCompatActivity() {
             RequestLane.WRITE -> ++writeRequestId
             RequestLane.DELETE_CHECK -> ++deleteCheckRequestId
         }
-        dismissMediaCaptcha(lane)
+        mediaLinks.dismissCaptcha(lane)
         val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
         fun isCurrent() = !isDestroyed && id == when (lane) {
             RequestLane.LIST -> requestId
@@ -6138,7 +5887,7 @@ class MainActivity : AppCompatActivity() {
         activityVisible = false
         pdfOpenId++
         cancelImageLoading()
-        mediaCaptchaDialog?.second?.dismiss()
+        mediaLinks.dismissAnyCaptcha()
         nowPlaying.removeCallbacks(nowPlayingTicker)
         if (pdfLoading != null) {
             pdfFetcher.cancel()
@@ -6179,6 +5928,50 @@ class MainActivity : AppCompatActivity() {
     /** 账号失效或切换时清掉写操作锁（锁本身在 DiskMutationSection 内部）。 */
     private fun resetSectionGuards() {
         diskWrites.resetGuards()
+    }
+
+    // ===================== MediaLinkHost =====================
+    // 媒体取址层需要的最小宿主能力（状态栏 / 可见性 / 一次请求 / 一段 WebView 脚本）。
+
+    private inner class MediaLinkHostAdapter : MediaLinkHost {
+        override val hostActivity: android.app.Activity get() = this@MainActivity
+
+        override fun setStatus(message: String) {
+            status.text = message
+        }
+
+        override fun failAudio(message: String) = failAudioRequest(message)
+
+        override fun isVisible() = activityVisible
+
+        override fun userAgent() = web.settings.userAgentString
+
+        override fun saveAddress(key: String, link: Uri) = mediaAddresses.saveLink(key, link)
+
+        override fun evaluateJavascript(script: String, onResult: (String?) -> Unit) {
+            web.evaluateJavascript(script, onResult)
+        }
+
+        override fun runOnUiThread(action: () -> Unit) {
+            this@MainActivity.runOnUiThread(action)
+        }
+
+        override fun fetchJson(
+            url: String,
+            post: Boolean,
+            form: String?,
+            statusHint: String?,
+            lane: RequestLane,
+            onCancelled: () -> Unit,
+            onFailure: () -> Unit,
+            onCaptcha: ((JSONObject, () -> Boolean) -> Unit)?,
+            onCurrentResult: ((JSONObject, () -> Boolean) -> Unit)?,
+            onResult: (JSONObject) -> Unit,
+        ) = load(
+            url, post = post, form = form, statusHint = statusHint, lane = lane,
+            onCancelled = onCancelled, onFailure = onFailure,
+            onCaptcha = onCaptcha, onCurrentResult = onCurrentResult, onResult = onResult,
+        )
     }
 
     // ===================== SearchHost =====================
