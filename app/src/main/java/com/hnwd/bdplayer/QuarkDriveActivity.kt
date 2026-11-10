@@ -1,5 +1,7 @@
 package com.hnwd.bdplayer
 
+import android.content.Context
+import android.content.Intent
 import android.annotation.SuppressLint
 import android.os.Bundle
 import android.os.Environment
@@ -9,6 +11,7 @@ import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -26,16 +29,59 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.lifecycle.Lifecycle
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MimeTypes
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
 import java.util.concurrent.Executors
 
+/**
+ * H5 短信登录页（client_id=503，触屏验证码）。该页提交验证码后只把 32 位
+ * service_ticket postMessage 给父窗口（transmission_mode=pm），顶层窗口时
+ * parent===self，注入监听即可捕获，再用官方 doAuth 同款接口兑换会话。
+ */
+private const val QUARK_H5_LOGIN_URL =
+    "https://uop.quark.cn/cas/custom/login?custom_login_type=mobile&client_id=503&display=mobile"
+
+/** 官方 web 的 doAuth 兑换：GET /account/info?st= 由 pan 后端校验票据并写 .quark.cn 会话 Cookie。 */
+private const val QUARK_ST_EXCHANGE_PREFIX = "https://pan.quark.cn/account/info?st="
+
+/** 捕获 H5 登录页 pm 模式的 postMessage；service_ticket 是 32 位原始字符串，与官方父窗口同判据。 */
+private val H5_ST_HOOK = """
+    (() => {
+        if (window.__bd_st_hook) return 'already';
+        window.__bd_st_hook = true;
+        window.addEventListener('message', function (e) {
+            try {
+                if (typeof e.data === 'string' && e.data.length === 32 &&
+                    window.__bd_android && window.__bd_android.onServiceTicket) {
+                    window.__bd_android.onServiceTicket(e.data);
+                }
+            } catch (_) {}
+        });
+        return 'installed';
+    })()
+""".trimIndent()
+
 class QuarkDriveActivity : AppCompatActivity() {
+    companion object {
+        internal fun openFile(context: Context, entry: PanEntry): Intent =
+            Intent(context, QuarkDriveActivity::class.java)
+                .putExtra("file_id", entry.fileId)
+                .putExtra("file_name", entry.name)
+                .putExtra("file_size", entry.size.toLongOrNull() ?: 0L)
+                .putExtra("preview_url", entry.previewUrl)
+
+        internal fun selectedFile(data: Intent?): QuarkFile? =
+            data?.getStringExtra("file_id")?.let { id ->
+                QuarkFile(
+                    id = id,
+                    name = data.getStringExtra("file_name").orEmpty(),
+                    directory = false,
+                    size = data.getLongExtra("file_size", 0L),
+                    previewUrl = data.getStringExtra("preview_url").orEmpty(),
+                )
+            }
+    }
+
+    private val targetFile by lazy { selectedFile(intent) }
+    private var openTargetOnResume = false
     private val worker = Executors.newSingleThreadExecutor()
     private val folders = mutableListOf<QuarkFile>()
     private val items = mutableListOf<QuarkFile>()
@@ -47,7 +93,6 @@ class QuarkDriveActivity : AppCompatActivity() {
     private var busy = false
     private var hasMore = false
     private var loginDialog: AlertDialog? = null
-    private var playbackDialog: AlertDialog? = null
     private lateinit var root: LinearLayout
     private lateinit var heading: TextView
     private lateinit var status: TextView
@@ -114,6 +159,11 @@ class QuarkDriveActivity : AppCompatActivity() {
         }
         root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
         more = button("加载更多") { loadPage(reset = false) }.also { root.addView(it) }
+        if (targetFile != null) {
+            actions.visibility = View.GONE
+            list.setOnItemLongClickListener(null)
+            openTargetOnResume = savedInstanceState == null
+        }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 if (busy) return
@@ -128,12 +178,28 @@ class QuarkDriveActivity : AppCompatActivity() {
         connect()
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        if (openTargetOnResume && session != null) {
+            openTargetOnResume = false
+            targetFile?.let(::open)
+        }
+    }
+
     private fun connect() {
         session = QuarkPersonalDrive.openSession()
         loadPage(reset = true)
     }
 
     private fun loadPage(reset: Boolean) {
+        targetFile?.let { file ->
+            items.clear()
+            items.add(file)
+            renderRows()
+            status.text = if (session == null) "请登录夸克网盘" else ""
+            updateControls()
+            return
+        }
         if (reset) {
             nextPage = 1
             hasMore = false
@@ -195,9 +261,31 @@ class QuarkDriveActivity : AppCompatActivity() {
             return
         }
         when (mediaKind(file.name, false)) {
-            MediaKind.VIDEO -> play(file, video = true)
-            MediaKind.AUDIO -> play(file, video = false)
-            else -> showActions(file)
+            MediaKind.IMAGE -> {
+                val images = items.filter { !it.directory && ImageTypes.isImageName(it.name) }
+                val index = images.indexOfFirst { it.id == file.id }
+                if (index >= 0) {
+                    val previews = images.map { image ->
+                        val entry = quarkEntry(image, DISK_SOURCE_ID, EntryOrigin.DISK)
+                        ImagePreviewItem(image.id, image.name, mediaCacheKey(AccountScope.current, entry), image.previewUrl)
+                    }
+                    startActivity(ImageViewerActivity.galleryIntent(this, previews, index, SourceProvider.QUARK))
+                }
+            }
+            MediaKind.VIDEO, MediaKind.AUDIO, MediaKind.PDF -> {
+                setResult(RESULT_OK, Intent()
+                    .putExtra("file_id", file.id)
+                    .putExtra("file_name", file.name)
+                    .putExtra("file_size", file.size)
+                    .putExtra("preview_url", file.previewUrl))
+                finish()
+            }
+            else -> if (targetFile == null) showActions(file) else {
+                AlertDialog.Builder(this).setTitle(file.name)
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("下载原文件") { _, _ -> download(file) }
+                    .show()
+            }
         }
     }
 
@@ -255,43 +343,6 @@ class QuarkDriveActivity : AppCompatActivity() {
                     .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED))
             }.onSuccess { status.text = "已加入系统下载" }
                 .onFailure { status.text = "无法加入系统下载" }
-        }
-    }
-
-    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-    private fun play(file: QuarkFile, video: Boolean) {
-        request("正在获取播放地址…", { it.playback(file, video) }) { source ->
-            if (!lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
-                status.text = "请重新打开文件播放"
-                return@request
-            }
-            status.text = ""
-            val player = ExoPlayer.Builder(this).build()
-            val view = PlayerView(this).apply {
-                this.player = player
-                minimumHeight = dp(if (video) 240 else 120)
-                showController()
-            }
-            val dialog = AlertDialog.Builder(this).setTitle(file.name).setView(view)
-                .setNegativeButton("关闭", null).create()
-            playbackDialog = dialog
-            dialog.setOnDismissListener {
-                view.player = null
-                player.release()
-                playbackDialog = null
-            }
-            player.addListener(object : Player.Listener {
-                override fun onPlayerError(error: PlaybackException) {
-                    dialog.dismiss()
-                    status.text = "播放失败，请重新打开文件以获取播放地址"
-                }
-            })
-            val media = MediaItem.Builder().setUri(source.uri)
-            if (source.hls) media.setMimeType(MimeTypes.APPLICATION_M3U8)
-            dialog.show()
-            player.setMediaItem(media.build())
-            player.prepare()
-            player.play()
         }
     }
 
@@ -358,12 +409,35 @@ class QuarkDriveActivity : AppCompatActivity() {
             settings.setSupportZoom(true)
             settings.builtInZoomControls = true
             settings.displayZoomControls = false
-            // 官网把移动 UA 重定向到下载推广页，登录使用桌面网页。
-            val chrome = Regex("Chrome/[0-9.]+").find(settings.userAgentString)?.value.orEmpty()
-            settings.userAgentString = "Mozilla/5.0 (X11; Linux x86_64) " +
-                "AppleWebKit/537.36 (KHTML, like Gecko) $chrome Safari/537.36"
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
         }
+        // 桌面模式沿用桌面 UA（官网把移动 UA 重定向到下载推广页）；
+        // H5 短信模式切回完整 Chrome 手机 UA（滑块/无痕验证对 UA 敏感）。
+        val chromeToken = Regex("Chrome/[0-9.]+").find(web.settings.userAgentString)?.value.orEmpty()
+        val desktopUa = "Mozilla/5.0 (X11; Linux x86_64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) $chromeToken Safari/537.36"
+        val mobileUa = "Mozilla/5.0 (Linux; Android 14) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) $chromeToken Mobile Safari/537.36"
+        web.settings.userAgentString = desktopUa
+        var h5Mode = false
+        var exchanged = false
+        val bridge = object : Any() {
+            /** H5 登录页 pm 模式 postMessage 的 service_ticket（32 位字符串）。 */
+            @JavascriptInterface
+            fun onServiceTicket(ticket: String) {
+                val st = ticket.trim()
+                if (!Regex("^[0-9a-zA-Z]{32}$").matches(st)) return
+                handler.post {
+                    if (!h5Mode || exchanged || loginDialog == null) return@post
+                    exchanged = true
+                    message.text = "验证通过，正在换取登录会话…"
+                    message.visibility = View.VISIBLE
+                    // st 一次性短时效：立刻走官方 doAuth 同款兑换，Set-Cookie 落 .quark.cn。
+                    web.loadUrl(QUARK_ST_EXCHANGE_PREFIX + st)
+                }
+            }
+        }
+        web.addJavascriptInterface(bridge, "__bd_android")
         var attempt = 0
         var loading = false
         var focusLogin = true
@@ -393,8 +467,37 @@ class QuarkDriveActivity : AppCompatActivity() {
             }, 20_000)
         }
         fun openHome() {
+            h5Mode = false
+            exchanged = false
+            web.settings.userAgentString = desktopUa
             startLoading()
             web.loadUrl(QuarkPersonalDrive.HOME)
+        }
+        /** H5 短信登录：手机号 + 短信码，触屏无痕验证，成功后经桥接自动兑换会话。 */
+        fun startH5Login() {
+            h5Mode = true
+            exchanged = false
+            web.settings.userAgentString = mobileUa
+            startLoading()
+            message.text = "输入手机号并填写短信验证码，成功后自动返回。"
+            web.loadUrl(QUARK_H5_LOGIN_URL)
+        }
+        /** 兑换页加载后轮询会话 Cookie；命中即关弹窗触发重连。 */
+        fun pollLoginState(current: Int, tries: Int) {
+            if (current != attempt || loginDialog == null) return
+            val cookie = CookieManager.getInstance().getCookie("https://drive-pc.quark.cn")
+            if (QuarkPersonalDrive.hasLoginCookie(cookie)) {
+                CookieManager.getInstance().flush()
+                toast("夸克登录成功")
+                loginDialog?.dismiss()
+                return
+            }
+            if (tries <= 0) {
+                message.text = "验证码已通过，但登录会话未落地；请重试或改用「导入 Cookie」。"
+                message.visibility = View.VISIBLE
+                return
+            }
+            handler.postDelayed({ pollLoginState(current, tries - 1) }, 500)
         }
         retry = button("重试") { openHome() }.apply { visibility = View.GONE }
         web.webViewClient = object : WebViewClient() {
@@ -440,6 +543,19 @@ class QuarkDriveActivity : AppCompatActivity() {
             }
 
             override fun onPageFinished(view: WebView, url: String) {
+                if (h5Mode) {
+                    if (url.startsWith(QUARK_ST_EXCHANGE_PREFIX)) {
+                        // 兑换页是 JSON 文本，无需渲染：直接轮询会话 Cookie。
+                        loading = false
+                        handler.removeCallbacksAndMessages(null)
+                        message.text = "正在确认登录态…"
+                        message.visibility = View.VISIBLE
+                        pollLoginState(attempt, 24)
+                        return
+                    }
+                    // 每次页面加载完都补挂监听（pm 模式顶层窗口消息发给自己）。
+                    view.evaluateJavascript(H5_ST_HOOK, null)
+                }
                 if (!loading || url != view.url) return
                 val current = attempt
                 fun checkContent() {
@@ -472,6 +588,9 @@ class QuarkDriveActivity : AppCompatActivity() {
             val height = (resources.configuration.screenHeightDp * 0.65f).toInt().coerceIn(160, 520)
             addView(message)
             addView(retry)
+            addView(button("短信验证码登录（H5）") { startH5Login() }.apply {
+                textSize = 12f
+            })
             addView(web, LinearLayout.LayoutParams(-1, dp(height)))
         }
         val dialog = AlertDialog.Builder(this).setTitle("夸克网盘账号")
@@ -596,15 +715,9 @@ class QuarkDriveActivity : AppCompatActivity() {
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density + 0.5f).toInt()
 
-    override fun onStop() {
-        playbackDialog?.dismiss()
-        super.onStop()
-    }
-
     override fun onDestroy() {
         worker.shutdownNow()
         loginDialog?.dismiss()
-        playbackDialog?.dismiss()
         super.onDestroy()
     }
 }

@@ -32,7 +32,6 @@ import androidx.core.content.ContextCompat
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -45,6 +44,7 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerView
@@ -55,7 +55,7 @@ import kotlin.math.abs
 internal class VideoPlaybackPage(
     private val activity: Activity,
     private val entry: PanEntry,
-    stream: VideoStream,
+    source: MediaSource,
     private val account: String,
     private val history: AudioHistory,
     startPositionMs: Long?,
@@ -784,29 +784,17 @@ internal class VideoPlaybackPage(
 
             override fun onPlayerError(error: PlaybackException) {
                 stopAudioSession()
-                message.text = "播放失败（${error.errorCodeName}）。"
+                val status = error.mediaHttpStatus()
+                message.text = "播放失败（${status?.let { "HTTP $it" } ?: error.errorCodeName}）。"
                 message.visibility = View.VISIBLE
                 retry.visibility = View.VISIBLE
-                if (retryOnExpiredLink && error.isExpiredMediaLink()) {
+                if (retryOnExpiredLink &&
+                    (error.isExpiredMediaLink() || (entry.provider == SourceProvider.QUARK && status == 412))
+                ) {
                     video.post { if (dialog.isShowing) retryPlayback(true) }
                 }
             }
         })
-        val http = DefaultHttpDataSource.Factory().setUserAgent(PanApi.DLINK_USER_AGENT)
-        val source = HlsMediaSource.Factory { type ->
-            if (type == C.DATA_TYPE_MANIFEST) HlsManifestDataSource(stream, http)
-            else http.createDataSource()
-        }.createMediaSource(
-            MediaItem.Builder()
-                .setUri(stream.uri)
-                .setMediaMetadata(
-                    MediaMetadata.Builder()
-                        .setTitle(entry.name)
-                        .setArtist("拾课")
-                        .build(),
-                )
-                .build(),
-        )
         dialog.show()
         dialog.window?.setLayout(-1, -1)
         dialog.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -917,10 +905,22 @@ internal class VideoPlaybackPage(
     private fun dp(value: Int) = (value * activity.resources.displayMetrics.density).toInt()
 }
 
-internal fun PlaybackException.isExpiredMediaLink(): Boolean =
+@OptIn(UnstableApi::class)
+internal fun VideoStream.mediaSource(item: MediaItem): MediaSource {
+    val http = DefaultHttpDataSource.Factory().setUserAgent(PanApi.DLINK_USER_AGENT)
+    return HlsMediaSource.Factory { type ->
+        if (type == C.DATA_TYPE_MANIFEST) HlsManifestDataSource(this, http)
+        else http.createDataSource()
+    }.createMediaSource(item)
+}
+
+internal fun PlaybackException.mediaHttpStatus(): Int? =
     generateSequence(cause) { it.cause }
         .filterIsInstance<HttpDataSource.InvalidResponseCodeException>()
-        .any { it.responseCode in setOf(401, 403, 404, 410) }
+        .firstOrNull()?.responseCode
+
+internal fun PlaybackException.isExpiredMediaLink(): Boolean =
+    mediaHttpStatus() in setOf(401, 403, 404, 410)
 
 @OptIn(UnstableApi::class)
 internal class HlsManifestDataSource(

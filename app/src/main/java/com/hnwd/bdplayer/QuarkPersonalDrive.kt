@@ -1,9 +1,20 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package com.hnwd.bdplayer
 
+import android.content.Context
 import android.net.Uri
 import android.webkit.CookieManager
+import android.webkit.WebSettings
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
+import androidx.media3.datasource.okhttp.OkHttpDataSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
 import java.net.HttpURLConnection
 import java.net.URL
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -14,12 +25,23 @@ internal data class QuarkFile(
     val size: Long = 0,
     /** 更新时间（毫秒），取 l_updated_at 退化到 l_created_at；用于「最新更新」客户端排序。 */
     val mtime: Long = 0,
+    /** 看图大图预签名地址（免 Cookie，约 3h）；为空时回落原文件下载。 */
+    val previewUrl: String = "",
 )
-internal data class QuarkPlayback(val uri: Uri, val hls: Boolean)
+internal data class QuarkPlayback(val uri: Uri, val hls: Boolean) {
+    fun mediaSource(context: Context, item: MediaItem): MediaSource {
+        val http = OkHttpDataSource.Factory(QuarkPersonalDrive.fileClient)
+            .setUserAgent(WebSettings.getDefaultUserAgent(context))
+            .setDefaultRequestProperties(mapOf("Referer" to QuarkPersonalDrive.HOME))
+        val media = item.buildUpon().setMimeType(if (hls) MimeTypes.APPLICATION_M3U8 else null).build()
+        return DefaultMediaSourceFactory(http).createMediaSource(media)
+    }
+
+}
 internal class QuarkLoginRequired : Exception("请登录夸克网盘后重试")
 internal class QuarkMutationPending : Exception("网盘仍在处理，请稍后刷新确认结果")
 
-internal class QuarkPersonalDrive private constructor(private val cookie: String) :
+internal class QuarkPersonalDrive private constructor(private val cookie: String, private val userAgent: String?) :
     PersonalDriveProtocol<QuarkFile, QuarkFile> {
 
     companion object {
@@ -31,6 +53,32 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
         // 匿名访问也会带 ctoken / b-user-id / _UP_* 等 Cookie，不能用「Cookie 非空」判断已登录。
         private val SESSION_COOKIES = setOf("__pus", "__puus")
 
+        val fileClient = OkHttpClient.Builder()
+            .followSslRedirects(false)
+            .addNetworkInterceptor { chain ->
+                val request = chain.request()
+                val url = request.url.toString()
+                val next = request.newBuilder().removeHeader("Cookie")
+                // 按实际请求地址读取会话，跨域重定向不转发夸克 Cookie。
+                if (isMediaUri(Uri.parse(url))) {
+                    CookieManager.getInstance().getCookie(url)?.let { next.header("Cookie", it) }
+                }
+                chain.proceed(next.build())
+            }
+            .build()
+
+        fun fileRequest(uri: Uri, userAgent: String): Request {
+            require(isMediaUri(uri))
+            return Request.Builder().url(uri.toString())
+                .header("User-Agent", userAgent)
+                .header("Referer", HOME)
+                .build()
+        }
+
+        fun isMediaUri(uri: Uri): Boolean =
+            uri.scheme == "https" && uri.host.orEmpty().endsWith(".quark.cn", ignoreCase = true) &&
+                uri.userInfo == null
+
         fun hasLoginCookie(cookie: String?): Boolean {
             if (cookie.isNullOrBlank()) return false
             return cookie.split(';').any { part ->
@@ -40,9 +88,9 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
             }
         }
 
-        fun openSession(): QuarkPersonalDrive? =
+        fun openSession(userAgent: String? = null): QuarkPersonalDrive? =
             CookieManager.getInstance().getCookie("$API/file/sort")
-                ?.takeIf { hasLoginCookie(it) }?.let(::QuarkPersonalDrive)
+                ?.takeIf { hasLoginCookie(it) }?.let { QuarkPersonalDrive(it, userAgent) }
     }
 
     override fun list(directory: String, page: Int, size: Int) =
@@ -50,6 +98,10 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
 
     override fun search(keyword: String, page: Int, size: Int) =
         read("file/search", page, size, "q" to keyword, "_is_hl" to "0")
+
+    fun imagePreviewUrl(fileId: String, name: String): String =
+        execute(search(name, page = 1, size = 50)).items
+            .firstOrNull { it.id == fileId && !it.directory }?.previewUrl.orEmpty()
 
     private fun read(path: String, page: Int, size: Int, vararg query: Pair<String, String>): DriveRead<QuarkFile> {
         return DriveRead(url(path, "_page" to "$page", "_size" to "$size", "_fetch_total" to "1",
@@ -65,6 +117,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
                     size = item.optLong("size", 0L),
                     mtime = item.optLong("l_updated_at", 0L).takeIf { it > 0 }
                         ?: item.optLong("l_created_at", 0L),
+                    previewUrl = item.optString("preview_url"),
                 )
             }
             val metadata = data.optJSONObject("metadata")
@@ -125,10 +178,12 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
         return signedUri(item.getString("download_url"))
     }
 
+    fun pdfLink(fileId: String): Uri =
+        signedUri(post("pdf/preview", JSONObject().put("fid", fileId)).getString("download_url"))
+
     private fun signedUri(value: String): Uri {
         val uri = Uri.parse(value)
-        val host = uri.host.orEmpty().lowercase()
-        check(uri.scheme == "https" && host.endsWith(".quark.cn") && uri.userInfo == null) {
+        check(isMediaUri(uri)) {
             "网盘返回了无效的文件地址"
         }
         return uri
@@ -154,6 +209,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
             connection.readTimeout = 15_000
             connection.setRequestProperty("Cookie", cookie)
             connection.setRequestProperty("Accept", "application/json")
+            userAgent?.let { connection.setRequestProperty("User-Agent", it) }
             if (body != null) {
                 connection.requestMethod = "POST"
                 connection.doOutput = true

@@ -64,13 +64,41 @@ internal data class PanEntry(
     val directory: Boolean,
     val origin: EntryOrigin = EntryOrigin.GROUP,
     val md5: String = "",
+    /** 列表自带的免 Cookie 大图地址，缺失时可按文件取址。 */
+    val previewUrl: String = "",
 ) {
     val sourceId: String get() = if (origin == EntryOrigin.DISK) DISK_SOURCE_ID else gid
     val isDisk: Boolean get() = origin == EntryOrigin.DISK
+    // 百度个人网盘的 gid 为空；夸克个人网盘的条目（含已保存的收藏）使用 disk。
+    val provider: SourceProvider get() =
+        if (isDisk && gid == DISK_SOURCE_ID) SourceProvider.QUARK else providerOfSourceId(gid)
     val isContact: Boolean get() = isContactSource(gid)
 
     fun contactRecipient(viewer: String): String =
-        if (owner == viewer) gid.removePrefix(CONTACT_SOURCE_PREFIX) else viewer
+        if (owner == viewer) rawSourceId(gid).removePrefix(CONTACT_SOURCE_PREFIX) else viewer
+}
+
+private val thumbSize = Regex("([?&])size=[^&#]*")
+
+/** 我的网盘 / 搜索 / 群文件响应里缩略图字段位置不统一，逐层容错找出可用的大图地址。 */
+private fun previewUrlOf(item: JSONObject): String {
+    // 群文件接口可能把对象再次序列化成 JSON 字符串。
+    fun objectAt(container: JSONObject?, key: String): JSONObject? =
+        container?.optJSONObject(key)
+            ?: container?.optString(key)?.takeIf { it.trimStart().startsWith('{') }
+                ?.let { runCatching { JSONObject(it) }.getOrNull() }
+    val meta = objectAt(item, "meta")
+    val thumbnails = listOfNotNull(objectAt(item, "thumb"), objectAt(item, "thumbs"), objectAt(meta, "thumbs"))
+    val candidates = listOf("url3", "url2", "url1", "icon").flatMap { size ->
+        thumbnails.map { it.optString(size) }
+    } + listOf(
+        item.optString("url3"), item.optString("thumbnail"),
+        meta?.optString("url3"), meta?.optString("thumbs"),
+        item.optJSONArray("thumbs")?.optString(0),
+        item.optString("thumbs"), item.optString("thumb"),
+    )
+    val url = candidates.firstOrNull { it?.startsWith("https://") == true }.orEmpty()
+    return PanApi.thumbResize(url, "c2560_u2560")
 }
 
 /**
@@ -92,6 +120,7 @@ internal fun quarkEntry(
     size = if (file.directory) "" else file.size.toString(),
     directory = file.directory,
     origin = origin,
+    previewUrl = file.previewUrl,
 )
 
 internal data class PanSearchHit(
@@ -101,13 +130,14 @@ internal data class PanSearchHit(
 )
 
 /** 文档《媒体取址技术方案》§2：按扩展名分流后的媒体类别。 */
-internal enum class MediaKind { VIDEO, AUDIO, PDF, DOCUMENT, DIRECTORY, OTHER }
+internal enum class MediaKind { VIDEO, AUDIO, IMAGE, PDF, DOCUMENT, DIRECTORY, OTHER }
 
 internal fun mediaKind(name: String, directory: Boolean): MediaKind {
     if (directory) return MediaKind.DIRECTORY
     return when (name.substringAfterLast('.', "").lowercase()) {
         in VIDEO_EXT -> MediaKind.VIDEO
         in AUDIO_EXT -> MediaKind.AUDIO
+        in ImageTypes.EXTENSIONS -> MediaKind.IMAGE
         "pdf" -> MediaKind.PDF
         in DOC_EXT -> MediaKind.DOCUMENT
         else -> MediaKind.OTHER
@@ -116,10 +146,7 @@ internal fun mediaKind(name: String, directory: Boolean): MediaKind {
 
 private val VIDEO_EXT = setOf("mp4", "mkv", "mov", "avi", "flv", "wmv", "webm", "ts", "m4v")
 private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "wav", "wma", "ogg", "m4b", "amr")
-private val DOC_EXT = setOf(
-    "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "zip", "rar", "7z",
-    "jpg", "jpeg", "png", "gif", "webp", "bmp",
-)
+private val DOC_EXT = setOf("doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "zip", "rar", "7z")
 
 internal object PanApi {
     const val HOST = "pan.baidu.com"
@@ -131,6 +158,10 @@ internal object PanApi {
     const val DLINK_USER_AGENT = "pan.baidu.com"
 
     fun kindOf(entry: PanEntry): MediaKind = mediaKind(entry.name, entry.directory)
+
+    /** 百度缩略图的 size 不参与签名，原始查询参数的编码与顺序保留。 */
+    fun thumbResize(raw: String, size: String): String =
+        thumbSize.replace(raw) { "${it.groupValues[1]}size=$size" }
 
     val login: String = Uri.parse("https://wappass.baidu.com/passport?login")
         .buildUpon()
@@ -146,31 +177,46 @@ internal object PanApi {
         .build().toString()
 
     fun recent(gid: String) = api(
-        "/imbox/file/recentv2", "channel" to "chunlei", "id" to "1", "session_id" to "04_$gid",
+        "/imbox/file/recentv2", "channel" to "chunlei", "id" to "1", "session_id" to "04_${rawSourceId(gid)}",
     )
 
     fun roots(gid: String, cursor: String = ""): String {
         if (isContactSource(gid)) {
-            val query = mutableListOf("to_uk" to gid.removePrefix(CONTACT_SOURCE_PREFIX), "type" to "2")
+            val query = mutableListOf("to_uk" to rawSourceId(gid).removePrefix(CONTACT_SOURCE_PREFIX), "type" to "2")
             if (cursor.isNotEmpty()) query.add("cursor" to cursor)
             return api("/mbox/msg/sessioninfo", *query.toTypedArray())
         }
-        val query = mutableListOf("gid" to gid, "type" to "2", "limit" to "50", "desc" to "1")
+        val query = mutableListOf("gid" to rawSourceId(gid), "type" to "2", "limit" to "50", "desc" to "1")
         if (cursor.isNotEmpty()) query.add("last_msg_time" to cursor)
         return api("/mbox/group/listshare", *query.toTypedArray())
     }
 
     fun children(entry: PanEntry, page: Int, directoryId: String = entry.fileId): String {
+        return shareInfo(entry, page, directoryId)
+    }
+
+    fun imageShareInfo(entry: PanEntry): String = shareInfo(entry, 1, entry.fileId, "chunlei")
+
+    private fun shareInfo(entry: PanEntry, page: Int, fileId: String, channel: String? = null): String {
         val query = mutableListOf(
-            "msg_id" to entry.messageId, "from_uk" to entry.owner, "fs_id" to directoryId,
+            "msg_id" to entry.messageId, "from_uk" to entry.owner, "fs_id" to fileId,
             "page" to page.toString(), "num" to "100",
         )
+        channel?.let { query += "channel" to it }
         if (entry.isContact) {
             query += listOf("type" to "1", "to_uk" to entry.contactRecipient(AccountScope.current))
         } else {
-            query += listOf("type" to "2", "gid" to entry.gid, "limit" to "100", "desc" to "1")
+            query += listOf("type" to "2", "gid" to rawSourceId(entry.gid), "limit" to "100", "desc" to "1")
         }
         return api("/mbox/msg/shareinfo", *query.toTypedArray())
+    }
+
+    fun parseImageShareInfo(json: JSONObject, fileId: String): String {
+        val records = json.optJSONArray("records") ?: return ""
+        val file = records.optJSONObject(0) ?: return ""
+        if (records.length() != 1 || file.optInt("isdir") == 1) return ""
+        val id = file.optString("fs_id", file.optString("fsid"))
+        return if (id.isEmpty() || id == fileId) previewUrlOf(file) else ""
     }
 
     fun searchGroup(gid: String, keyword: String): String {
@@ -330,6 +376,7 @@ internal object PanApi {
             gid = "", messageId = "", owner = "", fileId = fileId, name = name, path = path,
             size = item.optString("size"), directory = item.optInt("isdir") == 1,
             origin = EntryOrigin.DISK, md5 = item.optString("md5"),
+            previewUrl = previewUrlOf(item),
         )
     }
 
@@ -571,7 +618,7 @@ internal object PanApi {
     )
 
     fun groupPdfPreviewForm(entry: PanEntry): String = listOf(
-        "fuk" to entry.owner, "scene" to "1", "gid" to entry.gid,
+        "fuk" to entry.owner, "scene" to "1", "gid" to rawSourceId(entry.gid),
         "fsid" to entry.fileId, "ftype" to "pdf", "password" to "",
     ).joinToString("&") { (key, value) -> "$key=${URLEncoder.encode(value, "UTF-8")}" }
 
@@ -594,7 +641,7 @@ internal object PanApi {
     private fun playlist(entry: PanEntry, streamType: String): Uri = Uri.parse(api(
         "/mbox/msg/streaming",
         "from_uk" to entry.owner,
-        "to" to if (entry.isContact) entry.contactRecipient(AccountScope.current) else entry.gid,
+        "to" to if (entry.isContact) entry.contactRecipient(AccountScope.current) else rawSourceId(entry.gid),
         "msg_id" to entry.messageId, "fs_id" to entry.fileId,
         "type" to if (entry.isContact) "1" else "2", "stream_type" to streamType,
     ))
@@ -646,6 +693,7 @@ internal object PanApi {
             gid, messageId, owner, item.getString(idKey), item.getString("server_filename"),
             readablePath(item.getString("path")), item.optString("size", meta?.optString("size") ?: ""),
             item.getString("isdir") == "1", md5 = item.optString("md5", meta?.optString("md5") ?: ""),
+            previewUrl = previewUrlOf(item),
         )
     }
 

@@ -49,6 +49,11 @@
             android:exported="false"
             android:theme="@style/PdfReaderTheme" />
         <activity
+            android:name=".ImageViewerActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
+            android:exported="false"
+            android:theme="@style/ImageViewerTheme" />
+        <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
             android:exported="true">

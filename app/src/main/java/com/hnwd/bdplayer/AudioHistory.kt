@@ -38,7 +38,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
                 ?: originHint ?: if (bucket == DISK_SOURCE_ID) EntryOrigin.DISK else EntryOrigin.GROUP
             AudioHistoryItem(
                 PanEntry(
-                    if (origin == EntryOrigin.DISK) "" else bucket,
+                    if (origin == EntryOrigin.DISK) item.optString("gid") else bucket,
                     item.getString("message"), item.getString("owner"), item.getString("file"),
                     item.getString("name"), item.optString("path"), item.optString("size"), false, origin,
                 ),
@@ -88,6 +88,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
         items.forEach { item ->
             data.put(JSONObject()
                 .put("origin", item.entry.origin.name)
+                .put("gid", item.entry.gid)
                 .put("message", item.entry.messageId)
                 .put("owner", item.entry.owner)
                 .put("file", item.entry.fileId)

@@ -175,7 +175,6 @@ class AudioPlaybackService : MediaSessionService() {
             return SessionResult.RESULT_ERROR_INVALID_STATE
         }
         val account = args.getString("account").orEmpty()
-        if (account.isEmpty() || account != AccountScope.current) return SessionResult.RESULT_ERROR_BAD_VALUE
         val uri = Uri.parse(args.getString("uri").orEmpty())
         val playlist = args.getByteArray("playlist")
         val origin = runCatching { EntryOrigin.valueOf(args.getString("origin") ?: "GROUP") }
@@ -186,8 +185,10 @@ class AudioPlaybackService : MediaSessionService() {
             args.getString("name").orEmpty(), args.getString("path").orEmpty(),
             args.getString("size").orEmpty(), false, origin,
         )
-        if (next.fileId.isEmpty() || next.name.isEmpty() ||
-            (origin == EntryOrigin.GROUP && (next.gid.isEmpty() || next.messageId.isEmpty()))
+        val quark = next.provider == SourceProvider.QUARK
+        if (account != AccountScope.current || (!quark && account.isEmpty()) ||
+            next.fileId.isEmpty() || next.name.isEmpty() ||
+            (!quark && origin == EntryOrigin.GROUP && (next.gid.isEmpty() || next.messageId.isEmpty()))
         ) {
             return SessionResult.RESULT_ERROR_BAD_VALUE
         }
@@ -204,6 +205,7 @@ class AudioPlaybackService : MediaSessionService() {
             .setArtist("拾课")
             .setExtras(Bundle().apply {
                 putString("account", account)
+                putString("provider", next.provider.name)
                 putString("origin", next.origin.name)
                 putString("gid", next.gid)
                 putString("message", next.messageId)
@@ -241,7 +243,7 @@ class AudioPlaybackService : MediaSessionService() {
                 if (wasHls) putString("playbackId", UUID.randomUUID().toString())
             })
             .build()
-        player.setMediaItem(item.buildUpon().setUri(uri).setMediaMetadata(metadata).build(), position)
+        setAudioSource(item.buildUpon().setUri(uri).setMediaMetadata(metadata).build(), uri, null, position)
         player.prepare()
         return SessionResult.RESULT_SUCCESS
     }
@@ -276,7 +278,9 @@ class AudioPlaybackService : MediaSessionService() {
     }
 
     private fun isAudioSource(entry: PanEntry, uri: Uri, playlist: ByteArray?): Boolean =
-        if (playlist == null) {
+        if (entry.provider == SourceProvider.QUARK) {
+            playlist == null && QuarkPersonalDrive.isMediaUri(uri)
+        } else if (playlist == null) {
             if (entry.isDisk) PanApi.isCachedFileLink(uri) else PanApi.isFileLink(uri)
         }
         else playlist.isNotEmpty() && (
@@ -285,7 +289,9 @@ class AudioPlaybackService : MediaSessionService() {
         )
 
     private fun setAudioSource(item: MediaItem, uri: Uri, playlist: ByteArray?, position: Long) {
-        if (playlist == null) {
+        if (entry?.provider == SourceProvider.QUARK) {
+            player.setMediaSource(QuarkPlayback(uri, false).mediaSource(this, item), position)
+        } else if (playlist == null) {
             player.setMediaItem(item, position)
         } else {
             val stream = VideoStream(uri, playlist)

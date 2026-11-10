@@ -7,10 +7,16 @@ import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** 缓存里的看图签名地址最多沿用 2 小时（短于夸克 3h / 百度 8h 的有效期）。 */
+private const val PREVIEW_TTL_MS = 2 * 60 * 60 * 1000L
+
 internal class CourseCache(private val preferences: SharedPreferences) {
     fun readPage(key: String, page: Int): CachedPage? = runCatching {
         val raw = preferences.getString(pageKey(key, page), null) ?: return null
         val data = JSONObject(raw)
+        val syncedAt = data.optLong("syncedAt")
+        // 签名看图地址有时效（夸克 ≈3h / 百度 ≈8h），缓存过旧就丢弃，让打开时回落原文件链路
+        val previewFresh = syncedAt > 0 && System.currentTimeMillis() - syncedAt < PREVIEW_TTL_MS
         val array = data.getJSONArray("entries")
         CachedPage(List(array.length()) { index ->
             val item = array.getJSONObject(index)
@@ -21,8 +27,9 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
                     .getOrDefault(EntryOrigin.GROUP),
                 item.optString("md5"),
+                if (previewFresh) item.optString("preview") else "",
             )
-        }, data.optLong("syncedAt"), data.optString("nextCursor").takeIf { data.has("nextCursor") },
+        }, syncedAt, data.optString("nextCursor").takeIf { data.has("nextCursor") },
             data.optBoolean("latestEmpty"),
         )
     }.getOrNull()
@@ -82,7 +89,8 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 .put("size", it.size)
                 .put("directory", it.directory)
                 .put("origin", it.origin.name)
-                .put("md5", it.md5))
+                .put("md5", it.md5)
+                .put("preview", it.previewUrl))
         }
         preferences.edit().putString(
             pageKey(key, page),
@@ -91,10 +99,15 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         ).apply()
     }
 
+    /** 签名看图地址每次请求都会重新签发，不能参与「目录内容是否变化」的判断。 */
+    private fun List<PanEntry>.contentOnly() = map { it.copy(previewUrl = "") }
+
     fun writeIfChanged(key: String, page: Int, fresh: List<PanEntry>, nextCursor: String? = null): Boolean {
         val existing = readPage(key, page)
         write(key, page, fresh, nextCursor)
-        return existing?.entries != fresh || existing.nextCursor != nextCursor
+        if (existing == null) return true
+        return existing.entries.contentOnly() != fresh.contentOnly() ||
+            existing.nextCursor != nextCursor
     }
 
     /** 从指定目录缓存中移除若干条目（删除后立即从列表消失，避免异步任务落盘延迟）。 */
@@ -148,12 +161,17 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         val entries = (fresh + old?.entries.orEmpty().filterNot { idOf(it) in ids }).take(limit)
         val latestEmpty = fresh.isEmpty()
         write(key, page, entries, nextCursor = null, latestEmpty = latestEmpty)
-        return old?.entries != entries || old.latestEmpty != latestEmpty
+        if (old == null) return true
+        return old.entries.contentOnly() != entries.contentOnly() || old.latestEmpty != latestEmpty
     }
 
     fun isFresh(key: String, ttlMillis: Long): Boolean {
         val first = readPage(key, 1) ?: return false
-        return first.syncedAt > 0 && System.currentTimeMillis() - first.syncedAt < ttlMillis
+        if (first.syncedAt <= 0 || System.currentTimeMillis() - first.syncedAt >= ttlMillis) return false
+        // 升级前的缓存页没有 preview 字段：视为不新鲜，强制重拉一次列表带回签名看图地址
+        val raw = preferences.getString(pageKey(key, 1), null) ?: return false
+        val entries = runCatching { JSONObject(raw).optJSONArray("entries") }.getOrNull() ?: return false
+        return entries.length() == 0 || entries.optJSONObject(0)?.has("preview") == true
     }
 
     fun syncLabel(key: String): String {
