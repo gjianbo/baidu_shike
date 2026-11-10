@@ -5688,7 +5688,6 @@ class MainActivity : AppCompatActivity() {
             web.postDelayed(action, millis)
         }
 
-        override fun resetWriteGuards() = resetSectionGuards()
     }
 
     private companion object {

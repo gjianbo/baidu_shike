@@ -62,28 +62,23 @@ internal interface DiskMutationHost {
     fun openWeb(url: String)
     fun pickFromSheet(title: String, subtitle: String, choices: List<SheetChoice>, onSelect: (SheetChoice) -> Unit)
     fun delay(millis: Long, action: () -> Unit)
-    fun resetWriteGuards()
 }
 
 /**
  * 网盘文件管理：所有对网盘产生副作用的操作集中在这里。
  *
  * 三条不变式（搬出时原样保留，改动前请先确认）：
- * 1. 同一时刻只允许一笔写操作 + 一笔删除核对（[writeInFlight] / [deleteInFlight]）。
+ * 1. 同一时刻只允许一笔写操作 + 一笔删除核对，由 [guards] 统一把关。
  * 2. 写操作全程绑定 [DiskMutationHost.probeId]，账号变了就丢弃结果，不写回旧账号的 UI。
  * 3. 删除先核对 `path -> fs_id` 未被改动（[checkDeleteTargets]），提交后还要回读列表确认
  *    （[reconcileDeletedFiles]）；两步都不能靠接口返回值就宣告成功。
  */
 internal class DiskMutationSection(private val host: DiskMutationHost) {
     private val activity: Activity get() = host.hostActivity
-    private var writeInFlight = false
-    private var deleteInFlight = false
+    private val guards = WriteGuards()
 
     /** 账号失效时清掉写锁，否则后续所有写操作会被「已有操作在处理」永久挡住。 */
-    fun resetGuards() {
-        writeInFlight = false
-        deleteInFlight = false
-    }
+    fun resetGuards() = guards.reset()
 
     /** 需要 bdstoken 的网盘写操作统一入口。 */
     private fun runDiskWrite(block: (token: String) -> Unit) {
@@ -96,16 +91,15 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
 
     /** 提交写请求；acceptAnyErrno 让我们拿到网盘具体错误码做友好提示。 */
     private fun submitWrite(op: String, request: PanApi.WriteRequest, onSuccess: (JSONObject) -> Unit) {
-        if (writeInFlight || deleteInFlight) {
+        if (!guards.beginWrite()) {
             host.say("已有网盘操作正在处理，请稍候")
             return
         }
-        writeInFlight = true
         host.showStatus("正在${op}…")
         val session = host.probeId
         fun finish(message: String) {
-            if (session == host.probeId && writeInFlight) {
-                writeInFlight = false
+            if (session == host.probeId && guards.writeInFlight) {
+                guards.endWrite()
                 host.showStatus(message)
                 host.say(message)
             }
@@ -116,7 +110,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             onCancelled = { finish("${op}结果未确认，请刷新查看") },
             onFailure = { finish("${op}结果未确认，请刷新查看") },
         ) { json ->
-            writeInFlight = false
+            guards.endWrite()
             val errno = PanApi.writeErrno(json)
             if (errno == 132) {
                 showSecurityVerify(op)
@@ -290,7 +284,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             .setPositiveButton("删除") { _, _ ->
                 if (session != host.probeId) {
                     host.say("网盘会话已变更，请重试")
-                } else if (deleteInFlight) {
+                } else if (guards.deleteInFlight) {
                     host.say("正在确认上一笔删除，请稍候")
                 } else if (host.onDiskScreen() && entries.all { it.isDisk && PanApi.parentPath(it.path) == host.diskDir() }) {
                     val dir = host.diskDir()
@@ -312,17 +306,16 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
 
     /** 删除接口按路径操作，先确认缓存里的路径仍指向原来的文件。 */
     private fun checkDeleteTargets(token: String, dir: String, entries: List<PanEntry>, onVerified: () -> Unit) {
-        if (writeInFlight || deleteInFlight) {
+        if (!guards.beginDelete()) {
             host.say("已有网盘操作正在处理，请稍候")
             return
         }
-        deleteInFlight = true
         val session = host.probeId
         val remaining = entries.associate { it.path to it.fileId }.toMutableMap()
         host.say("正在核对要删除的文件")
         fun finish(verified: Boolean) {
-            if (session != host.probeId || host.activityDestroyed() || !deleteInFlight) return
-            deleteInFlight = false
+            if (session != host.probeId || host.activityDestroyed() || !guards.deleteInFlight) return
+            guards.endDelete()
             if (verified) onVerified()
             else host.say("无法确认文件仍在原位置，请刷新后重新选择")
         }
@@ -355,14 +348,20 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
     /** 入队后从目录第一页开始检查；只有完整读完且找不到原文件 ID 才确认成功。 */
     private fun reconcileDeletedFiles(token: String, dir: String, cacheKey: String, ids: Set<String>) {
         val session = host.probeId
-        deleteInFlight = true
+        // 这是删除链路的下半段：核对已在 checkDeleteTargets 里释放、提交已成功，
+        // 此刻抢占删除通道理论上必然成功；万一是脏状态就中止，绝不在未持锁的情况下回读确认。
+        if (!guards.beginDelete()) {
+            host.say("删除结果未确认，请刷新查看")
+            return
+        }
         host.say("删除请求已提交，正在等待网盘确认")
 
         val seenPages = mutableSetOf<List<String>>()
-        fun current() = !host.activityDestroyed() && deleteInFlight && session == host.probeId && host.accountVerified()
+        fun current() = !host.activityDestroyed() && guards.deleteInFlight &&
+            session == host.probeId && host.accountVerified()
         fun finish(confirmed: Boolean) {
             if (!current()) return
-            deleteInFlight = false
+            guards.endDelete()
             if (confirmed) {
                 host.bumpCourseRequest()
                 host.invalidateDiskCaches()
