@@ -1,15 +1,12 @@
 package com.hnwd.bdplayer
 
 import android.app.Dialog
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
@@ -22,8 +19,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceResponse
@@ -31,7 +26,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.ArrayAdapter
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -51,7 +45,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.FileProvider
 import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowInsetsControllerCompat
-import androidx.media3.common.AudioAttributes
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -63,10 +56,8 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
-import androidx.media3.ui.PlayerControlView
 import com.google.common.util.concurrent.ListenableFuture
 import java.io.File
-import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executor
 import org.json.JSONArray
@@ -5342,10 +5333,6 @@ class MainActivity : AppCompatActivity() {
 
         override fun clearStatus() {
             status.text = ""
-        }
-
-        override fun setStatus(message: String) {
-            status.text = message
         }
 
         override fun inflatePage(): View =

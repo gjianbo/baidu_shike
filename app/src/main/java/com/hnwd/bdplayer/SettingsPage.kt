@@ -2,7 +2,6 @@ package com.hnwd.bdplayer
 
 import android.app.Activity
 import android.content.SharedPreferences
-import android.net.Uri
 import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -20,7 +19,6 @@ internal interface SettingsHost {
     val hostActivity: Activity
 
     fun clearStatus()
-    fun setStatus(message: String)
     fun inflatePage(): View
     fun addPage(page: View)
     fun inflateDriveRow(): View
@@ -171,14 +169,14 @@ internal class SettingsPage(private val host: SettingsHost) {
             pill.text = "在用"
             pill.setBackgroundResource(R.drawable.bg_chip_on)
             pill.setTextColor(activity.color(R.color.accentInk))
-            host.setStatus(if (baidu) {
+            status.text = if (baidu) {
                 val tail = if (host.account().length <= 4) "账号 ${host.account()}"
                 else "账号 …${host.account().takeLast(4)}"
                 val nickname = host.accountName().trim()
                 if (nickname.isNotEmpty()) "已登录 · $nickname（$tail）" else "已登录 · $tail"
             } else {
                 "已登录 · Cookie 有效"
-            })
+            }
             count.text = "$sources 个来源"
             action.text = "退出登录"
             action.setTextColor(activity.color(R.color.danger))
@@ -189,7 +187,7 @@ internal class SettingsPage(private val host: SettingsHost) {
             pill.text = "已退出"
             pill.setBackgroundResource(R.drawable.bg_chip)
             pill.setTextColor(activity.color(R.color.ink3))
-            host.setStatus("暂未使用 · 数据已保留")
+            status.text = "暂未使用 · 数据已保留"
             count.text = "保留 $sources 个来源"
             action.text = "登录"
             action.setTextColor(activity.color(R.color.accentInk))
