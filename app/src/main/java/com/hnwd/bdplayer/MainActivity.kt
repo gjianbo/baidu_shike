@@ -116,6 +116,12 @@ class MainActivity : AppCompatActivity() {
     /** 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。 */
     private val diskWrites by lazy { DiskMutationSection(MutationHost()) }
 
+    /** 文档（PDF）预览：取址 -> 下载 -> 打开阅读器。 */
+    private var pdfPreviewRef: PdfPreviewSection? = null
+    private val pdfPreview: PdfPreviewSection
+        get() = pdfPreviewRef ?: PdfPreviewSection(PdfPreviewHostAdapter(), mediaLinks, mediaAddresses)
+            .also { pdfPreviewRef = it }
+
     /** 媒体取址（群组 sharedownload / 我的网盘下载签名 / 验证码），三条预览链共用。 */
     private val mediaLinks by lazy { MediaLinkSection(MediaLinkHostAdapter()) }
 
@@ -144,11 +150,8 @@ class MainActivity : AppCompatActivity() {
     private val renewalResolver = VideoStreamResolver()
     private var diskRenewAttempts = 0
     private var lastDiskRenewAt = 0L
-    private val pdfFetcher by lazy { PdfFileFetcher(this) }
     private val imageFetcher by lazy { ImageFileFetcher(this) }
     private val mediaAddresses by lazy { MediaAddressCache(this) }
-    private var pdfLoading: AlertDialog? = null
-    private var pdfOpenId = 0
     private var imageLoading: AlertDialog? = null
     private var imageOpenId = 0
     private var imageViewerEntries: List<PanEntry> = emptyList()
@@ -2488,7 +2491,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun invalidateAccount() {
-        pdfOpenId++
+        pdfPreviewRef?.close()
         cancelImageLoading()
         accountProbeId++
         courseRequestId++
@@ -2517,11 +2520,6 @@ class MainActivity : AppCompatActivity() {
         renewalResolver.cancel()
         videoLoading?.dismiss()
         videoLoading = null
-        if (pdfLoading != null) {
-            pdfFetcher.cancel()
-            pdfLoading?.dismiss()
-            pdfLoading = null
-        }
     }
 
     private fun verifyAndRefresh(force: Boolean = false) {
@@ -3282,7 +3280,7 @@ class MainActivity : AppCompatActivity() {
             }
             MediaKind.VIDEO -> startVideo(entry)
             MediaKind.AUDIO -> resolveAudio(entry)
-            MediaKind.PDF -> openPdf(entry)
+            MediaKind.PDF -> pdfPreview.open(entry)
             MediaKind.IMAGE -> openImage(entry, entries)
             MediaKind.DOCUMENT -> AlertDialog.Builder(this)
                 .setTitle(entry.name)
@@ -4168,201 +4166,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openPdf(entry: PanEntry) {
-        val quark = entry.provider == SourceProvider.QUARK
-        if (if (quark) !hasActiveSession(SourceProvider.QUARK) else !hasVerifiedAccount()) {
-            status.text = "请确认网盘登录后重试。"
-            return
-        }
-        val id = ++pdfOpenId
-        requestId++
-        mediaLinks.dismissCaptcha(RequestLane.LIST)
-        if (pdfLoading != null) {
-            pdfFetcher.cancel()
-            pdfLoading?.dismiss()
-            pdfLoading = null
-        }
-        val account = playbackAccount(entry)
-        val key = mediaCacheKey(account, entry)
-        PdfCache.find(this, key)?.let {
-            status.text = ""
-            startPdfReader(entry, it)
-            return
-        }
-        if (quark) {
-            downloadPdf(entry, account, id, key)
-            return
-        }
-        mediaAddresses.link(key)?.let {
-            downloadPdf(entry, account, id, key, it, fromCache = true)
-            return
-        }
-        if (!ready) {
-            status.text = "请确认网盘登录后重试。"
-            return
-        }
-        status.text = "正在确认网盘账号…"
-        web.evaluateJavascript(
-            "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
-        ) { result ->
-            if (!isCurrentPdf(id, account)) return@evaluateJavascript
-            val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
-            if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
-                requestPdfLink(entry, viewer, id)
-            } else {
-                load(PanApi.viewer()) { json ->
-                    if (!isCurrentPdf(id, account)) return@load
-                    val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
-                    check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
-                    requestPdfLink(entry, uk, id)
-                }
-            }
-        }
-    }
-
-    private fun isCurrentPdf(id: Int, account: String, provider: SourceProvider = SourceProvider.BAIDU) =
-        id == pdfOpenId && !isDestroyed && activityVisible &&
-            if (provider == SourceProvider.QUARK) {
-                account == AccountScope.current && hasActiveSession(provider)
-            } else {
-                account == verifiedAccount && hasVerifiedAccount()
-            }
-
-    private fun requestPdfLink(entry: PanEntry, viewer: String, id: Int) {
-        if (viewer != verifiedAccount) {
-            verifyAndRefresh()
-            return
-        }
-        val key = mediaCacheKey(viewer, entry)
-        fun receive(link: Uri) {
-            if (!isCurrentPdf(id, viewer)) return
-            mediaAddresses.saveLink(key, link)
-            downloadPdf(entry, viewer, id, key, link, fromCache = false)
-        }
-        if (entry.isDisk) {
-            load(
-                PanApi.diskDocview(entry, viewer), lane = RequestLane.LIST,
-                statusHint = "正在获取文档地址…",
-                onFailure = { requestPdfFallback(entry, viewer, id) },
-            ) { json ->
-                if (!isCurrentPdf(id, viewer)) return@load
-                if (json.optInt("need_passwd", 0) == 1) {
-                    status.text = "该文档需要密码，当前版本暂不支持。"
-                    return@load
-                }
-                val link = runCatching { PanApi.parseDocviewLink(json) }.getOrElse {
-                    requestPdfFallback(entry, viewer, id)
-                    return@load
-                }
-                receive(link)
-            }
-            return
-        }
-        if (!entry.isContact && entry.owner.isNotEmpty()) {
-            load(
-                PanApi.groupPdfPreview(entry), post = true, form = PanApi.groupPdfPreviewForm(entry),
-                lane = RequestLane.LIST, statusHint = "正在获取文档地址…",
-                onFailure = { requestPdfFallback(entry, viewer, id) },
-            ) { json ->
-                val link = PanApi.parseGroupPreviewLink(json)
-                if (link == null) requestPdfFallback(entry, viewer, id) else receive(link)
-            }
-        } else {
-            requestPdfFallback(entry, viewer, id)
-        }
-    }
-
-    /** 预览接口不可用时退回下载取址：群文件走 sharedownload，网盘走 /api/download。 */
-    private fun requestPdfFallback(entry: PanEntry, viewer: String, id: Int) {
-        fun isCurrent() = isCurrentPdf(id, viewer)
-        if (!isCurrent()) return
-        val key = mediaCacheKey(viewer, entry)
-        val fail = { if (isCurrent()) status.text = "文档打开失败，请重试。" }
-        fun receive(link: Uri) {
-            if (!isCurrent()) return
-            mediaAddresses.saveLink(key, link)
-            downloadPdf(entry, viewer, id, key, link, fromCache = false, fromFallback = true)
-        }
-        if (!entry.isDisk) {
-            mediaLinks.resolve(entry, viewer, lane = RequestLane.LIST, onFailure = fail) { receive(it) }
-            return
-        }
-        ensureBdstoken(
-            onReady = { token ->
-                if (isCurrent()) {
-                    mediaLinks.requestDiskLink(
-                        entry, token, RequestLane.LIST, ::isCurrent, onFailure = fail,
-                    ) { receive(it) }
-                }
-            },
-            onFailure = fail,
-        )
-    }
-
-    private fun downloadPdf(
-        entry: PanEntry,
-        account: String,
-        id: Int,
-        key: String,
-        link: Uri? = null,
-        fromCache: Boolean = false,
-        fromFallback: Boolean = false,
-    ) {
-        val quark = entry.provider == SourceProvider.QUARK
-        if (!isCurrentPdf(id, account, entry.provider)) return
-        pdfLoading?.dismiss()
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(entry.name)
-            .setMessage("正在下载文档…")
-            .setCancelable(false)
-            .setNegativeButton("取消") { _, _ ->
-                pdfOpenId++
-                pdfFetcher.cancel()
-                pdfLoading = null
-                status.text = ""
-            }
-            .show()
-        pdfLoading = dialog
-        fun complete(result: Result<File>) {
-            if (pdfLoading === dialog) {
-                dialog.dismiss()
-                pdfLoading = null
-            }
-            if (!isCurrentPdf(id, account, entry.provider)) {
-                result.getOrNull()?.let(PdfCache::discard)
-                return
-            }
-            result.mapCatching { temp ->
-                try {
-                    val cached = PdfCache.publish(this, key, temp)
-                    startPdfReader(entry, cached)
-                } finally {
-                    PdfCache.discard(temp)
-                }
-            }.onFailure {
-                if (!quark && it is InvalidPdfLink) {
-                    mediaAddresses.clearLink(key)
-                    if (ready) {
-                        when {
-                            fromCache -> {
-                                requestPdfLink(entry, account, id)
-                                return@onFailure
-                            }
-                            !fromFallback -> {
-                                requestPdfFallback(entry, account, id)
-                                return@onFailure
-                            }
-                        }
-                    }
-                }
-                val message = it.message ?: "文档打开失败，请重试。"
-                status.text = message
-                if (quark) toast(message)
-            }
-        }
-        if (quark) pdfFetcher.startQuark(entry.fileId, ::complete)
-        else pdfFetcher.start(requireNotNull(link), ::complete)
-    }
 
     private fun startPdfReader(entry: PanEntry, file: File) {
         val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
@@ -5885,15 +5688,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         activityVisible = false
-        pdfOpenId++
+        pdfPreviewRef?.close()
         cancelImageLoading()
         mediaLinks.dismissAnyCaptcha()
         nowPlaying.removeCallbacks(nowPlayingTicker)
-        if (pdfLoading != null) {
-            pdfFetcher.cancel()
-            pdfLoading?.dismiss()
-            pdfLoading = null
-        }
         stoppedVideo = videoPage?.snapshot()
         videoPage?.pauseForBackground()
         videoResolver.cancel()
@@ -5911,8 +5709,7 @@ class MainActivity : AppCompatActivity() {
         videoResolver.close()
         renewalResolver.close()
         videoPage?.close()
-        pdfFetcher.close()
-        pdfLoading?.dismiss()
+        pdfPreviewRef?.release()
         imageFetcher.close()
         imageLoading?.dismiss()
         closeAudioPage()
@@ -5928,6 +5725,57 @@ class MainActivity : AppCompatActivity() {
     /** 账号失效或切换时清掉写操作锁（锁本身在 DiskMutationSection 内部）。 */
     private fun resetSectionGuards() {
         diskWrites.resetGuards()
+    }
+
+    // ===================== PdfPreviewHost =====================
+    // 文档预览需要的最小宿主能力；取址/验证码已下沉到 MediaLinkSection。
+
+    private inner class PdfPreviewHostAdapter : PdfPreviewHost {
+        override val hostActivity: android.app.Activity get() = this@MainActivity
+
+        override fun setStatus(message: String) {
+            status.text = message
+        }
+
+        override fun say(message: String) {
+            hostActivity.toast(message)
+        }
+
+        override fun isVisible() = activityVisible
+        override fun isDestroyed() = this@MainActivity.isDestroyed
+        override fun isReady() = ready
+        override fun account() = verifiedAccount
+        override fun accountVerified() = hasVerifiedAccount()
+        override fun sessionReady(provider: SourceProvider) = hasActiveSession(provider)
+        override fun playbackAccount(entry: PanEntry) = this@MainActivity.playbackAccount(entry)
+
+        override fun bumpListRequest() {
+            requestId++
+        }
+
+        override fun verifyAccount() = verifyAndRefresh()
+
+        override fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) =
+            ensureBdstoken(onReady = onReady, onFailure = onFailure)
+
+        override fun evaluateJavascript(script: String, onResult: (String?) -> Unit) {
+            web.evaluateJavascript(script, onResult)
+        }
+
+        override fun openPdfReader(entry: PanEntry, file: File) = startPdfReader(entry, file)
+
+        override fun fetchJson(
+            url: String,
+            post: Boolean,
+            form: String?,
+            statusHint: String?,
+            lane: RequestLane,
+            onFailure: () -> Unit,
+            onResult: (JSONObject) -> Unit,
+        ) = load(
+            url, post = post, form = form, statusHint = statusHint, lane = lane,
+            onFailure = onFailure, onResult = onResult,
+        )
     }
 
     // ===================== MediaLinkHost =====================
