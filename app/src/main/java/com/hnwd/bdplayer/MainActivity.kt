@@ -274,7 +274,12 @@ class MainActivity : AppCompatActivity() {
     private var observedGroup: Pair<String, String>? = null
     private lateinit var addSourceButton: View
 
-    private data class ShareSource(val id: String, val name: String, val sessionUrl: String = "")
+    private data class ShareSource(
+        val id: String,
+        val name: String,
+        val sessionUrl: String = "",
+        val provider: SourceProvider = SourceProvider.BAIDU,
+    )
 
     private data class SheetChoice(
         val title: String,
@@ -1082,10 +1087,15 @@ class MainActivity : AppCompatActivity() {
         val stored = JSONArray(prefs.getString(AccountScope.key("share_sources"), "[]") ?: "[]")
         val sources = List(stored.length()) { index ->
             val item = stored.getJSONObject(index)
-            ShareSource(item.getString("id"), item.getString("name"), item.optString("session"))
+            val id = item.getString("id")
+            // 老数据没有 provider 字段：从前缀/id 形态推断，裸 id 视为百度。
+            val provider = item.optString("provider").takeIf { it.isNotEmpty() }
+                ?.let { runCatching { SourceProvider.valueOf(it) }.getOrNull() }
+                ?: providerOfSourceId(id)
+            ShareSource(id, item.getString("name"), item.optString("session"), provider)
         }
         return if (gid.isNotEmpty() && sources.none { it.id == gid }) {
-            listOf(ShareSource(gid, "原群文件库")) + sources
+            listOf(ShareSource(gid, "原群文件库", provider = providerOfSourceId(gid))) + sources
         } else sources
     }
 
@@ -1238,7 +1248,13 @@ class MainActivity : AppCompatActivity() {
     private fun saveShareSources(sources: List<ShareSource>, activeGroup: String) {
         val entries = JSONArray()
         sources.forEach {
-            entries.put(JSONObject().put("id", it.id).put("name", it.name).put("session", it.sessionUrl))
+            entries.put(
+                JSONObject()
+                    .put("id", it.id)
+                    .put("name", it.name)
+                    .put("session", it.sessionUrl)
+                    .put("provider", it.provider.name),
+            )
         }
         getSharedPreferences("account_scope", MODE_PRIVATE).edit()
             .putString(AccountScope.key("share_sources"), entries.toString())

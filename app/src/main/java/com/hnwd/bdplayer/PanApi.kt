@@ -11,8 +11,47 @@ internal enum class EntryOrigin { GROUP, DISK }
 
 internal const val DISK_SOURCE_ID = "disk"
 internal const val CONTACT_SOURCE_PREFIX = "contact-"
-internal fun isContactSource(id: String) = id.startsWith(CONTACT_SOURCE_PREFIX)
-internal fun isShareSourceId(id: String) = id.matches(Regex("(?:contact-)?[0-9]{1,24}"))
+
+/** 来源所属网盘。首版只支持百度 / 夸克两种。 */
+internal enum class SourceProvider { BAIDU, QUARK }
+
+internal const val PREFIX_BAIDU = "baidu:"
+internal const val PREFIX_QUARK = "quark:"
+
+/** 带前缀的来源 id，供跨网盘混装时区分；裸 id 视为百度，保证老数据兼容。 */
+internal fun qualifySourceId(provider: SourceProvider, rawId: String): String =
+    when {
+        rawId.startsWith(PREFIX_BAIDU) || rawId.startsWith(PREFIX_QUARK) -> rawId
+        provider == SourceProvider.QUARK -> PREFIX_QUARK + rawId
+        else -> PREFIX_BAIDU + rawId
+    }
+
+/** 剥掉 provider 前缀，得到可传给各网盘 API 的裸 id（百度 gid / 夸克 fid）。 */
+internal fun rawSourceId(id: String): String =
+    when {
+        id.startsWith(PREFIX_BAIDU) -> id.removePrefix(PREFIX_BAIDU)
+        id.startsWith(PREFIX_QUARK) -> id.removePrefix(PREFIX_QUARK)
+        else -> id
+    }
+
+/** 从前缀推断所属网盘；无前缀（老数据）一律视为百度。 */
+internal fun providerOfSourceId(id: String): SourceProvider =
+    if (id.startsWith(PREFIX_QUARK)) SourceProvider.QUARK else SourceProvider.BAIDU
+
+internal fun isContactSource(id: String) = rawSourceId(id).startsWith(CONTACT_SOURCE_PREFIX)
+
+/**
+ * 来源 id 合法性：带前缀时按前缀校验本体，无前缀时走老规则。
+ * 百度：可选 contact- 前缀 + 1~24 位数字；夸克：8~64 位十六进制 fid。
+ */
+internal fun isShareSourceId(id: String): Boolean {
+    val raw = rawSourceId(id)
+    return when {
+        id.startsWith(PREFIX_QUARK) -> raw.matches(Regex("[0-9a-fA-F]{8,64}"))
+        raw.matches(Regex("(?:contact-)?[0-9]{1,24}")) -> true
+        else -> false
+    }
+}
 
 internal data class PanEntry(
     val gid: String,

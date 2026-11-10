@@ -131,7 +131,12 @@ internal object BackupStore {
                 sources.put(
                     JSONObject()
                         .put("id", item.optString("id"))
-                        .put("name", item.optString("name")),
+                        .put("name", item.optString("name"))
+                        .put(
+                            "provider",
+                            item.optString("provider").takeIf { it.isNotEmpty() }
+                                ?: providerOfSourceId(item.optString("id")).name,
+                        ),
                 )
             }
         }
@@ -221,10 +226,16 @@ internal object BackupStore {
         val sources = JSONArray()
         for (index in 0 until stored.length()) {
             val item = stored.getJSONObject(index)
+            val id = item.getString("id")
             sources.put(
                 JSONObject()
-                    .put("id", item.getString("id"))
+                    .put("id", id)
                     .put("name", item.getString("name"))
+                    .put(
+                        "provider",
+                        item.optString("provider").takeIf { it.isNotEmpty() }
+                            ?: providerOfSourceId(id).name,
+                    )
                     .put("session", ""),
             )
         }
