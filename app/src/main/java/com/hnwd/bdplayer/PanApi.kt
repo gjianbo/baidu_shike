@@ -73,6 +73,21 @@ internal data class PanEntry(
         if (owner == viewer) gid.removePrefix(CONTACT_SOURCE_PREFIX) else viewer
 }
 
+/**
+ * 把夸克文件映射为统一条目。夸克侧没有消息/转存语义，messageId/owner 留空；
+ * size 用字节数字符串，与百度侧保持一致由渲染层格式化。
+ */
+internal fun quarkEntry(file: QuarkFile, sourceId: String): PanEntry = PanEntry(
+    gid = sourceId,
+    messageId = "",
+    owner = "",
+    fileId = file.id,
+    name = file.name,
+    path = file.name,
+    size = if (file.directory) "" else file.size.toString(),
+    directory = file.directory,
+)
+
 internal data class PanSearchHit(
     val entry: PanEntry,
     val parentPath: String,

@@ -2364,7 +2364,7 @@ class MainActivity : AppCompatActivity() {
         } else ""
         if (homeRootKey != null && recentIsEmpty) {
             showingHomeDirectory = false
-            status.text = "群内暂无更新"
+            status.text = if (providerOfSourceId(gid) == SourceProvider.QUARK) "该目录暂无内容" else "群内暂无更新"
             content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
         } else if (cached.isNotEmpty() || (cachedFirst && courseCache.readPage(cacheKey, 1) != null)) {
             if (parent != null) {
@@ -2395,9 +2395,9 @@ class MainActivity : AppCompatActivity() {
                     screen == Screen.GROUPS || contactHome -> renderRootMore(cacheKey)
                 }
             }
-            !ready -> {
+            !hasActiveSession() -> {
                 status.text = if (cached.isNotEmpty()) "$cacheNote · 正在连接网盘"
-                else "正在连接百度网盘。如果列表无法加载，请先登录。"
+                else "正在连接网盘。如果列表无法加载，请先登录。"
             }
             cacheKey.isNotEmpty() && parent == null && !force && screen == Screen.GROUPS &&
                 courseCache.isFresh(cacheKey, CACHE_TTL_MS) &&
@@ -2708,6 +2708,10 @@ class MainActivity : AppCompatActivity() {
     ) {
         val checkToken = ++homeCheckToken
         homeCheckInFlight = true
+        if (providerOfSourceId(gid) == SourceProvider.QUARK) {
+            startQuarkHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty, checkToken)
+            return
+        }
         load(
             PanApi.recent(gid),
             statusHint = "正在检查最近更新…",
@@ -2724,8 +2728,50 @@ class MainActivity : AppCompatActivity() {
                 } else cacheFailure(cacheKey)
             },
         ) { json ->
-            applyHomeRecent(json, cacheKey, homeRootKey, force, checkToken)
+            applyHomeRecentEntries(PanApi.parseRecent(json), cacheKey, homeRootKey, force, checkToken)
         }
+    }
+
+    /**
+     * 夸克没有 recent 接口：直接列监控目录第一层，按 mtime 客户端倒序取 Top N。
+     * 结果与百度侧走同一个 [applyHomeRecentEntries]，渲染路径完全复用。
+     */
+    private fun startQuarkHomeCheck(
+        force: Boolean,
+        cacheKey: String,
+        homeRootKey: String,
+        cached: List<PanEntry>,
+        recentIsEmpty: Boolean,
+        checkToken: Int,
+    ) {
+        val sourceId = gid
+        Thread {
+            val result = runCatching {
+                val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
+                val page = session.execute(session.list(rawSourceId(sourceId), 1, 50))
+                page.items
+                    .sortedByDescending { it.mtime }
+                    .take(50)
+                    .map { quarkEntry(it, sourceId) }
+            }
+            runOnUiThread {
+                if (checkToken != homeCheckToken) {
+                    homeCheckInFlight = false
+                    return@runOnUiThread
+                }
+                result.onFailure {
+                    homeCheckInFlight = false
+                    if (recentIsEmpty) {
+                        status.text = "无法检查更新，请稍后重试"
+                    } else if (cached.isEmpty()) {
+                        status.text = "无法加载监控目录更新，请稍后重试"
+                        content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
+                    } else cacheFailure(cacheKey)
+                }.onSuccess { entries ->
+                    applyHomeRecentEntries(entries, cacheKey, homeRootKey, force, checkToken)
+                }
+            }
+        }.start()
     }
 
     private fun maybeCheckHomeInBackground() {
@@ -2740,8 +2786,8 @@ class MainActivity : AppCompatActivity() {
         startHomeCheck(false, cacheKey, "roots:$gid", cached, recentIsEmpty)
     }
 
-    private fun applyHomeRecent(
-        json: JSONObject,
+    private fun applyHomeRecentEntries(
+        fresh: List<PanEntry>,
         cacheKey: String,
         homeRootKey: String,
         force: Boolean,
@@ -2754,7 +2800,6 @@ class MainActivity : AppCompatActivity() {
         clearHomeUpdatePrompt()
         val previous = homeDisplayedEntries
         val previousIds = previous.map(::entryKey).toHashSet()
-        val fresh = PanApi.parseRecent(json)
         val changed = courseCache.writeNewFirst(cacheKey, 1, fresh)
         if (fresh.isEmpty()) {
             showingHomeDirectory = false
@@ -2763,7 +2808,7 @@ class MainActivity : AppCompatActivity() {
             filterBar.visibility = View.GONE
             filterCount.text = ""
             sortButton.visibility = View.GONE
-            status.text = "群内暂无更新"
+            status.text = if (providerOfSourceId(gid) == SourceProvider.QUARK) "该目录暂无内容" else "群内暂无更新"
             content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
             return
         }

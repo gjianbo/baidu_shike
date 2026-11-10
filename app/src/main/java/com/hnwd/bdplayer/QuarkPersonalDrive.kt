@@ -7,7 +7,14 @@ import java.net.URL
 import org.json.JSONArray
 import org.json.JSONObject
 
-internal data class QuarkFile(val id: String, val name: String, val directory: Boolean)
+internal data class QuarkFile(
+    val id: String,
+    val name: String,
+    val directory: Boolean,
+    val size: Long = 0,
+    /** 更新时间（毫秒），取 l_updated_at 退化到 l_created_at；用于「最新更新」客户端排序。 */
+    val mtime: Long = 0,
+)
 internal data class QuarkPlayback(val uri: Uri, val hls: Boolean)
 internal class QuarkLoginRequired : Exception("请登录夸克网盘后重试")
 internal class QuarkMutationPending : Exception("网盘仍在处理，请稍后刷新确认结果")
@@ -51,7 +58,14 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
             val list = data.getJSONArray("list")
             val items = List(list.length()) { index ->
                 val item = list.getJSONObject(index)
-                QuarkFile(item.getString("fid"), item.getString("file_name"), item.getBoolean("dir"))
+                QuarkFile(
+                    id = item.getString("fid"),
+                    name = item.getString("file_name"),
+                    directory = item.getBoolean("dir"),
+                    size = item.optLong("size", 0L),
+                    mtime = item.optLong("l_updated_at", 0L).takeIf { it > 0 }
+                        ?: item.optLong("l_created_at", 0L),
+                )
             }
             val metadata = data.optJSONObject("metadata")
             val actualSize = metadata?.optInt("_size", size)?.takeIf { it > 0 } ?: size
