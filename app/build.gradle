@@ -53,7 +53,19 @@ kotlin {
     jvmToolchain(17)
 }
 
+android {
+    testOptions {
+        // 只测不碰 Android API 的纯逻辑（EntryUtils / PanApi 的构造与解析），
+        // 不开 returnDefaultValues：真踩到 android.* 应当直接报错，而不是静默返回 0 / ""。
+        unitTests.all {
+            testLogging { events 'failed', 'skipped' }
+        }
+    }
+}
+
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
+
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'
     implementation 'androidx.media3:media3-datasource-okhttp:1.8.0'

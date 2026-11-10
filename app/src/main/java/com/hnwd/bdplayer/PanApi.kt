@@ -163,18 +163,27 @@ internal object PanApi {
     fun thumbResize(raw: String, size: String): String =
         thumbSize.replace(raw) { "${it.groupValues[1]}size=$size" }
 
-    val login: String = Uri.parse("https://wappass.baidu.com/passport?login")
-        .buildUpon()
-        .appendQueryParameter("authsite", "1")
-        .appendQueryParameter("tpl", "netdisk")
-        .appendQueryParameter("smsLoginLink", "1")
-        .appendQueryParameter("display", "mobile")
-        .appendQueryParameter(
-            "u",
-            "https://pan.baidu.com/wap/home?loginform=pass&realName=1&wapBehaviorLog=wap_click_welcome_login&branchType=SMSlogin#/",
-        )
-        .fragment("/password_login")
-        .build().toString()
+    /**
+     * 登录页地址。
+     *
+     * 用 by lazy 而不是直接初始化：`Uri.parse` 是 Android API，放进对象初始化块会让
+     * 整个 PanApi 在类加载时就依赖 android.net.Uri —— 纯函数（kindOf / md5Key / 路径拼接）
+     * 因此无法在 JVM 单测里调用。
+     */
+    val login: String by lazy {
+        Uri.parse("https://wappass.baidu.com/passport?login")
+            .buildUpon()
+            .appendQueryParameter("authsite", "1")
+            .appendQueryParameter("tpl", "netdisk")
+            .appendQueryParameter("smsLoginLink", "1")
+            .appendQueryParameter("display", "mobile")
+            .appendQueryParameter(
+                "u",
+                "https://pan.baidu.com/wap/home?loginform=pass&realName=1&wapBehaviorLog=wap_click_welcome_login&branchType=SMSlogin#/",
+            )
+            .fragment("/password_login")
+            .build().toString()
+    }
 
     fun recent(gid: String) = api(
         "/imbox/file/recentv2", "channel" to "chunlei", "id" to "1", "session_id" to "04_${rawSourceId(gid)}",
