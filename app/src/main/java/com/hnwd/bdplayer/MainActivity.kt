@@ -116,6 +116,19 @@ class MainActivity : AppCompatActivity() {
     /** 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。 */
     private val diskWrites by lazy { DiskMutationSection(MutationHost()) }
 
+    /** 夸克会话是否有效：登录成功后才会种下 __pus / __puus。 */
+    private fun quarkLoggedIn(): Boolean = QuarkPersonalDrive.hasLoginCookie(
+        CookieManager.getInstance().getCookie(QuarkPersonalDrive.HOME),
+    )
+
+    private fun markQuarkEverLogged() {
+        getSharedPreferences("account_scope", MODE_PRIVATE).edit()
+            .putBoolean("quark_ever_logged", true).apply()
+    }
+
+    /** 设置页（账号行 / 主题 / 清记录 / 备份 / 关于）。 */
+    private val settingsPage by lazy { SettingsPage(SettingsHostAdapter()) }
+
     /** 图片预览：签名看图直连 / 原图下载 / 内置查看器。 */
     private var imagePreviewRef: ImagePreviewSection? = null
     private val imagePreview: ImagePreviewSection
@@ -1624,7 +1637,7 @@ class MainActivity : AppCompatActivity() {
                 else -> "无法确认网盘账号，请登录后刷新。"
             }
             if (screen == Screen.SETTINGS) {
-                renderSettings()
+                settingsPage.render()
                 return
             }
             content.addView(headAction("登录$providerName") {
@@ -1703,7 +1716,7 @@ class MainActivity : AppCompatActivity() {
         }
         when {
             screen == Screen.FAVORITES && parent == null -> renderFavorites()
-            screen == Screen.SETTINGS -> renderSettings()
+            screen == Screen.SETTINGS -> settingsPage.render()
             parent == null && gid.isEmpty() -> {
                 status.text = "请从网盘勾选共享来源"
             }
@@ -3617,232 +3630,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Suppress("DEPRECATION")
-    private fun renderSettings() {
-        status.text = ""
-        val page = layoutInflater.inflate(R.layout.view_settings_page, content, false)
-        renderLinkedDrives(page)
-        page.findViewById<View>(R.id.setAddLoginRow).setOnClickListener { openAddLoginSheet() }
-        page.findViewById<TextView>(R.id.setClearValue).text =
-            "${audioHistory.recentAcrossGroups().size + videoHistory.recentAcrossGroups().size} 条"
-        page.findViewById<View>(R.id.setClearRow).setOnClickListener { confirmClearHistory() }
-        page.findViewById<TextView>(R.id.setThemeValue).text = ThemeStore.label(this)
-        page.findViewById<View>(R.id.setThemeRow).setOnClickListener { showThemeDialog() }
-        page.findViewById<View>(R.id.setBackupRow).setOnClickListener {
-            backupLauncher.launch(Intent(this, BackupActivity::class.java))
-        }
-        val version = runCatching {
-            packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
-        }.getOrDefault("")
-        page.findViewById<TextView>(R.id.setAbout).text =
-            "${getString(R.string.app_name)} $version · $packageName"
-        content.addView(page)
-        renderCourseSwitch()
-    }
-
-    private enum class DriveState { NEVER, ACTIVE, DORMANT }
-
-    private val baiduLogoutUrls = listOf(
-        "https://pan.baidu.com", "https://wappass.baidu.com",
-        "https://passport.baidu.com", "https://www.baidu.com", "https://baidu.com",
-    )
-    private val quarkLogoutUrls = listOf(
-        "https://pan.quark.cn", "https://drive-pc.quark.cn",
-        "https://uop.quark.cn", "https://quark.cn",
-    )
-
-    private fun quarkLoggedIn(): Boolean = QuarkPersonalDrive.hasLoginCookie(
-        CookieManager.getInstance().getCookie(QuarkPersonalDrive.HOME),
-    )
-
-    private fun quarkEverLogged(): Boolean =
-        getSharedPreferences("account_scope", MODE_PRIVATE).getBoolean("quark_ever_logged", false)
-
-    private fun markQuarkEverLogged() {
-        getSharedPreferences("account_scope", MODE_PRIVATE).edit()
-            .putBoolean("quark_ever_logged", true).apply()
-    }
-
-    private fun baiduDriveState(): DriveState = when {
-        hasVerifiedAccount() || verifiedAccount.isNotEmpty() -> DriveState.ACTIVE
-        // 退出登录刻意保留 viewer_uk（数据归属锚点），此时按 DORMANT 呈现。
-        AccountScope.current.isNotEmpty() -> DriveState.DORMANT
-        shareSources().any { it.provider == SourceProvider.BAIDU } -> DriveState.DORMANT
-        else -> DriveState.NEVER
-    }
-
-    private fun quarkDriveState(): DriveState = when {
-        quarkLoggedIn() -> DriveState.ACTIVE
-        quarkEverLogged() || shareSources().any { it.provider == SourceProvider.QUARK } -> DriveState.DORMANT
-        else -> DriveState.NEVER
-    }
-
-    private fun renderLinkedDrives(page: View) {
-        val container = page.findViewById<LinearLayout>(R.id.setLinkedContainer)
-        container.removeAllViews()
-        if (quarkLoggedIn()) markQuarkEverLogged()
-        val states = listOf(
-            SourceProvider.BAIDU to baiduDriveState(),
-            SourceProvider.QUARK to quarkDriveState(),
-        )
-        val linked = states.filter { it.second != DriveState.NEVER }
-        if (linked.isEmpty()) {
-            container.addView(emptyDriveRow())
-        } else {
-            linked.forEachIndexed { index, (provider, state) ->
-                if (index > 0) container.addView(driveDivider())
-                container.addView(driveRow(provider, state))
-            }
-        }
-        val hasNever = states.any { it.second == DriveState.NEVER }
-        page.findViewById<View>(R.id.setAddLoginRow).visibility =
-            if (hasNever) View.VISIBLE else View.GONE
-        page.findViewById<TextView>(R.id.setAddLoginHint).text =
-            if (hasNever) "选择还没登录过的网盘类型" else "已没有可添加的网盘"
-    }
-
-    private fun driveDivider(): View = View(this).apply {
-        setBackgroundColor(color(R.color.line))
-        layoutParams = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(1),
-        ).apply { marginStart = dp(69) }
-    }
-
-    private fun emptyDriveRow(): View {
-        val row = layoutInflater.inflate(R.layout.item_settings_drive, null, false)
-        row.isClickable = false
-        row.findViewById<TextView>(R.id.drivePill).visibility = View.GONE
-        row.findViewById<TextView>(R.id.driveName).text = "还没有关联网盘"
-        row.findViewById<TextView>(R.id.driveStatus).text = "点下方「添加登录」开始"
-        row.findViewById<TextView>(R.id.driveCount).visibility = View.GONE
-        row.findViewById<TextView>(R.id.driveAction).visibility = View.GONE
-        return row
-    }
-
-    private fun driveRow(provider: SourceProvider, state: DriveState): View {
-        val row = layoutInflater.inflate(R.layout.item_settings_drive, null, false)
-        val baidu = provider == SourceProvider.BAIDU
-        val icon = row.findViewById<ImageView>(R.id.driveIcon)
-        val pill = row.findViewById<TextView>(R.id.drivePill)
-        val name = row.findViewById<TextView>(R.id.driveName)
-        val status = row.findViewById<TextView>(R.id.driveStatus)
-        val count = row.findViewById<TextView>(R.id.driveCount)
-        val action = row.findViewById<TextView>(R.id.driveAction)
-        name.text = if (baidu) "百度网盘" else "夸克网盘"
-        val sources = shareSources().count { it.provider == provider }
-        if (state == DriveState.ACTIVE) {
-            if (baidu) renderAccountAvatar(icon) else icon.setImageResource(R.drawable.ic_layers)
-            pill.text = "在用"
-            pill.setBackgroundResource(R.drawable.bg_chip_on)
-            pill.setTextColor(color(R.color.accentInk))
-            status.text = if (baidu) {
-                val tail = if (verifiedAccount.length <= 4) "账号 $verifiedAccount"
-                else "账号 …${verifiedAccount.takeLast(4)}"
-                val nickname = verifiedAccountName.trim()
-                if (nickname.isNotEmpty()) "已登录 · $nickname（$tail）" else "已登录 · $tail"
-            } else {
-                "已登录 · Cookie 有效"
-            }
-            count.text = "$sources 个来源"
-            action.text = "退出登录"
-            action.setTextColor(color(R.color.danger))
-            action.setOnClickListener { confirmLogout(provider) }
-            row.setOnClickListener { openSourcesFor(provider) }
-        } else {
-            icon.setImageResource(if (baidu) R.drawable.ic_cloud else R.drawable.ic_layers)
-            pill.text = "已退出"
-            pill.setBackgroundResource(R.drawable.bg_chip)
-            pill.setTextColor(color(R.color.ink3))
-            status.text = "暂未使用 · 数据已保留"
-            count.text = "保留 $sources 个来源"
-            action.text = "登录"
-            action.setTextColor(color(R.color.accentInk))
-            action.setOnClickListener { startLoginFor(provider) }
-            row.setOnClickListener { startLoginFor(provider) }
-        }
-        return row
-    }
-
-    private fun openSourcesFor(provider: SourceProvider) {
-        when (provider) {
-            SourceProvider.BAIDU -> manageBaiduSources()
-            SourceProvider.QUARK -> manageQuarkSources()
-        }
-    }
-
-    private fun startLoginFor(provider: SourceProvider) {
-        when (provider) {
-            SourceProvider.BAIDU -> showLoginDialog(SourceProvider.BAIDU)
-            SourceProvider.QUARK -> {
-                pendingAddProvider = SourceProvider.QUARK
-                quarkLoginLauncher.launch(Intent(this, QuarkDriveActivity::class.java))
-            }
-        }
-    }
-
-    private fun openAddLoginSheet() {
-        val choices = mutableListOf<SheetChoice>()
-        if (baiduDriveState() == DriveState.NEVER) {
-            choices += SheetChoice(
-                "百度网盘",
-                meta = "共享文件库可能在群组或联系人下",
-                tag = SourceProvider.BAIDU,
-            )
-        }
-        if (quarkDriveState() == DriveState.NEVER) {
-            choices += SheetChoice(
-                "夸克网盘",
-                meta = "关注根目录下的文件夹",
-                tag = SourceProvider.QUARK,
-            )
-        }
-        if (choices.isEmpty()) return
-        showChoiceSheet(
-            title = "添加登录",
-            subtitle = "选择还没登录过的网盘类型",
-            choices = choices,
-            onSelect = { choice -> (choice.tag as? SourceProvider)?.let(::startLoginFor) },
-        )
-    }
-
-    private fun confirmLogout(provider: SourceProvider) {
-        val label = if (provider == SourceProvider.BAIDU) "百度网盘" else "夸克网盘"
-        AlertDialog.Builder(this)
-            .setTitle("退出$label")
-            .setMessage("退出只终止会话，已关联的来源和播放记录都会保留，可随时重新登录。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("退出登录") { _, _ ->
-                if (provider == SourceProvider.BAIDU) {
-                    clearCookies(baiduLogoutUrls, "baidu.com")
-                    invalidateAccount()
-                    checkingAccount = false
-                } else {
-                    clearCookies(quarkLogoutUrls, "quark.cn")
-                    markQuarkEverLogged()
-                }
-                pendingAddProvider = null
-                toast("已退出$label，数据已保留")
-                refresh()
-            }
-            .show()
-    }
-
-    /** 只清指定域名的 Cookie，避免误杀另一个网盘会话（百度/夸克共用 CookieManager）。 */
-    private fun clearCookies(urls: List<String>, domain: String) {
-        val manager = CookieManager.getInstance()
-        urls.forEach { url ->
-            val raw = manager.getCookie(url).orEmpty()
-            if (raw.isEmpty()) return@forEach
-            raw.split(';').forEach { part ->
-                val name = part.substringBefore('=').trim()
-                if (name.isEmpty()) return@forEach
-                manager.setCookie(url, "$name=; Max-Age=0; Path=/")
-                manager.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=.$domain")
-            }
-        }
-        manager.flush()
-    }
-
     /**
      * 账号头像：
      * - 接口提供 avatar_url 时加载真实头像；
@@ -5545,6 +5332,98 @@ class MainActivity : AppCompatActivity() {
     /** 账号失效或切换时清掉写操作锁（锁本身在 DiskMutationSection 内部）。 */
     private fun resetSectionGuards() {
         diskWrites.resetGuards()
+    }
+
+    // ===================== SettingsHost =====================
+    // 设置页需要的最小宿主能力：页面容器、账号展示信息与各行的跳转动作。
+
+    private inner class SettingsHostAdapter : SettingsHost {
+        override val hostActivity: android.app.Activity get() = this@MainActivity
+
+        override fun clearStatus() {
+            status.text = ""
+        }
+
+        override fun setStatus(message: String) {
+            status.text = message
+        }
+
+        override fun inflatePage(): View =
+            layoutInflater.inflate(R.layout.view_settings_page, content, false)
+
+        override fun addPage(page: View) = content.addView(page)
+
+        override fun inflateDriveRow(): View =
+            layoutInflater.inflate(R.layout.item_settings_drive, null, false)
+
+        override fun renderCourseSwitch() = this@MainActivity.renderCourseSwitch()
+
+        override fun historyCount() =
+            audioHistory.recentAcrossGroups().size + videoHistory.recentAcrossGroups().size
+
+        override fun themeLabel() = ThemeStore.label(this@MainActivity)
+
+        override fun showThemeDialog() = this@MainActivity.showThemeDialog()
+
+        override fun launchBackup() {
+            backupLauncher.launch(Intent(this@MainActivity, BackupActivity::class.java))
+        }
+
+        override fun appVersionLine(): String {
+            val version = runCatching {
+                packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
+            }.getOrDefault("")
+            return "${getString(R.string.app_name)} $version · $packageName"
+        }
+
+        override fun quarkLoggedIn() = this@MainActivity.quarkLoggedIn()
+        override fun markQuarkEverLogged() = this@MainActivity.markQuarkEverLogged()
+
+        override fun account() = verifiedAccount
+        override fun accountName() = verifiedAccountName
+        override fun accountVerified() = hasVerifiedAccount()
+        override fun shareSources() = this@MainActivity.shareSources()
+        override fun renderAccountAvatar(icon: ImageView) = this@MainActivity.renderAccountAvatar(icon)
+
+        override fun manageSources(provider: SourceProvider) {
+            if (provider == SourceProvider.BAIDU) manageBaiduSources() else manageQuarkSources()
+        }
+
+        override fun startLogin(provider: SourceProvider) {
+            if (provider == SourceProvider.BAIDU) {
+                showLoginDialog(SourceProvider.BAIDU)
+            } else {
+                pendingAddProvider = SourceProvider.QUARK
+                quarkLoginLauncher.launch(Intent(this@MainActivity, QuarkDriveActivity::class.java))
+            }
+        }
+
+        override fun confirmClearHistory() = this@MainActivity.confirmClearHistory()
+
+        override fun invalidateAccount() = this@MainActivity.invalidateAccount()
+
+        override fun setCheckingAccount(checking: Boolean) {
+            checkingAccount = checking
+        }
+
+        override fun clearPendingAddProvider() {
+            pendingAddProvider = null
+        }
+
+        override fun pickFromSheet(
+            title: String,
+            subtitle: String,
+            choices: List<SheetChoice>,
+            onSelect: (SheetChoice) -> Unit,
+        ) = showChoiceSheet(title = title, subtitle = subtitle, choices = choices, onSelect = onSelect)
+
+        override fun settings() = getSharedPreferences("account_scope", MODE_PRIVATE)
+
+        override fun say(message: String) {
+            hostActivity.toast(message)
+        }
+
+        override fun refresh() = this@MainActivity.refresh()
     }
 
     // ===================== ImagePreviewHost =====================
