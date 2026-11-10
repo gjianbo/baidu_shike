@@ -1109,54 +1109,148 @@ class MainActivity : AppCompatActivity() {
                 ?: providerOfSourceId(id)
             ShareSource(id, item.getString("name"), item.optString("session"), provider)
         }
-        return if (gid.isNotEmpty() && sources.none { it.id == gid }) {
+        return if (gid.isNotEmpty() && sources.none { it.id == gid } &&
+            providerOfSourceId(gid) == SourceProvider.BAIDU
+        ) {
             listOf(ShareSource(gid, "原群文件库", provider = providerOfSourceId(gid))) + sources
         } else sources
     }
 
     private fun chooseSource() {
-        if (!hasVerifiedAccount() || !ready) {
-            toast("请先确认百度网盘登录")
+        if (!hasActiveSession()) {
+            toast("请先登录网盘")
             return
         }
-        val account = verifiedAccount
         val sources = shareSources()
         if (sources.isEmpty()) {
             manageSources()
             return
         }
+        // 扁平列表 + 按网盘分组：百度在前（群组/联系人），夸克在后（监控目录）。
+        val ordered = sources.sortedBy { it.provider.ordinal }
         showChoiceSheet(
             title = "切换文件库",
-            subtitle = "选择要浏览的共享来源",
-            choices = sources.map {
-                SheetChoice(it.name, meta = if (isContactSource(it.id)) "联系人" else "群组",
-                    checked = it.id == gid, tag = it)
+            subtitle = "选择要浏览的来源（按网盘分组）",
+            choices = ordered.map {
+                val meta = when (it.provider) {
+                    SourceProvider.QUARK -> "夸克 · 监控目录"
+                    SourceProvider.BAIDU -> if (isContactSource(it.id)) "百度 · 联系人" else "百度 · 群组"
+                }
+                SheetChoice(it.name, meta = meta, checked = it.id == gid, tag = it)
             },
             onSelect = { choice ->
-                if (hasVerifiedAccount() && verifiedAccount == account) {
-                    val source = choice.tag as ShareSource
-                    if (source.sessionUrl.isNotEmpty()) showWeb(source.sessionUrl) else activateGroup(source.id)
-                }
+                (choice.tag as? ShareSource)?.let { selectSource(it) }
             },
             footerActions = listOf(
-                "管理通讯录来源" to { manageSources() },
+                "添加 / 管理来源" to { manageSources() },
                 "打开网页通讯录" to { openContacts() },
             ),
         )
     }
 
+    /** 选中一个来源：夸克只切状态与文案（数据源在 Step 4/5 接入），百度走原有激活流程。 */
+    private fun selectSource(source: ShareSource) {
+        val merged = shareSources()
+        saveShareSources(merged, source.id)
+        when {
+            source.provider == SourceProvider.QUARK -> {
+                gid = source.id
+                renderSourcePicker()
+                toast("已选择夸克监控目录「${source.name}」")
+            }
+            source.sessionUrl.isNotEmpty() -> showWeb(source.sessionUrl)
+            else -> activateGroup(source.id)
+        }
+    }
+
     private fun manageSources() {
+        showChoiceSheet(
+            title = "添加 / 管理来源",
+            subtitle = "选择来源所属网盘",
+            choices = listOf(
+                SheetChoice("百度网盘", meta = "群组 / 联系人", tag = SourceProvider.BAIDU),
+                SheetChoice("夸克网盘", meta = "从根目录勾选监控目录", tag = SourceProvider.QUARK),
+            ),
+            onSelect = { choice ->
+                when (choice.tag as? SourceProvider) {
+                    SourceProvider.QUARK -> manageQuarkSources()
+                    else -> manageBaiduSources()
+                }
+            },
+        )
+    }
+
+    private fun manageBaiduSources() {
         if (!ready || !hasVerifiedAccount()) {
             toast("请先确认百度网盘登录")
             return
         }
         showChoiceSheet(
-            title = "管理通讯录来源",
+            title = "管理百度来源",
             subtitle = "勾选要在 App 中浏览的文件库",
             choices = listOf(SheetChoice("群组"), SheetChoice("联系人")),
             onSelect = { discoverSources(contacts = it.title == "联系人") },
             footerActions = listOf("打开网页通讯录" to { openContacts() }),
         )
+    }
+
+    /** 从夸克网盘根目录勾选最多 5 个目录，存为 provider = QUARK 的来源。 */
+    private fun manageQuarkSources() {
+        val session = QuarkPersonalDrive.openSession()
+        if (session == null) {
+            toast("请先登录夸克网盘")
+            return
+        }
+        toast("正在读取夸克网盘目录…")
+        Thread {
+            val result = runCatching {
+                session.execute(session.list(QuarkPersonalDrive.ROOT, 1, 200))
+            }
+            runOnUiThread {
+                result.onFailure { error ->
+                    toast("读取夸克目录失败：${error.message ?: "未知错误"}")
+                }.onSuccess { page ->
+                    val dirs = page.items.filter { it.directory }
+                    if (dirs.isEmpty()) {
+                        toast("夸克网盘根目录没有子文件夹")
+                        return@onSuccess
+                    }
+                    val checkedIds = shareSources()
+                        .filter { it.provider == SourceProvider.QUARK }
+                        .map { it.id }
+                        .toSet()
+                    showChoiceSheet(
+                        title = "夸克监控目录",
+                        subtitle = "勾选要监控的目录（最多 5 个，仅根目录一层）",
+                        choices = dirs.map {
+                            SheetChoice(
+                                it.name,
+                                meta = "夸克 · 目录",
+                                checked = it.id in checkedIds,
+                                tag = it,
+                            )
+                        },
+                        multi = true,
+                        confirmLabel = "保存",
+                        onConfirm = { selected ->
+                            val picked = selected.mapNotNull { it.tag as? QuarkFile }.take(5)
+                            val others = shareSources().filter { it.provider != SourceProvider.QUARK }
+                            val quark = picked.map {
+                                ShareSource(it.id, it.name, provider = SourceProvider.QUARK)
+                            }
+                            val merged = others + quark
+                            val next = gid.takeIf { current -> merged.any { it.id == current } }
+                                ?: quark.firstOrNull()?.id
+                                ?: others.firstOrNull()?.id.orEmpty()
+                            saveShareSources(merged, next)
+                            gid = next
+                            renderSourcePicker()
+                            toast("已保存 ${quark.size} 个夸克监控目录")
+                        },
+                    )
+                }
+            }
+        }.start()
     }
 
     private fun discoverSources(contacts: Boolean) {
