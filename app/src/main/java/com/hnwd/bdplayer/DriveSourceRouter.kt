@@ -25,11 +25,18 @@ internal object DriveSourceRouter {
     /** 从前缀解析所属网盘；无前缀视为百度。 */
     fun providerOf(sourceId: String): SourceProvider = providerOfSourceId(sourceId)
 
-    /** 状态②：网盘页所属网盘。首版只有百度，Step 6 接入切换。 */
-    fun diskProvider(): SourceProvider = SourceProvider.BAIDU
+    /** 状态②：网盘页所属网盘，由 MainActivity 注入并持久化。 */
+    private var diskProviderReader: () -> SourceProvider = { SourceProvider.BAIDU }
+    private var diskProviderWriter: (SourceProvider) -> Unit = {}
 
-    @Suppress("UNUSED_PARAMETER")
+    fun bindDiskProvider(reader: () -> SourceProvider, writer: (SourceProvider) -> Unit) {
+        diskProviderReader = reader
+        diskProviderWriter = writer
+    }
+
+    fun diskProvider(): SourceProvider = diskProviderReader()
+
     fun setDiskProvider(provider: SourceProvider) {
-        // Step 6 落持久化与列表重载
+        diskProviderWriter(provider)
     }
 }

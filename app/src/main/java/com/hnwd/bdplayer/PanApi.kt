@@ -77,15 +77,21 @@ internal data class PanEntry(
  * 把夸克文件映射为统一条目。夸克侧没有消息/转存语义，messageId/owner 留空；
  * size 用字节数字符串，与百度侧保持一致由渲染层格式化。
  */
-internal fun quarkEntry(file: QuarkFile, sourceId: String): PanEntry = PanEntry(
+internal fun quarkEntry(
+    file: QuarkFile,
+    sourceId: String,
+    origin: EntryOrigin = EntryOrigin.GROUP,
+    parentPath: String = "",
+): PanEntry = PanEntry(
     gid = sourceId,
     messageId = "",
     owner = "",
     fileId = file.id,
     name = file.name,
-    path = file.name,
+    path = if (origin == EntryOrigin.DISK) PanApi.diskPath(parentPath, file.name) else file.name,
     size = if (file.directory) "" else file.size.toString(),
     directory = file.directory,
+    origin = origin,
 )
 
 internal data class PanSearchHit(

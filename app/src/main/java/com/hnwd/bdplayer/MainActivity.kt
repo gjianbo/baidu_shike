@@ -244,6 +244,8 @@ class MainActivity : AppCompatActivity() {
     private var ready = false
     private var requestId = 0
     private var gid = ""
+    /** 网盘页当前网盘，与首页/群组的来源状态相互独立（v0.3 §8 #7）。 */
+    private var diskProvider = SourceProvider.BAIDU
     private var bdstoken = ""
     private var homeGroupChip: TextView? = null
     private lateinit var btnFavorites: View
@@ -320,6 +322,13 @@ class MainActivity : AppCompatActivity() {
         PdfCache.prune(this)
         AccountScope.init(this)
         DriveSourceRouter.bindActiveSource { gid }
+        diskProvider = runCatching {
+            SourceProvider.valueOf(
+                getSharedPreferences("account_scope", MODE_PRIVATE)
+                    .getString(AccountScope.key("disk_provider"), "").orEmpty(),
+            )
+        }.getOrDefault(SourceProvider.BAIDU)
+        DriveSourceRouter.bindDiskProvider({ diskProvider }, { diskProvider = it })
         audioHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE))
         videoHistory = AudioHistory(getSharedPreferences("video_history", MODE_PRIVATE))
         favorites = Favorites(getSharedPreferences("favorites", MODE_PRIVATE))
@@ -784,6 +793,12 @@ class MainActivity : AppCompatActivity() {
         }
     }.getOrDefault(emptyList())
 
+    override fun onResume() {
+        super.onResume()
+        // 从夸克登录页返回后，设置页的网盘登录态需要重算。
+        if (screen == Screen.SETTINGS && ready) refresh()
+    }
+
     private fun showScreen(target: Screen) {
         clearSelectionIfActive()
         if (screen == target) {
@@ -863,9 +878,14 @@ class MainActivity : AppCompatActivity() {
             label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             root.setOnClickListener { showScreen(screens[index]) }
         }
-        shell.findViewById<View>(R.id.btnQuarkDrive).apply {
+        shell.findViewById<TextView>(R.id.btnQuarkDrive).apply {
             visibility = if (screen == Screen.DISK) View.VISIBLE else View.GONE
-            setOnClickListener { startActivity(Intent(this@MainActivity, QuarkDriveActivity::class.java)) }
+            text = when (diskProvider) {
+                SourceProvider.QUARK -> "夸克网盘"
+                SourceProvider.BAIDU -> "百度网盘"
+            }
+            contentDescription = "切换网盘，当前为 $text"
+            setOnClickListener { chooseDiskProvider() }
         }
         renderSourcePicker()
         updateFavoritesBadge()
@@ -2442,6 +2462,49 @@ class MainActivity : AppCompatActivity() {
         renderFavorites()
     }
 
+    /** 网盘页只切网盘，不列来源（v0.3 §0.1 #8）。 */
+    private fun chooseDiskProvider() {
+        val current = diskProvider
+        val baiduReady = hasVerifiedAccount()
+        val quarkReady = QuarkPersonalDrive.hasLoginCookie(
+            CookieManager.getInstance().getCookie(QuarkPersonalDrive.HOME),
+        )
+        showChoiceSheet(
+            title = "切换网盘",
+            subtitle = "只切换网盘，不影响首页与群组的来源",
+            choices = listOf(
+                SheetChoice(
+                    "百度网盘",
+                    meta = if (baiduReady) "已登录" else "未登录",
+                    checked = current == SourceProvider.BAIDU,
+                    tag = SourceProvider.BAIDU,
+                ),
+                SheetChoice(
+                    "夸克网盘",
+                    meta = if (quarkReady) "已登录" else "未登录",
+                    checked = current == SourceProvider.QUARK,
+                    tag = SourceProvider.QUARK,
+                ),
+            ),
+            onSelect = { choice ->
+                val target = choice.tag as? SourceProvider
+                if (target != null && target != current) applyDiskProvider(target)
+            },
+        )
+    }
+
+    private fun applyDiskProvider(target: SourceProvider) {
+        diskProvider = target
+        getSharedPreferences("account_scope", MODE_PRIVATE).edit()
+            .putString(AccountScope.key("disk_provider"), target.name)
+            .apply()
+        folders.clear()
+        courseEntries.clear()
+        courseParentKey = ""
+        tabFolders[Screen.DISK] = emptyList()
+        refreshDisk()
+    }
+
     private fun refreshDisk() {
         requestId++
         clearHomeUpdatePrompt()
@@ -2451,6 +2514,7 @@ class MainActivity : AppCompatActivity() {
         filterCount.text = ""
         content.removeAllViews()
         historyPanel.removeAllViews()
+        status.text = ""
         sortButton.visibility = View.GONE
         showAvailableMediaFilters(emptySet())
         styleContent()
@@ -2460,12 +2524,24 @@ class MainActivity : AppCompatActivity() {
             filterBar.visibility = View.GONE
             sectionRow.visibility = View.GONE
             title.text = "我的网盘"
-            appSub.text = "连接百度网盘后浏览我的网盘"
-            content.addView(headAction("登录百度网盘") { showLoginDialog() })
+            if (diskProvider == SourceProvider.QUARK) {
+                appSub.text = "连接夸克网盘后浏览我的网盘"
+                content.addView(headAction("登录夸克网盘") {
+                    startActivity(Intent(this, QuarkDriveActivity::class.java))
+                })
+            } else {
+                appSub.text = "连接百度网盘后浏览我的网盘"
+                content.addView(headAction("登录百度网盘") { showLoginDialog() })
+            }
             return
         }
         val parent = folders.lastOrNull()
-        val cacheKey = if (parent == null) "disk:roots" else "disk:dir:${parent.fileId}"
+        val cacheKey = when {
+            diskProvider == SourceProvider.QUARK ->
+                if (parent == null) "disk:quark:roots" else "disk:quark:dir:${parent.fileId}"
+            parent == null -> "disk:roots"
+            else -> "disk:dir:${parent.fileId}"
+        }
         val key = parent?.let { "disk:${it.fileId}" }.orEmpty()
         if (key != courseParentKey) {
             courseParentKey = key
@@ -2491,7 +2567,45 @@ class MainActivity : AppCompatActivity() {
                 returnToFolder(folders.lastIndex)
             })
         }
-        loadDiskPage(parent?.path ?: "/", 1, cacheKey)
+        if (diskProvider == SourceProvider.QUARK) {
+            loadQuarkDiskPage(parent?.fileId ?: QuarkPersonalDrive.ROOT, parent?.path ?: "/", cacheKey)
+        } else {
+            loadDiskPage(parent?.path ?: "/", 1, cacheKey)
+        }
+    }
+
+    /**
+     * 夸克网盘列表：首版一次取 200 条、不分页、不写缓存。
+     * 目录下钻沿用 folders 栈，父目录 fid 直接作为 pdir_fid。
+     */
+    private fun loadQuarkDiskPage(dirFid: String, parentPath: String, cacheKey: String) {
+        status.text = "正在读取夸克网盘…"
+        val request = ++requestId
+        Thread {
+            val result = runCatching {
+                val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
+                val page = session.execute(session.list(dirFid, 1, 200))
+                page.items
+                    .sortedWith(compareByDescending<QuarkFile> { it.directory }.thenBy { it.name })
+                    .map { quarkEntry(it, DISK_SOURCE_ID, EntryOrigin.DISK, parentPath) }
+            }
+            runOnUiThread {
+                if (request != requestId || isFinishing || isDestroyed) return@runOnUiThread
+                result.onFailure { error ->
+                    status.text = "无法读取夸克网盘：${error.message ?: "未知错误"}"
+                    if (courseEntries.isEmpty()) {
+                        content.addView(headAction("重新登录夸克网盘") {
+                            startActivity(Intent(this, QuarkDriveActivity::class.java))
+                        })
+                    }
+                }.onSuccess { entries ->
+                    courseEntries.clear()
+                    courseEntries.addAll(entries)
+                    renderCourse()
+                    status.text = if (entries.isEmpty()) "此目录暂无内容" else ""
+                }
+            }
+        }.start()
     }
 
     private fun ensureBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) {
@@ -4702,6 +4816,18 @@ class MainActivity : AppCompatActivity() {
         }
         renderAccountAvatar(page.findViewById(R.id.setAccountAvatar))
         page.findViewById<View>(R.id.setLoginRow).setOnClickListener { showLoginDialog() }
+
+        // 夸克网盘：只看 UC 会话 Cookie（__pus / __puus），匿名 Cookie 不算登录。
+        val quarkLogged = QuarkPersonalDrive.hasLoginCookie(
+            CookieManager.getInstance().getCookie(QuarkPersonalDrive.HOME),
+        )
+        page.findViewById<TextView>(R.id.setQuarkStatus).text =
+            if (quarkLogged) "已登录 · Cookie 有效" else "未登录 · 点此登录夸克网盘"
+        page.findViewById<TextView>(R.id.setQuarkAction).text =
+            if (quarkLogged) "重新登录" else "登录"
+        page.findViewById<View>(R.id.setQuarkRow).setOnClickListener {
+            startActivity(Intent(this, QuarkDriveActivity::class.java))
+        }
         page.findViewById<TextView>(R.id.setGroupValue).text =
             shareSources().size.takeIf { it > 0 }?.let { "$it 个来源" } ?: "未关联"
         page.findViewById<View>(R.id.setGroupRow).setOnClickListener { manageSources() }
