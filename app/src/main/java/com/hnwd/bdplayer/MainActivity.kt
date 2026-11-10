@@ -116,6 +116,12 @@ class MainActivity : AppCompatActivity() {
     /** 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。 */
     private val diskWrites by lazy { DiskMutationSection(MutationHost()) }
 
+    /** 图片预览：签名看图直连 / 原图下载 / 内置查看器。 */
+    private var imagePreviewRef: ImagePreviewSection? = null
+    private val imagePreview: ImagePreviewSection
+        get() = imagePreviewRef ?: ImagePreviewSection(ImagePreviewHostAdapter(), mediaLinks, mediaAddresses)
+            .also { imagePreviewRef = it }
+
     /** 文档（PDF）预览：取址 -> 下载 -> 打开阅读器。 */
     private var pdfPreviewRef: PdfPreviewSection? = null
     private val pdfPreview: PdfPreviewSection
@@ -150,20 +156,16 @@ class MainActivity : AppCompatActivity() {
     private val renewalResolver = VideoStreamResolver()
     private var diskRenewAttempts = 0
     private var lastDiskRenewAt = 0L
-    private val imageFetcher by lazy { ImageFileFetcher(this) }
     private val mediaAddresses by lazy { MediaAddressCache(this) }
-    private var imageLoading: AlertDialog? = null
-    private var imageOpenId = 0
-    private var imageViewerEntries: List<PanEntry> = emptyList()
     private val imageViewerLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             if (result.resultCode != RESULT_OK) return@registerForActivityResult
             val index = result.data?.getIntExtra(ImageViewerActivity.EXTRA_SWITCH_INDEX, -1) ?: -1
-            val entry = imageViewerEntries.getOrNull(index) ?: return@registerForActivityResult
+            val entry = imagePreview.galleryEntry(index) ?: return@registerForActivityResult
             val original = result.data?.getBooleanExtra(ImageViewerActivity.EXTRA_OPEN_ORIGINAL, false) == true
             native.post {
-                if (original) openImageOriginal(entry)
-                else openImage(entry, imageViewerEntries)
+                if (original) imagePreview.openOriginal(entry)
+                else imagePreview.open(entry, imagePreview.entries())
             }
         }
         private var videoLoading: AlertDialog? = null
@@ -2492,7 +2494,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun invalidateAccount() {
         pdfPreviewRef?.close()
-        cancelImageLoading()
+        imagePreviewRef?.close()
         accountProbeId++
         courseRequestId++
         automaticCourseLoad = null
@@ -3281,7 +3283,7 @@ class MainActivity : AppCompatActivity() {
             MediaKind.VIDEO -> startVideo(entry)
             MediaKind.AUDIO -> resolveAudio(entry)
             MediaKind.PDF -> pdfPreview.open(entry)
-            MediaKind.IMAGE -> openImage(entry, entries)
+            MediaKind.IMAGE -> imagePreview.open(entry, entries)
             MediaKind.DOCUMENT -> AlertDialog.Builder(this)
                 .setTitle(entry.name)
             .setMessage("App 内目前支持阅读 PDF。请在百度网盘中打开或下载此文件。")
@@ -4180,187 +4182,6 @@ class MainActivity : AppCompatActivity() {
         status.text = ""
     }
 
-    private fun openImage(entry: PanEntry, entries: List<PanEntry>) {
-        val quark = entry.provider == SourceProvider.QUARK
-        val sessionReady = if (quark) hasActiveSession(SourceProvider.QUARK) else hasVerifiedAccount()
-        if (!sessionReady) {
-            status.text = "请确认网盘登录后重试。"
-            return
-        }
-        val siblings = entries.filter { it.provider == entry.provider && PanApi.kindOf(it) == MediaKind.IMAGE }
-            .toMutableList()
-        val key = entryKey(entry)
-        val position = siblings.indexOfFirst { entryKey(it) == key }
-        if (position < 0) siblings.add(0, entry)
-        imageViewerEntries = siblings
-        if (!quark && entry.isDisk && entry.previewUrl.isEmpty()) {
-            openImageOriginal(entry)
-            return
-        }
-        cancelImageLoading()
-        val account = playbackAccount(entry)
-        val items = siblings.map { image ->
-            ImagePreviewItem(
-                image.fileId, image.name, mediaCacheKey(account, image), image.previewUrl,
-                shareInfoUrl = if (!quark && !image.isDisk) PanApi.imageShareInfo(image) else "",
-                diskDirectory = if (!quark && image.isDisk) image.path.substringBeforeLast('/').ifEmpty { "/" } else null,
-            )
-        }
-        imageViewerLauncher.launch(ImageViewerActivity.galleryIntent(this, items, position.coerceAtLeast(0), entry.provider))
-        status.text = ""
-    }
-
-    private fun openImageOriginal(entry: PanEntry) {
-        if (!hasVerifiedAccount()) {
-            status.text = "请确认网盘登录后重试。"
-            return
-        }
-        cancelImageLoading()
-        val id = imageOpenId
-        requestId++
-        mediaLinks.dismissCaptcha(RequestLane.LIST)
-        val account = playbackAccount(entry)
-        val key = mediaCacheKey(account, entry)
-        val ext = ImageTypes.ext(entry.name)
-        ImageCache.find(this, key, ext)?.let {
-            startImageViewer(entry, it)
-            return
-        }
-        mediaAddresses.link(key)?.let {
-            downloadImage(entry, account, id, key, it, fromCache = true)
-            return
-        }
-        if (!ready) {
-            status.text = "请确认网盘登录后重试。"
-            return
-        }
-        status.text = "正在确认网盘账号…"
-        web.evaluateJavascript(
-            "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
-        ) { result ->
-            if (!isCurrentImage(id, account)) return@evaluateJavascript
-            val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
-            if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
-                requestImageLink(entry, viewer, id)
-            } else {
-                load(PanApi.viewer()) { json ->
-                    if (!isCurrentImage(id, account)) return@load
-                    val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
-                    check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
-                    requestImageLink(entry, uk, id)
-                }
-            }
-        }
-    }
-
-    /** 图片不走 docview/docpreview（PDF 专用），直接取原文件 dlink：群组 sharedownload，我的网盘 /api/download。 */
-    private fun requestImageLink(entry: PanEntry, viewer: String, id: Int) {
-        if (viewer != verifiedAccount) {
-            verifyAndRefresh()
-            return
-        }
-        val key = mediaCacheKey(viewer, entry)
-        fun isCurrent() = isCurrentImage(id, viewer)
-        fun fail() {
-            if (isCurrent()) status.text = "图片打开失败，请重试。"
-        }
-        fun receive(link: Uri) {
-            if (!isCurrent()) return
-            mediaAddresses.saveLink(key, link)
-            downloadImage(entry, viewer, id, key, link)
-        }
-        if (entry.isDisk) {
-            ensureBdstoken(
-                onReady = { token ->
-                    if (isCurrent()) {
-                        mediaLinks.requestDiskLink(
-                            entry, token, RequestLane.LIST, { isCurrent() }, onFailure = { fail() },
-                        ) { receive(it) }
-                    }
-                },
-                onFailure = { fail() },
-            )
-        } else {
-            mediaLinks.resolve(entry, viewer, lane = RequestLane.LIST, onFailure = { fail() }) { receive(it) }
-        }
-    }
-
-    private fun downloadImage(
-        entry: PanEntry,
-        account: String,
-        id: Int,
-        key: String,
-        link: Uri,
-        fromCache: Boolean = false,
-    ) {
-        if (!isCurrentImage(id, account)) return
-        imageLoading?.dismiss()
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(entry.name)
-            .setMessage("正在加载原图…")
-            .setCancelable(false)
-            .setNegativeButton("取消") { _, _ ->
-                cancelImageLoading()
-                status.text = ""
-            }
-            .show()
-        imageLoading = dialog
-        val ext = ImageTypes.ext(entry.name)
-        fun complete(result: Result<File>) {
-            if (imageLoading === dialog) {
-                dialog.dismiss()
-                imageLoading = null
-            }
-            if (!isCurrentImage(id, account)) {
-                result.getOrNull()?.let(ImageCache::discard)
-                return
-            }
-            result.mapCatching { temp ->
-                try {
-                    startImageViewer(entry, ImageCache.publish(this, key, ext, temp))
-                } finally {
-                    ImageCache.discard(temp)
-                }
-            }.onFailure {
-                if (it is InvalidImageLink) {
-                    mediaAddresses.clearLink(key)
-                    if (ready && fromCache) {
-                        requestImageLink(entry, account, id)
-                        return@onFailure
-                    }
-                }
-                val message = it.message ?: "图片打开失败，请重试。"
-                status.text = message
-            }
-        }
-        imageFetcher.start(link, ::complete)
-    }
-
-    private fun startImageViewer(entry: PanEntry, file: File) {
-        // 字段与传给查看器的列表必须完全一致：切图回传的是列表下标
-        if (imageViewerEntries.isEmpty()) imageViewerEntries = listOf(entry)
-        val images = imageViewerEntries
-        val index = images.indexOfFirst { entryKey(it) == entryKey(entry) }.coerceAtLeast(0)
-        imageViewerLauncher.launch(Intent(this, ImageViewerActivity::class.java).apply {
-            putExtra(ImageViewerActivity.EXTRA_FILE, file.absolutePath)
-            putExtra(ImageViewerActivity.EXTRA_TITLE, entry.name)
-            putExtra(ImageViewerActivity.EXTRA_MIME, ImageTypes.mime(ImageTypes.ext(entry.name)))
-            putExtra(ImageViewerActivity.EXTRA_INDEX, index)
-            putExtra(ImageViewerActivity.EXTRA_COUNT, images.size)
-        })
-        status.text = ""
-    }
-
-    private fun isCurrentImage(id: Int, account: String) =
-        id == imageOpenId && !isDestroyed && activityVisible &&
-            account == verifiedAccount && hasVerifiedAccount()
-
-    private fun cancelImageLoading() {
-        imageOpenId++
-        imageFetcher.cancel()
-        imageLoading?.dismiss()
-        imageLoading = null
-    }
 
     private fun startBackgroundAudio(entry: PanEntry, uri: Uri, openPlayer: Boolean, playlist: ByteArray? = null) {
         val player = controller
@@ -5689,7 +5510,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         activityVisible = false
         pdfPreviewRef?.close()
-        cancelImageLoading()
+        imagePreviewRef?.close()
         mediaLinks.dismissAnyCaptcha()
         nowPlaying.removeCallbacks(nowPlayingTicker)
         stoppedVideo = videoPage?.snapshot()
@@ -5710,8 +5531,7 @@ class MainActivity : AppCompatActivity() {
         renewalResolver.close()
         videoPage?.close()
         pdfPreviewRef?.release()
-        imageFetcher.close()
-        imageLoading?.dismiss()
+        imagePreviewRef?.release()
         closeAudioPage()
         controllerFuture?.let(MediaController::releaseFuture)
         controller = null
@@ -5725,6 +5545,53 @@ class MainActivity : AppCompatActivity() {
     /** 账号失效或切换时清掉写操作锁（锁本身在 DiskMutationSection 内部）。 */
     private fun resetSectionGuards() {
         diskWrites.resetGuards()
+    }
+
+    // ===================== ImagePreviewHost =====================
+    // 图片预览需要的最小宿主能力；导航只经 launchViewer 交给已注册的 launcher。
+
+    private inner class ImagePreviewHostAdapter : ImagePreviewHost {
+        override val hostActivity: android.app.Activity get() = this@MainActivity
+
+        override fun setStatus(message: String) {
+            status.text = message
+        }
+
+        override fun isVisible() = activityVisible
+        override fun isDestroyed() = this@MainActivity.isDestroyed
+        override fun isReady() = ready
+        override fun account() = verifiedAccount
+        override fun accountVerified() = hasVerifiedAccount()
+        override fun sessionReady(provider: SourceProvider) = hasActiveSession(provider)
+        override fun playbackAccount(entry: PanEntry) = this@MainActivity.playbackAccount(entry)
+
+        override fun bumpListRequest() {
+            requestId++
+        }
+
+        override fun verifyAccount() = verifyAndRefresh()
+
+        override fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) =
+            ensureBdstoken(onReady = onReady, onFailure = onFailure)
+
+        override fun evaluateJavascript(script: String, onResult: (String?) -> Unit) {
+            web.evaluateJavascript(script, onResult)
+        }
+
+        override fun launchViewer(intent: Intent) = imageViewerLauncher.launch(intent)
+
+        override fun fetchJson(
+            url: String,
+            post: Boolean,
+            form: String?,
+            statusHint: String?,
+            lane: RequestLane,
+            onFailure: () -> Unit,
+            onResult: (JSONObject) -> Unit,
+        ) = load(
+            url, post = post, form = form, statusHint = statusHint, lane = lane,
+            onFailure = onFailure, onResult = onResult,
+        )
     }
 
     // ===================== PdfPreviewHost =====================
