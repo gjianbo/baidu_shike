@@ -23,7 +23,10 @@ android {
         minSdk 29
         targetSdk 35
         versionCode 24
-        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('0.1.23')
+        // CI 不带 -P，直接用这个默认值构建，并要求 Git tag 等于 v<versionName>；
+        // 本地发版走 build-release.sh --version。发新版本时这里和 versionCode 要一起改，
+        // 否则会产出比线上更旧的版本号（v1.0.1 的包已经发过）。
+        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('1.0.1')
     }
 
     compileOptions {

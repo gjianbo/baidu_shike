@@ -3,6 +3,7 @@ package com.hnwd.bdplayer
 import android.content.Context
 import android.content.Intent
 import android.annotation.SuppressLint
+import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
@@ -41,6 +42,9 @@ private const val QUARK_H5_LOGIN_URL =
 
 /** 官方 web 的 doAuth 兑换：GET /account/info?st= 由 pan 后端校验票据并写 .quark.cn 会话 Cookie。 */
 private const val QUARK_ST_EXCHANGE_PREFIX = "https://pan.quark.cn/account/info?st="
+
+/** H5 登录桥的名字（页面侧通过 window.__bd_android 访问）。 */
+private const val BRIDGE_NAME = "__bd_android"
 
 /** 捕获 H5 登录页 pm 模式的 postMessage；service_ticket 是 32 位原始字符串，与官方父窗口同判据。 */
 private val H5_ST_HOOK = """
@@ -429,6 +433,10 @@ class QuarkDriveActivity : AppCompatActivity() {
                 if (!Regex("^[0-9a-zA-Z]{32}$").matches(st)) return
                 handler.post {
                     if (!h5Mode || exchanged || loginDialog == null) return@post
+                    // 桥只挂在登录页上，登录链路还会经过微信 / 阿里验证码等域名。
+                    // 再校验一次当前页面域名，避免第三方页面伪造 ticket 把账号换成别人的。
+                    val host = Uri.parse(web.url.orEmpty()).host.orEmpty().lowercase()
+                    if (host != "quark.cn" && !host.endsWith(".quark.cn")) return@post
                     exchanged = true
                     message.text = "验证通过，正在换取登录会话…"
                     message.visibility = View.VISIBLE
@@ -437,7 +445,15 @@ class QuarkDriveActivity : AppCompatActivity() {
                 }
             }
         }
-        web.addJavascriptInterface(bridge, "__bd_android")
+        // 桥只在 H5 登录期间挂载。登录链路会跨到微信 / UC / 阿里验证码等域名，
+        // 全局挂载等于把「用任意 ticket 换会话」的能力交给这些页面（登录 CSRF）。
+        fun attachBridge() {
+            web.removeJavascriptInterface(BRIDGE_NAME)
+            web.addJavascriptInterface(bridge, BRIDGE_NAME)
+        }
+        fun detachBridge() {
+            web.removeJavascriptInterface(BRIDGE_NAME)
+        }
         var attempt = 0
         var loading = false
         var focusLogin = true
@@ -469,6 +485,7 @@ class QuarkDriveActivity : AppCompatActivity() {
         fun openHome() {
             h5Mode = false
             exchanged = false
+            detachBridge()
             web.settings.userAgentString = desktopUa
             startLoading()
             web.loadUrl(QuarkPersonalDrive.HOME)
@@ -478,6 +495,7 @@ class QuarkDriveActivity : AppCompatActivity() {
             h5Mode = true
             exchanged = false
             web.settings.userAgentString = mobileUa
+            attachBridge()
             startLoading()
             message.text = "输入手机号并填写短信验证码，成功后自动返回。"
             web.loadUrl(QUARK_H5_LOGIN_URL)
