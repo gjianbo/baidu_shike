@@ -138,16 +138,31 @@ class EntryJsonTest {
     }
 
     @Test
-    fun `缺少必填字段时整表被丢弃`() {
-        // 现状行为：decodeEntries 用一个 runCatching 包住整个列表，
-        // 任何一条缺 gid 都会让 100 条收藏一起消失。这里钉住是为了"改之前先知道"。
+    fun `单条缺必填字段只跳过这一条`() {
+        // 收藏/进度是整份覆盖写的：一条脏数据丢掉整表等于「收藏全没了」，
+        // 所以解码必须逐条容错，只丢坏的那条。
         val raw = JSONArray()
             .put(
                 JSONObject().put("gid", "1").put("message", "m").put("owner", "o")
-                    .put("file", "f").put("name", "ok.mp3"),
+                    .put("file", "ok-1").put("name", "ok1.mp3"),
             )
             .put(JSONObject().put("name", "missing-gid.mp3"))
+            .put(
+                JSONObject().put("gid", "3").put("message", "m").put("owner", "o")
+                    .put("file", "ok-3").put("name", "ok3.mp3"),
+            )
 
+        val restored = decodeEntries(raw.toString())
+
+        assertEquals(2, restored.size)
+        assertEquals(listOf("ok-1", "ok-3"), restored.map { it.fileId })
+    }
+
+    @Test
+    fun `全部条目都坏时返回空表而不抛异常`() {
+        val raw = JSONArray()
+            .put(JSONObject().put("name", "a.mp3"))
+            .put(JSONObject().put("name", "b.mp3"))
         assertEquals(emptyList<PanEntry>(), decodeEntries(raw.toString()))
     }
 

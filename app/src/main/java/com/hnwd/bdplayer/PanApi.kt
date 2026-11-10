@@ -667,6 +667,9 @@ internal object PanApi {
     fun parseRoots(json: JSONObject, gid: String): List<PanEntry> {
         val records = json.getJSONObject("records")
         if (isContactSource(gid)) {
+            // 联系人文件按消息分组返回，同一份文件常出现在多条消息里（重复发送 / 多次转发）。
+            // 去重必须跨消息做，否则列表里会出现两行同一个文件、点哪行都进同一个目录。
+            // key 用「发送者 + 文件 id」：fs_id 只在自己网盘内唯一，不同发送者可能撞号。
             return records.getJSONArray("list").objects().flatMap { message ->
                 val messageId = message.optString("msg_id")
                 val owner = message.optString("from_uk")
@@ -680,7 +683,7 @@ internal object PanApi {
                 ).flatMap { it.objects() }
                     .distinctBy { it.getString("fs_id") }
                     .map { file -> entry(file, gid, messageId, owner) }
-            }
+            }.distinctBy { it.owner to it.fileId }
         }
         return records.getJSONArray("msg_list").objects().flatMap { message ->
             message.getJSONArray("file_list").objects().map { file ->

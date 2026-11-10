@@ -222,11 +222,31 @@ class PanApiParsingTest {
 
         val entries = PanApi.parseRoots(payload, gid = "contact-777")
 
-        // 消息内去重：m2 的 fs_id=1 与自身重复 -> 每消息内部唯一；
-        // 消息间不去重（m1 与 m2 都含 fs_id=1）；msg_id / from_uk 为空的消息整体丢弃
-        assertEquals(listOf("1", "1", "2", "3"), entries.map { it.fileId })
-        assertEquals(listOf("m1", "m2", "m2", "m3"), entries.map { it.messageId })
+        // 同一份文件出现在多条消息里只保留第一次（m1 的那条），
+        // 否则列表会出现两行同一个文件；msg_id / from_uk 为空的消息整体丢弃
+        assertEquals(listOf("1", "2", "3"), entries.map { it.fileId })
+        assertEquals(listOf("m1", "m2", "m3"), entries.map { it.messageId })
         assertTrue(entries.all { it.gid == "contact-777" })
+    }
+
+    @Test
+    fun `联系人目录去重按发送者分组`() {
+        // fs_id 只在自己网盘内唯一：不同发送者的同号文件是不同文件，不能被合并
+        val payload = json(
+            """
+            {"records":{"list":[
+              {"msg_id":"m1","from_uk":"777","filelist":{"list":[
+                {"fs_id":"1","server_filename":"a.mp3","path":"/a.mp3","isdir":"0"}]}},
+              {"msg_id":"m2","from_uk":"888","filelist":{"list":[
+                {"fs_id":"1","server_filename":"b.mp3","path":"/b.mp3","isdir":"0"}]}}
+            ]}}
+            """.trimIndent(),
+        )
+
+        val entries = PanApi.parseRoots(payload, gid = "contact-777")
+
+        assertEquals(listOf("a.mp3", "b.mp3"), entries.map { it.name })
+        assertEquals(listOf("777", "888"), entries.map { it.owner })
     }
 
     @Test

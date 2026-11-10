@@ -104,8 +104,15 @@ class MainActivity : AppCompatActivity() {
 
     private var writeRequestId = 0
     private var deleteCheckRequestId = 0
-    /** 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。 */
-    private val diskWrites by lazy { DiskMutationSection(MutationHost()) }
+    /**
+     * 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。
+     *
+     * 用可空引用 + getter，而不是 by lazy：账号失效时要重置写锁，那时如果按需创建，
+     * 会为了「清一个还没建过的锁」先造出一个 Section。销毁路径同理只碰已存在的实例。
+     */
+    private var diskWritesRef: DiskMutationSection? = null
+    private val diskWrites: DiskMutationSection
+        get() = diskWritesRef ?: DiskMutationSection(MutationHost()).also { diskWritesRef = it }
 
     /** 夸克会话是否有效：登录成功后才会种下 __pus / __puus。 */
     private fun quarkLoggedIn(): Boolean = QuarkPersonalDrive.hasLoginCookie(
@@ -2991,15 +2998,6 @@ class MainActivity : AppCompatActivity() {
         content.setBackgroundColor(color(R.color.transparent))
     }
 
-    private fun addGroupTitle(value: String) {
-        content.addView(TextView(this).apply {
-            text = value
-            textSize = 11f
-            setTextColor(color(R.color.ink3))
-            setPadding(0, dp(8), 0, dp(6))
-        })
-    }
-
     private fun addCourseRows(
         container: LinearLayout,
         entries: List<PanEntry>,
@@ -5322,7 +5320,8 @@ class MainActivity : AppCompatActivity() {
 
     /** 账号失效或切换时清掉写操作锁（锁本身在 DiskMutationSection 内部）。 */
     private fun resetSectionGuards() {
-        diskWrites.resetGuards()
+        // 只碰已存在的实例：账号失效时可能还没发生过任何写操作
+        diskWritesRef?.resetGuards()
     }
 
     // ===================== SettingsHost =====================

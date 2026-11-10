@@ -116,17 +116,25 @@ internal fun encodeEntries(entries: List<PanEntry>): String = JSONArray().apply 
     }
 }.toString()
 
+/**
+ * 解码条目列表。
+ *
+ * 容错分两层：外层挡住「根本不是 JSON」，内层逐条挡「这一条缺字段」。
+ * 内层这层是必要的：收藏/进度是整份覆盖写的，若一条脏数据就让整表返回空，
+ * 用户会看到「收藏全没了」——丢一条远好过丢一整个列表。
+ */
 internal fun decodeEntries(raw: String?): List<PanEntry> = runCatching {
     val array = JSONArray(raw ?: return emptyList())
-    List(array.length()) { index ->
-        val item = array.getJSONObject(index)
-        PanEntry(
-            item.getString("gid"), item.getString("message"), item.getString("owner"),
-            item.getString("file"), item.getString("name"), item.optString("path"),
-            item.optString("size"), item.optBoolean("directory"),
-            runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
-                .getOrDefault(EntryOrigin.GROUP),
-            item.optString("md5"),
-        )
+    (0 until array.length()).mapNotNull { index ->
+        runCatching { decodeEntry(array.getJSONObject(index)) }.getOrNull()
     }
 }.getOrDefault(emptyList())
+
+private fun decodeEntry(item: JSONObject): PanEntry = PanEntry(
+    item.getString("gid"), item.getString("message"), item.getString("owner"),
+    item.getString("file"), item.getString("name"), item.optString("path"),
+    item.optString("size"), item.optBoolean("directory"),
+    runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
+        .getOrDefault(EntryOrigin.GROUP),
+    item.optString("md5"),
+)
