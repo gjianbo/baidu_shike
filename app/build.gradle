@@ -65,6 +65,9 @@ android {
 
 dependencies {
     testImplementation 'junit:junit:4.13.2'
+    // 单测需要真实的 org.json 实现：android.jar 里的只是 stub，调用即抛
+    // 「Method ... not mocked」。production 代码用的是同一个包名，运行时仍由系统提供。
+    testImplementation 'org.json:json:20240303'
 
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
     implementation 'androidx.media3:media3-exoplayer-hls:1.8.0'

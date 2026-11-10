@@ -25,9 +25,19 @@ internal object BackupStore {
     const val PREFS_SETTINGS = "app_settings"
     private const val DOWNLOAD_FOLDER = "拾课备份"
     private val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER"
-    val restoreFolder: Uri = DocumentsContract.buildDocumentUri(
-        "com.android.externalstorage.documents", "primary:$relativePath",
-    )
+
+    /**
+     * 还原对话框的初始目录。
+     *
+     * 用 by lazy 而不是直接初始化：`DocumentsContract.buildDocumentUri` 是 Android API，
+     * 放进对象初始化块会让整个 BackupStore 在类加载时就依赖框架类 —— `valid` / `summary`
+     * 这些纯 JSON 判断因而无法在 JVM 单测里调用。
+     */
+    val restoreFolder: Uri by lazy {
+        DocumentsContract.buildDocumentUri(
+            "com.android.externalstorage.documents", "primary:$relativePath",
+        )
+    }
 
     fun saveToDownloads(context: Context, payload: JSONObject): String {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.CHINA).format(Date())
