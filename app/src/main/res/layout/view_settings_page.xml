@@ -5,6 +5,16 @@
     android:orientation="vertical"
     android:paddingTop="4dp">
 
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingLeft="4dp"
+        android:paddingBottom="8dp"
+        android:text="已关联网盘"
+        android:textColor="@color/ink3"
+        android:textSize="11sp"
+        android:textStyle="bold" />
+
     <LinearLayout
         android:id="@+id/setAccountCard"
         android:layout_width="match_parent"
@@ -13,188 +23,60 @@
         android:orientation="vertical">
 
         <LinearLayout
+            android:id="@+id/setLinkedContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="16dp">
-
-            <ImageView
-                android:id="@+id/setAccountAvatar"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:background="@drawable/bg_account_icon"
-                android:padding="14dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/ic_cloud" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="13dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    style="@style/SettingTitle"
-                    android:text="百度网盘" />
-
-                <TextView
-                    android:id="@+id/setAccountStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="3dp"
-                    style="@style/SettingSub"
-                    android:text="登录状态检查中" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/setLoginRow"
-                android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:gravity="center"
-                android:paddingLeft="8dp"
-                android:paddingRight="8dp"
-                android:text="重新登录"
-                android:textColor="@color/accentInk"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-        </LinearLayout>
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginLeft="69dp"
-            android:background="@color/line" />
-
-        <LinearLayout
-            android:id="@+id/setQuarkRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="?attr/selectableItemBackground"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="16dp">
-
-            <ImageView
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:background="@drawable/bg_account_icon"
-                android:padding="14dp"
-                android:scaleType="fitCenter"
-                android:src="@drawable/ic_cloud" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="13dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    style="@style/SettingTitle"
-                    android:text="夸克网盘" />
-
-                <TextView
-                    android:id="@+id/setQuarkStatus"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="3dp"
-                    style="@style/SettingSub"
-                    android:text="未登录" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/setQuarkAction"
-                android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:background="?attr/selectableItemBackgroundBorderless"
-                android:gravity="center"
-                android:paddingLeft="8dp"
-                android:paddingRight="8dp"
-                android:text="登录"
-                android:textColor="@color/accentInk"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-        </LinearLayout>
+            android:orientation="vertical" />
     </LinearLayout>
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:paddingLeft="4dp"
-        android:paddingTop="22dp"
-        android:paddingBottom="8dp"
-        android:text="数据源"
-        android:textColor="@color/ink3"
-        android:textSize="11sp"
-        android:textStyle="bold" />
-
     <LinearLayout
+        android:id="@+id/setAddLoginRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
         android:background="@drawable/bg_card"
-        android:orientation="vertical">
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_empty_icon"
+            android:gravity="center"
+            android:text="＋"
+            android:textColor="@color/accentInk"
+            android:textSize="20sp" />
 
         <LinearLayout
-            android:id="@+id/setGroupRow"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:background="?attr/selectableItemBackground"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="16dp">
-
-            <ImageView
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:background="@drawable/bg_empty_icon"
-                android:padding="10dp"
-                android:src="@drawable/ic_layers" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="13dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    style="@style/SettingTitle"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="通讯录文件库" />
-
-                <TextView
-                    style="@style/SettingSub"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="3dp"
-                    android:text="管理群组和联系人来源" />
-            </LinearLayout>
+            android:layout_marginStart="13dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
 
             <TextView
-                android:id="@+id/setGroupValue"
-                android:layout_width="wrap_content"
+                style="@style/SettingTitle"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:textColor="@color/ink3"
-                android:textSize="11.5sp" />
+                android:text="添加登录" />
 
-            <ImageView
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:layout_marginStart="6dp"
-                android:src="@drawable/ic_chevron_right" />
+            <TextView
+                android:id="@+id/setAddLoginHint"
+                style="@style/SettingSub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="选择还没登录过的网盘类型" />
         </LinearLayout>
+
+        <ImageView
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_marginStart="6dp"
+            android:src="@drawable/ic_chevron_right" />
     </LinearLayout>
 
     <TextView
@@ -421,7 +303,7 @@
             android:layout_marginStart="10dp"
             android:layout_weight="1"
             android:lineSpacingMultiplier="1.6"
-            android:text="无账号体系、无云端同步；目录与播放进度只保存在本机，播放地址不缓存。"
+            android:text="退出登录只终止会话，已关联的来源与播放记录会保留在本机；播放地址不缓存。"
             android:textColor="@color/ink3"
             android:textSize="11sp" />
     </LinearLayout>

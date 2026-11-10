@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>设置-登录改造原型 v2（单网盘三态）</title>
+<style>
+  :root{
+    --bg:#F7F5EF; --surface:#FFFDF8; --surface2:#F2EFE7; --surface3:#ECE8DF;
+    --ink:#1B1C20; --ink2:#5E5C66; --ink3:#75727C;
+    --line:#DED9D0; --line2:#C9C3B8;
+    --accent:#3B4CCB; --accentSoft:#DFE1FF; --accentInk:#2E3BB2; --onAccent:#FFFFFF;
+    --ok:#2C6A4E; --okSoft:#C3EBD8; --danger:#BA1A1A; --dangerSoft:#FFDAD6;
+    --folderSoft:#FFDEAA; --folderInk:#6A4500;
+    --r:16px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  body{margin:0;background:#2b2b30;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+       display:flex;gap:28px;justify-content:center;align-items:flex-start;padding:28px;flex-wrap:wrap;}
+  .phone{width:390px;height:800px;background:var(--bg);border-radius:38px;overflow:hidden;position:relative;
+         box-shadow:0 24px 60px rgba(0,0,0,.45);border:10px solid #111;display:flex;flex-direction:column;}
+  .statusbar{height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;
+            font-size:12px;color:var(--ink);font-weight:600;}
+  .screen{position:absolute;inset:0;top:30px;bottom:0;overflow-y:auto;display:none;flex-direction:column;
+          background:var(--bg);padding:0 14px 92px;}
+  .screen.active{display:flex;}
+  .topbar{display:flex;align-items:center;gap:8px;padding:10px 4px 12px;}
+  .topbar .title{font-size:20px;font-weight:700;color:var(--ink);}
+  .back{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+        color:var(--ink2);font-size:20px;cursor:pointer;background:var(--surface);}
+  .back:active{background:var(--surface3);}
+
+  .section-label{padding:18px 6px 8px;font-size:11px;font-weight:700;letter-spacing:.5px;color:var(--ink3);}
+  .card{background:var(--surface);border-radius:var(--r);overflow:hidden;}
+  .row{display:flex;align-items:center;gap:13px;padding:15px 16px;position:relative;cursor:pointer;}
+  .row:active{background:var(--surface2);}
+  .row+.row::before{content:"";position:absolute;top:0;left:69px;right:0;height:1px;background:var(--line);}
+  .avatar{width:46px;height:46px;border-radius:13px;background:var(--accentSoft);display:flex;
+          align-items:center;justify-content:center;color:var(--accentInk);font-size:20px;flex-shrink:0;}
+  .row .main{flex:1;min-width:0;}
+  .row .t{font-size:15px;font-weight:600;color:var(--ink);}
+  .row .s{font-size:12px;color:var(--ink3);margin-top:3px;}
+  .row .action{font-size:12px;font-weight:700;padding:6px 10px;flex-shrink:0;border-radius:9px;}
+  .action.login{color:var(--accentInk);background:var(--accentSoft);}
+  .action.logout{color:var(--danger);background:var(--dangerSoft);}
+  .chev{color:var(--line2);font-size:16px;flex-shrink:0;}
+  .pill{font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:999px;background:var(--okSoft);color:var(--ok);margin-right:8px;}
+  .pill.off{background:var(--surface3);color:var(--ink3);}
+
+  .addbtn{margin:14px 0 4px;background:var(--accent);color:#fff;border-radius:14px;padding:15px;
+          text-align:center;font-size:15px;font-weight:700;cursor:pointer;box-shadow:0 6px 16px rgba(59,76,203,.28);}
+  .addbtn:active{filter:brightness(.94);}
+  .addbtn.hidden{display:none;}
+  .subhint{font-size:11px;color:var(--ink3);text-align:center;padding:8px 0 2px;}
+  .subhint.hidden{display:none;}
+
+  /* 场景切换器 */
+  .simbar{position:absolute;bottom:0;left:0;right:0;background:var(--surface);border-top:1px solid var(--line);
+          padding:10px 12px 12px;}
+  .simbar .lab{font-size:11px;color:var(--ink3);margin-bottom:7px;}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;}
+  .chip{font-size:11px;padding:6px 10px;border-radius:999px;background:var(--surface2);color:var(--ink2);cursor:pointer;border:1px solid transparent;}
+  .chip.on{background:var(--accentSoft);color:var(--accentInk);border-color:var(--accent);font-weight:700;}
+
+  /* 底部 sheet */
+  .sheet-mask{position:absolute;inset:0;background:rgba(27,28,32,.4);display:none;align-items:flex-end;z-index:20;}
+  .sheet-mask.active{display:flex;}
+  .sheet{background:var(--surface);width:100%;border-radius:22px 22px 0 0;padding:8px 14px 26px;
+         transform:translateY(100%);animation:up .25s forwards;}
+  @keyframes up{to{transform:translateY(0);}}
+  .sheet-grip{width:38px;height:4px;border-radius:999px;background:var(--line2);margin:8px auto 14px;}
+  .sheet-title{font-size:16px;font-weight:700;color:var(--ink);padding:4px 6px 2px;}
+  .sheet-sub{font-size:12px;color:var(--ink3);padding:0 6px 12px;}
+
+  /* 登录弹窗（百度 WebView 模拟） */
+  .logindlg{position:absolute;inset:0;background:rgba(27,28,32,.45);display:none;align-items:center;justify-content:center;z-index:30;padding:24px;}
+  .logindlg.active{display:flex;}
+  .loginbox{width:100%;height:78%;background:#fff;border-radius:18px;overflow:hidden;display:flex;flex-direction:column;
+            box-shadow:0 20px 50px rgba(0,0,0,.4);}
+  .login-head{height:48px;display:flex;align-items:center;padding:0 8px;gap:6px;border-bottom:1px solid var(--line);}
+  .login-head .x{width:36px;height:36px;display:flex;align-items:center;justify-content:center;color:var(--ink2);font-size:20px;cursor:pointer;}
+  .login-head .url{flex:1;height:30px;background:var(--surface2);border-radius:8px;display:flex;align-items:center;
+                  justify-content:center;font-size:11px;font-weight:700;color:var(--ink2);gap:5px;}
+  .login-head .rl{width:36px;height:36px;display:flex;align-items:center;justify-content:center;color:var(--ink2);font-size:18px;cursor:pointer;}
+  .login-body{flex:1;background:linear-gradient(180deg,#eaf0ff,#f7f5ef);display:flex;flex-direction:column;
+             align-items:center;justify-content:center;gap:14px;padding:20px;}
+  .login-card{background:#fff;border-radius:14px;padding:22px 20px;width:100%;max-width:280px;box-shadow:0 8px 24px rgba(0,0,0,.08);}
+  .login-card h3{margin:0 0 4px;font-size:17px;color:var(--ink);}
+  .login-card p{margin:0 0 14px;font-size:12px;color:var(--ink3);}
+  .login-input{width:100%;height:40px;border:1px solid var(--line2);border-radius:9px;margin-bottom:10px;padding:0 12px;font-size:14px;color:var(--ink);}
+  .login-go{width:100%;height:42px;background:var(--accent);color:#fff;border:none;border-radius:9px;font-size:15px;font-weight:700;cursor:pointer;}
+  .login-note{font-size:11px;color:var(--ink3);text-align:center;}
+
+  /* 来源选择页 */
+  .tabs{display:flex;gap:8px;padding:6px 4px 12px;}
+  .tab{flex:1;text-align:center;padding:9px;border-radius:11px;font-size:13px;font-weight:600;color:var(--ink2);
+       background:var(--surface2);cursor:pointer;}
+  .tab.on{background:var(--accentSoft);color:var(--accentInk);}
+  .banner{background:var(--accentSoft);color:var(--accentInk);font-size:12px;border-radius:12px;padding:10px 12px;margin:0 4px 12px;line-height:1.5;}
+  .opt{display:flex;align-items:center;gap:12px;padding:14px 16px;background:var(--surface);border-radius:12px;margin-bottom:8px;cursor:pointer;}
+  .opt .box{width:22px;height:22px;border-radius:7px;border:2px solid var(--line2);flex-shrink:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;}
+  .opt.sel .box{background:var(--accent);border-color:var(--accent);}
+  .opt .meta{font-size:11px;color:var(--ink3);margin-top:2px;}
+  .opt .prev{font-size:10px;font-weight:700;color:var(--ok);margin-left:auto;background:var(--okSoft);padding:2px 7px;border-radius:999px;}
+  .save{margin-top:14px;background:var(--accent);color:#fff;border-radius:14px;padding:15px;text-align:center;font-size:15px;font-weight:700;cursor:pointer;}
+  .save:active{filter:brightness(.94);}
+  .save:disabled{opacity:.4;}
+
+  .tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:6px;background:var(--folderSoft);color:var(--folderInk);}
+  .legend{width:340px;background:var(--surface);border-radius:16px;padding:18px 20px;color:var(--ink);font-size:12.5px;line-height:1.6;}
+  .legend h2{font-size:15px;margin:0 0 10px;}
+  .legend table{width:100%;border-collapse:collapse;}
+  .legend td{border-top:1px solid var(--line);padding:7px 4px;vertical-align:top;}
+  .legend .k{color:var(--accentInk);font-weight:700;white-space:nowrap;padding-right:10px;}
+  .legend .note{color:var(--ink3);font-size:11.5px;}
+  .legend .ask{color:var(--danger);font-weight:700;}
+</style>
+</head>
+<body>
+
+<div class="phone">
+  <div class="statusbar"><span>9:41</span><span>🔋 Wi-Fi</span></div>
+
+  <!-- ========== 设置页 ========== -->
+  <div class="screen active" id="screen-settings">
+    <div class="topbar"><div class="title">设置</div></div>
+
+    <div class="section-label">已关联网盘</div>
+    <div class="card" id="linkedCard"><!-- JS 注入 --></div>
+
+    <div class="addbtn" id="addBtn" onclick="openNetdiskSheet()">＋ 添加登录</div>
+    <div class="subhint" id="addHint">选择还没登录过的网盘类型</div>
+
+    <div class="section-label">播放</div>
+    <div class="card">
+      <div class="row"><div class="avatar" style="background:var(--surface3);color:var(--ink2)">🗑</div>
+        <div class="main"><div class="t">清除播放记录</div><div class="s">最近播放、继续收听与视频续播点</div></div><div class="chev">›</div></div>
+    </div>
+    <div class="section-label">应用</div>
+    <div class="card">
+      <div class="row"><div class="avatar" style="background:var(--surface3);color:var(--ink2)">◐</div>
+        <div class="main"><div class="t">外观</div><div class="s">浅色、深色或跟随系统</div></div><div class="chev">›</div></div>
+      <div class="row"><div class="avatar" style="background:var(--surface3);color:var(--ink2)">⎙</div>
+        <div class="main"><div class="t">备份与恢复</div><div class="s">手动备份 · 下载 / 拾课备份</div></div><div class="chev">›</div></div>
+    </div>
+
+    <!-- 场景切换器 -->
+    <div class="simbar">
+      <div class="lab">演示场景（点切，看"添加登录"如何随状态变化）</div>
+      <div class="chips" id="chips">
+        <div class="chip" data-s="none" onclick="setScenario('none')">都未设置</div>
+        <div class="chip on" data-s="baidu" onclick="setScenario('baidu')">仅百度已登录</div>
+        <div class="chip" data-s="both" onclick="setScenario('both')">百度+夸克都登录</div>
+        <div class="chip" data-s="baiduOut" onclick="setScenario('baiduOut')">百度已退出</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 选网盘类型 sheet（只列 never） ========== -->
+  <div class="sheet-mask" id="sheetNetdisk">
+    <div class="sheet">
+      <div class="sheet-grip"></div>
+      <div class="sheet-title">添加登录</div>
+      <div class="sheet-sub" id="sheetSub">选择还没登录过的网盘类型</div>
+      <div id="sheetBody"></div>
+      <div style="height:10px"></div>
+    </div>
+  </div>
+
+  <!-- ========== 百度登录弹窗 ========== -->
+  <div class="logindlg" id="loginDlg">
+    <div class="loginbox">
+      <div class="login-head">
+        <div class="x" onclick="closeLogin()">✕</div>
+        <div class="url">🔒 wappass.baidu.com</div>
+        <div class="rl" onclick="toast('刷新登录页')">⟳</div>
+      </div>
+      <div class="login-body">
+        <div class="login-card">
+          <h3>百度账号登录</h3>
+          <p>登录后回到 App 即开始选择来源</p>
+          <input class="login-input" placeholder="手机号 / 邮箱 / 用户名" />
+          <input class="login-input" placeholder="密码" type="password" />
+          <button class="login-go" onclick="afterLogin()">登录</button>
+        </div>
+        <div class="login-note">这是 WebView 弹窗示意 · 真实为百度登录页</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 夸克登录提示（独立 Activity 示意） ========== -->
+  <div class="logindlg" id="quarkLoginDlg">
+    <div class="loginbox">
+      <div class="login-head">
+        <div class="x" onclick="closeLogin()">✕</div>
+        <div class="url">🔒 pan.quark.cn</div>
+        <div class="rl" onclick="toast('刷新')">⟳</div>
+      </div>
+      <div class="login-body">
+        <div class="login-card">
+          <h3>夸克网盘登录</h3>
+          <p>夸克走独立登录页（含 Cookie 导入 / 短信验证码），登录成功自动返回</p>
+          <button class="login-go" onclick="afterLogin()">打开夸克登录页</button>
+        </div>
+        <div class="login-note">真实实现为 QuarkDriveActivity（全屏），此处仅示意流程</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== 来源选择页 ========== -->
+  <div class="screen" id="screen-source">
+    <div class="topbar">
+      <div class="back" onclick="backToSettings()">‹</div>
+      <div class="title" id="sourceTitle">选择来源</div>
+    </div>
+    <div id="sourceBody"></div>
+    <div class="save" id="sourceSave" onclick="saveSource()">保存</div>
+  </div>
+
+</div>
+
+<div class="legend">
+  <h2>原型对照（v2 · 单网盘三态）</h2>
+  <table>
+    <tr><td class="k">三态模型</td><td><b>never</b>（未设置，仅出现在"添加登录"）｜<b>active</b>（已登录，在"已关联"+退出）｜<b>dormant</b>（已退出但数据保留，在"已关联"+登录）。</td></tr>
+    <tr><td class="k">登录过不再显示</td><td>某网盘一旦登录过（active/dormant），就永远离开"添加登录"列表 —— 避免重复挂 / 清空来源。</td></tr>
+    <tr><td class="k">无可用则隐藏</td><td>所有网盘都已是 active/dormant（没有 never）时，"＋ 添加登录"整条隐藏。切到「百度+夸克都登录」场景可见。</td></tr>
+    <tr><td class="k">退出=暂不用</td><td>active 点「退出登录」→ dormant，来源数据保留；卡片显示"暂未使用 · 数据已保留"，可重新登录。</td></tr>
+    <tr><td class="k">自动选中历史</td><td>进来源页时，已关联来源（DEDAO、课程资料）<b>预勾选</b>带「上次关联」标记；dormant 重新登录后仍在。</td></tr>
+    <tr><td class="k">已登录跳登录</td><td>active 卡片直接进来源管理（跳过登录）；dormant 卡片需先登录再管理。</td></tr>
+    <tr><td class="k">百度群组+联系人</td><td><b>两个 tab 都保留</b>（关键）：共享文件库有的挂群组、有的挂联系人，缺一漏来源。tab 上直接显示各自已选数量，互不覆盖。</td></tr>
+    <tr><td class="k">夸克=独立页</td><td>百度 WebView 弹窗；夸克走独立 Activity，未硬塞进 Dialog。</td></tr>
+    <tr><td class="k">已拍板</td><td>D1 每种网盘单账号（可共存）｜D2 夸克加 <code>quark_ever_logged</code> 标记｜D3 只剩一个仍弹类型选择｜D4 群组+联系人双保留。</td></tr>
+  </table>
+  <p class="note" style="margin-top:10px">用底部 4 个场景切换：<br>· <b>都未设置</b> → 添加里能选百度/夸克<br>· <b>仅百度已登录</b> → 添加里只剩夸克（百度已消失）<br>· <b>百度+夸克都登录</b> → 添加整条隐藏<br>· <b>百度已退出</b> → 百度卡变"暂未使用·数据保留"，添加里仍有夸克</p>
+</div>
+
+<script>
+  // 三态：never | active | dormant  （每种网盘单账号；百度+夸克可共存，待确认）
+  let net = { baidu:'active', quark:'never' };
+  // 已关联来源（prev=true 表示曾关联/预勾选；dormant 时仍保留）
+  let sources = {
+    baidu:[
+      {id:'g1', name:'DEDAO',      meta:'群组',   prev:true},
+      {id:'g2', name:'快刀广播站',  meta:'群组',   prev:true},
+      {id:'g3', name:'家庭共读',    meta:'群组',   prev:false},
+      {id:'c1', name:'王老师',      meta:'联系人', prev:true},
+      {id:'c2', name:'李姐',        meta:'联系人', prev:false},
+    ],
+    quark:[
+      {id:'q1', name:'课程资料',    meta:'关注的目录', prev:true},
+      {id:'q2', name:'音频库',      meta:'关注的目录', prev:false},
+      {id:'q3', name:'2026 归档',   meta:'关注的目录', prev:false},
+    ]
+  };
+  let current=null;            // 当前操作的网盘类型
+  let currentTab='group';      // 百度来源 tab：group 群组 / contact 联系人
+  let pendingLogin=false;      // 是否处于"先登录再选来源"流程
+
+  function show(id){ document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active')); document.getElementById(id).classList.add('active'); }
+  function toast(m){ const t=document.createElement('div'); t.textContent=m;
+    t.style.cssText='position:absolute;left:50%;bottom:120px;transform:translateX(-50%);background:#1B1C20;color:#fff;font-size:12px;padding:8px 14px;border-radius:10px;z-index:99;max-width:280px;text-align:center';
+    document.querySelector('.phone').appendChild(t); setTimeout(()=>t.remove(),1700); }
+  function srcCount(type){ return sources[type].filter(s=>s.prev).length; }
+
+  function setScenario(s){
+    document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on', c.dataset.s===s));
+    if(s==='none')      net={baidu:'never',  quark:'never'};
+    else if(s==='baidu')    net={baidu:'active', quark:'never'};
+    else if(s==='both')     net={baidu:'active', quark:'active'};
+    else if(s==='baiduOut') net={baidu:'dormant',quark:'never'};
+    renderLinked();
+  }
+
+  function renderLinked(){
+    const card=document.getElementById('linkedCard'); card.innerHTML='';
+    const order=['baidu','quark'];
+    const linked=order.filter(t=>net[t]!=='never');
+
+    if(linked.length===0){
+      card.innerHTML='<div class="row"><div class="avatar" style="background:var(--surface3);color:var(--ink2)">＋</div>'+
+        '<div class="main"><div class="t">还没有关联网盘</div><div class="s">点下方「添加登录」开始</div></div></div>';
+    }
+
+    linked.forEach(t=>{
+      const isBaidu=t==='baidu';
+      const icon=isBaidu?'☁':'✦';
+      const name=isBaidu?'百度网盘':'夸克网盘';
+      const active=net[t]==='active';
+      const count=srcCount(t);
+      const statusTxt = active
+        ? (isBaidu?'已登录 · 账号 …1234':'已登录 · Cookie 有效')
+        : '暂未使用 · 数据已保留';
+      const countTxt = active ? (count+' 个来源') : ('保留 '+count+' 个来源');
+      const pill = active
+        ? '<span class="pill">在用</span>'
+        : '<span class="pill off">已退出</span>';
+      const action = active
+        ? '<span class="action logout" onclick="event.stopPropagation();doLogout(\''+t+'\')">退出登录</span>'
+        : '<span class="action login" onclick="event.stopPropagation();startLogin(\''+t+'\')">登录</span>';
+
+      const d=document.createElement('div'); d.className='row';
+      d.innerHTML=`<div class="avatar">${icon}</div>
+        <div class="main"><div class="t">${pill}${name}</div><div class="s">${statusTxt}</div></div>
+        <div style="text-align:right"><div class="s" style="margin-bottom:6px">${countTxt}</div>${action}</div>`;
+      // active：点行体直接管来源（跳过登录）；dormant：点行体先登录
+      d.querySelector('.main').parentElement.onclick = ()=> active ? openSource(t) : startLogin(t);
+      // 上面写法把整行绑了，这里改为整行可点
+      d.onclick = ()=> active ? openSource(t) : startLogin(t);
+      card.appendChild(d);
+    });
+
+    // 添加登录可见性：存在 never 才显示
+    const hasNever = order.some(t=>net[t]==='never');
+    document.getElementById('addBtn').classList.toggle('hidden', !hasNever);
+    document.getElementById('addHint').classList.toggle('hidden', !hasNever);
+    if(hasNever){
+      const names=order.filter(t=>net[t]==='never').map(t=>t==='baidu'?'百度网盘':'夸克网盘').join('、');
+      document.getElementById('addHint').textContent='可选择：'+names;
+    }
+  }
+
+  function openNetdiskSheet(){
+    const body=document.getElementById('sheetBody'); body.innerHTML='';
+    const order=['baidu','quark'];
+    const avail=order.filter(t=>net[t]==='never');
+    document.getElementById('sheetSub').textContent = avail.length
+      ? '选择还没登录过的网盘类型' : '没有可添加的网盘了';
+    avail.forEach(t=>{
+      const isBaidu=t==='baidu';
+      const d=document.createElement('div'); d.className='row';
+      d.innerHTML=`<div class="avatar">${isBaidu?'☁':'✦'}</div>
+        <div class="main"><div class="t">${isBaidu?'百度网盘':'夸克网盘'}</div>
+        <div class="s">${isBaidu?'登录后选择关联的群组':'登录后勾选关注的目录'}</div></div><div class="chev">›</div>`;
+      d.onclick=()=>pickNetdisk(t);
+      body.appendChild(d);
+    });
+    document.getElementById('sheetNetdisk').classList.add('active');
+  }
+
+  function pickNetdisk(type){
+    document.getElementById('sheetNetdisk').classList.remove('active');
+    current=type; pendingLogin=true;
+    type==='baidu'
+      ? document.getElementById('loginDlg').classList.add('active')
+      : document.getElementById('quarkLoginDlg').classList.add('active');
+  }
+  function startLogin(type){           // dormant 卡片的"登录" / 来源页无会话时
+    current=type; pendingLogin=true;
+    type==='baidu'
+      ? document.getElementById('loginDlg').classList.add('active')
+      : document.getElementById('quarkLoginDlg').classList.add('active');
+  }
+  function closeLogin(){ document.getElementById('loginDlg').classList.remove('active');
+    document.getElementById('quarkLoginDlg').classList.remove('active'); }
+  function afterLogin(){ closeLogin(); net[current]='active'; renderLinked(); openSource(current); }
+
+  function doLogout(type){ net[type]='dormant'; renderLinked();
+    toast((type==='baidu'?'百度':'夸克')+'已退出 · 数据保留'); }
+
+  function openSource(type){
+    current=type; pendingLogin=false;
+    show('screen-source');
+    if(type==='baidu'){
+      document.getElementById('sourceTitle').textContent='选择百度来源';
+      renderBaidu();
+    } else {
+      document.getElementById('sourceTitle').textContent='选择关注的目录';
+      renderQuark();
+    }
+  }
+  function renderBaidu(){
+    const isGroup = currentTab==='group';
+    const list = sources.baidu.filter(s=> isGroup ? s.meta==='群组' : s.meta==='联系人');
+    const groupSel = sources.baidu.filter(s=>s.meta==='群组' && s.prev).length;
+    const contactSel = sources.baidu.filter(s=>s.meta==='联系人' && s.prev).length;
+    let html = `<div class="tabs">
+        <div class="tab ${isGroup?'on':''}" onclick="currentTab='group';renderBaidu()">群组 ${groupSel}</div>
+        <div class="tab ${!isGroup?'on':''}" onclick="currentTab='contact';renderBaidu()">联系人 ${contactSel}</div>
+      </div>
+      <div class="banner">共享文件库有的挂在群组、有的挂在联系人下 —— 两个 tab 都保留。已为你选中上次关联的${isGroup?'群组':'联系人'}（可增减）。</div>`;
+    list.forEach(s=> html+=optHtml(s));
+    document.getElementById('sourceBody').innerHTML=html;
+  }
+  function renderQuark(){
+    let html=`<div class="banner">已为你选中上次关注的目录（可增减），保存后即生效。</div>`;
+    sources.quark.forEach(s=> html+=optHtml(s));
+    document.getElementById('sourceBody').innerHTML=html;
+  }
+  function optHtml(s){
+    return `<div class="opt ${s.prev?'sel':''}" onclick="toggleOpt('${s.id}')">
+      <div class="box">${s.prev?'✓':''}</div>
+      <div><div class="t">${s.name}</div><div class="meta">${s.meta}</div></div>
+      ${s.prev?'<span class="prev">上次关联</span>':''}
+    </div>`;
+  }
+  function toggleOpt(id){
+    const s=sources.baidu.find(x=>x.id===id)||sources.quark.find(x=>x.id===id);
+    if(s){ s.prev=!s.prev; current==='baidu'?renderBaidu():renderQuark(); }
+  }
+  function saveSource(){
+    const sel=(current==='baidu'?sources.baidu:sources.quark).filter(s=>s.prev);
+    toast('已保存 '+sel.length+' 个'+(current==='baidu'?'来源':'关注的目录'));
+    renderLinked(); backToSettings();
+  }
+  function backToSettings(){ show('screen-settings'); }
+
+  setScenario('baidu');   // 默认"仅百度已登录"
+</script>
+</body>
+</html>
