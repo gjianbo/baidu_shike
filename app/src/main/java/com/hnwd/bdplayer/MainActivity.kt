@@ -843,6 +843,10 @@ class MainActivity : AppCompatActivity() {
             label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
             root.setOnClickListener { showScreen(screens[index]) }
         }
+        shell.findViewById<View>(R.id.btnQuarkDrive).apply {
+            visibility = if (screen == Screen.DISK) View.VISIBLE else View.GONE
+            setOnClickListener { startActivity(Intent(this@MainActivity, QuarkDriveActivity::class.java)) }
+        }
         renderSourcePicker()
         updateFavoritesBadge()
         val browsing = screen == Screen.HOME || screen == Screen.DISK || screen == Screen.GROUPS
@@ -1568,13 +1572,14 @@ class MainActivity : AppCompatActivity() {
                 ensureBdstoken(
                     onReady = { token ->
                         if (!isCurrent() || !dialog.isShowing) return@ensureBdstoken
+                        val request = BaiduPersonalDrive(token).search(keyword, 1, 100)
                         load(
-                            PanApi.diskSearch(token, keyword, page = 1, num = 100), lane = RequestLane.SEARCH,
+                            request.url, lane = RequestLane.SEARCH,
                             onCancelled = { failed++; index++; next() },
                             onFailure = { failed++; index++; next() },
                         ) { json ->
                             if (!isCurrent() || !dialog.isShowing) return@load
-                            PanApi.parseDiskSearch(json).forEach { hit ->
+                            request.decode(json).items.forEach { hit ->
                                 if (seen.add("D:${hit.entry.fileId}")) hits.add(hit)
                             }
                             clampHits()
@@ -1717,13 +1722,15 @@ class MainActivity : AppCompatActivity() {
             ensureBdstoken(
                 onReady = { token ->
                     if (!isCurrentSearch()) return@ensureBdstoken
+                    val request = BaiduPersonalDrive(token).search(keyword, nextPage, pageSize)
                     load(
-                        PanApi.diskSearch(token, keyword, page = nextPage, num = pageSize), lane = RequestLane.SEARCH,
+                        request.url, lane = RequestLane.SEARCH,
                         onCancelled = { pageFailed("加载已取消") },
                         onFailure = { pageFailed("加载失败，请重试") },
                     ) { json ->
                         if (!isCurrentSearch()) return@load
-                        val page = PanApi.parseDiskSearch(json).filter { seen.add(it.entry.fileId) }
+                        val result = request.decode(json)
+                        val page = result.items.filter { seen.add(it.entry.fileId) }
                         hits.addAll(page)
                         adapter.notifyDataSetChanged()
                         loading.visibility = View.GONE
@@ -1748,7 +1755,7 @@ class MainActivity : AppCompatActivity() {
                             list.isEnabled = true
                             summary.text = "已加载 ${hits.size} 项 · 点选打开"
                         }
-                        val hasMore = page.isNotEmpty() && PanApi.diskHasMore(json, pageSize)
+                        val hasMore = page.isNotEmpty() && result.hasMore
                         more.visibility = if (hasMore) View.VISIBLE else View.GONE
                         more.isEnabled = hasMore
                         nextPage++
@@ -2393,8 +2400,9 @@ class MainActivity : AppCompatActivity() {
         val expectedParentKey = courseParentKey
         ensureBdstoken(
             onReady = { token ->
+                val request = BaiduPersonalDrive(token).list(dir, page, 100)
                 load(
-                    PanApi.diskList(token, dir, page), lane = RequestLane.COURSE,
+                    request.url, lane = RequestLane.COURSE,
                     statusHint = if (page == 1 && courseCache.readAll(cacheKey).isEmpty()) {
                         "正在读取我的网盘…"
                     } else null,
@@ -2407,8 +2415,7 @@ class MainActivity : AppCompatActivity() {
                     },
                 ) { json ->
                     if (screen != Screen.DISK || courseParentKey != expectedParentKey) return@load
-                    val entries = PanApi.parseDiskList(json)
-                    val hasMore = PanApi.diskHasMore(json, 100)
+                    val (entries, hasMore) = request.decode(json)
                     val changed = courseCache.writeIfChanged(
                         cacheKey, page, entries, if (hasMore) "more" else "",
                     )
@@ -3236,16 +3243,16 @@ class MainActivity : AppCompatActivity() {
         }
         ensureBdstoken(
             onReady = { token ->
+                val request = BaiduPersonalDrive(token).list(dir, page + 1, 100)
                 load(
-                    PanApi.diskList(token, dir, page + 1), lane = RequestLane.COURSE,
+                    request.url, lane = RequestLane.COURSE,
                     onCancelled = { done(null) }, onFailure = { done(null) },
                 ) { json ->
                     if (PlaybackQueueState.listKey != listKey || !isCurrentCourse()) {
                         done(null)
                         return@load
                     }
-                    val files = PanApi.parseDiskList(json)
-                    val hasMore = PanApi.diskHasMore(json, 100)
+                    val (files, hasMore) = request.decode(json)
                     val last = courseCache.lastPage(key)
                     if (last?.first != page || last.second != cached) {
                         done(null)
@@ -4018,15 +4025,17 @@ class MainActivity : AppCompatActivity() {
                     toast("读取目录失败")
                 }
             }
+            val request = BaiduPersonalDrive(token).list(dir, nextPage, 100)
             load(
-                PanApi.diskList(token, dir, nextPage), lane = RequestLane.COURSE,
+                request.url, lane = RequestLane.COURSE,
                 onCancelled = ::failed, onFailure = ::failed,
             ) { json ->
                 if (!dialog.isShowing || session != accountProbeId) return@load
-                PanApi.parseDiskList(json).filter { it.directory && !isBlocked(it.path) }
+                val result = request.decode(json)
+                result.items.filter { it.directory && !isBlocked(it.path) }
                     .forEach { dirs[it.path] = it }
                 page = nextPage
-                hasMore = PanApi.diskHasMore(json, 100)
+                hasMore = result.hasMore
                 loading = false
                 val items = dirs.values.toList()
                 val firstVisible = list.firstVisiblePosition

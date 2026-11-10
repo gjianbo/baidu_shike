@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light" data-accent="clay">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>群组播放 · Material 3 原型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,0,0&display=swap" rel="stylesheet" />
+<style>
+/* ============ Material 3 Design Tokens ============ */
+:root{
+  /* 赤陶 clay — 浅色 */
+  --p: #C2552E;        --on-p: #FFFFFF;
+  --p-c: #FFDBCD;      --on-p-c: #410E00;
+  --p-c-hi: #FFE7DE;
+  --s: #7A5546;        --on-s: #FFFFFF;
+  --s-c: #FFDBCB;      --on-s-c: #31120A;
+  --bg: #FFFBFF;       --on-bg: #201A18;
+  --sf: #FFFBFF;       --on-sf: #201A18;   /* surface */
+  --sf-1: #FCF5F2;     --sf-2: #F6ECE8;   /* surface variant / container */
+  --sf-3: #EFE2DC;
+  --on-sf-v: #53433E;  /* on-surface-variant */
+  --out: #85736C;      --out-v: #D8C2B9;
+  --scrim: rgba(48,32,26,.55);
+  --ok: #386A20;  --ok-c:#D9E8CB;
+  --sh-1: 0 1px 2px rgba(0,0,0,.10),0 1px 3px 1px rgba(0,0,0,.07);
+  --sh-2: 0 1px 2px rgba(0,0,0,.10),0 2px 6px 2px rgba(0,0,0,.10);
+  --sh-3: 0 4px 8px 3px rgba(0,0,0,.12),0 1px 3px rgba(0,0,0,.18);
+  --r-lg:28px; --r-md:16px; --r-sm:12px; --r-xs:10px;
+}
+[data-accent="green"]{
+  --p:#2E7D52; --on-p:#FFFFFF; --p-c:#A6F0C4; --on-p-c:#002112; --p-c-hi:#C2F5D8;
+  --s:#4F6357; --on-s:#FFFFFF; --s-c:#D2E8D9; --on-s-c:#0B1F16;
+  --sf-2:#EAF3EE; --sf-3:#DCEBE2; --out-v:#C3DDCF;
+  --ok:#2E7D52; --ok-c:#C2F5D8;
+}
+[data-theme="dark"]{
+  --p:#FFB59E; --on-p:#5B1900; --p-c:#8B3D18; --on-p-c:#FFDBCD; --p-c-hi:#A44B22;
+  --s:#E7BDB0; --on-s:#442A20; --s-c:#5D3A2E; --on-s-c:#FFDBCD;
+  --bg:#1A1513; --on-bg:#EDE0DB;
+  --sf:#211B19; --on-sf:#EDE0DB;
+  --sf-1:#271F1C; --sf-2:#332924; --sf-3:#3D322C;
+  --on-sf-v:#D8C2B9; --out:#A08C85; --out-v:#4E3F39;
+  --scrim:rgba(0,0,0,.6);
+  --sh-1:0 1px 2px rgba(0,0,0,.30);
+  --sh-2:0 2px 6px 2px rgba(0,0,0,.35);
+  --sh-3:0 4px 8px 3px rgba(0,0,0,.40);
+}
+[data-theme="dark"][data-accent="green"]{
+  --p:#83DCAA; --on-p:#003826; --p-c:#00532F; --on-p-c:#A6F0C4; --p-c-hi:#007045;
+  --s:#A9CBB8; --on-s:#1C3327; --s-c:#2F4E3D; --on-s-c:#C2F5D8;
+}
+
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{margin:0;height:100%;}
+body{
+  font-family:'Roboto',system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+  background:#2b2624; display:flex; justify-content:center; align-items:stretch;
+  color:var(--on-sf); transition:background .3s;
+}
+.material-symbols-rounded{font-family:'Material Symbols Rounded';font-weight:normal;
+  font-style:normal;line-height:1;letter-spacing:normal;white-space:nowrap;
+  direction:ltr;-webkit-font-feature-settings:'liga';-webkit-font-smoothing:antialiased;
+  user-select:none;display:inline-block;vertical-align:middle;}
+
+/* ============ Phone frame ============ */
+.phone{position:relative;width:392px;min-height:100vh;background:var(--bg);
+  color:var(--on-sf);display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 30px 80px rgba(0,0,0,.5);transition:background .3s,color .3s;}
+.statusbar{height:44px;flex:none;display:flex;align-items:center;justify-content:space-between;
+  padding:0 22px;font-size:14px;font-weight:500;color:var(--on-sf);}
+.statusbar .right{display:flex;gap:6px;align-items:center;}
+.screen{flex:1;position:relative;overflow:hidden;display:flex;flex-direction:column;}
+
+/* ============ App Bar ============ */
+.appbar{flex:none;padding:8px 16px 10px;display:flex;align-items:center;gap:8px;
+  background:var(--bg);}
+.appbar .icon-btn{width:40px;height:40px;border-radius:20px;display:flex;
+  align-items:center;justify-content:center;color:var(--on-sf);cursor:pointer;
+  transition:background .15s;}
+.appbar .icon-btn:hover{background:var(--sf-2);}
+.appbar .icon-btn:active{background:var(--sf-3);}
+.appbar .title-wrap{flex:1;min-width:0;}
+.appbar h1{margin:0;font-size:22px;font-weight:700;letter-spacing:.2px;color:var(--on-sf);}
+.appbar .sub{margin:1px 0 0;font-size:12px;color:var(--on-sf-v);font-weight:400;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.appbar .actions{display:flex;gap:2px;}
+
+/* ============ Scroll area ============ */
+.scroll{flex:1;overflow-y:auto;overflow-x:hidden;padding:4px 16px 96px;scroll-behavior:smooth;}
+.scroll::-webkit-scrollbar{display:none;}
+
+/* ============ Cards ============ */
+.card{background:var(--sf);border-radius:var(--r-md);box-shadow:var(--sh-1);
+  padding:14px;transition:box-shadow .2s,transform .2s;}
+
+/* 继续收听 — 强调大卡 */
+.now{position:relative;border-radius:var(--r-lg);padding:16px;color:#fff;overflow:hidden;
+  background:linear-gradient(135deg,var(--p) 0%,var(--p-c-hi) 130%);
+  box-shadow:var(--sh-2);cursor:pointer;}
+.now .kicker{font-size:11px;font-weight:500;opacity:.92;letter-spacing:.4px;}
+.now .t{font-size:17px;font-weight:700;margin-top:4px;line-height:1.25;}
+.now .row{display:flex;justify-content:space-between;font-size:11px;opacity:.92;margin-top:14px;}
+.now .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.32);margin-top:6px;overflow:hidden;}
+.now .bar>i{display:block;height:100%;background:#fff;border-radius:2px;}
+.now .fab{position:absolute;right:14px;bottom:14px;width:48px;height:48px;border-radius:24px;
+  background:#fff;color:var(--p);display:flex;align-items:center;justify-content:center;
+  box-shadow:var(--sh-2);}
+.now .playring{position:absolute;left:14px;top:14px;width:44px;height:44px;border-radius:12px;
+  background:rgba(255,255,255,.22);display:flex;align-items:center;justify-content:center;font-size:24px;}
+
+/* 最近播放 横滑 */
+.sec-title{font-size:13px;font-weight:500;color:var(--on-sf-v);margin:18px 2px 10px;
+  display:flex;align-items:center;justify-content:space-between;}
+.sec-title .more{font-size:12px;color:var(--p);font-weight:500;cursor:pointer;}
+.hscroll{display:flex;gap:12px;overflow-x:auto;padding:2px 0 4px;scroll-snap-type:x proximity;}
+.hscroll::-webkit-scrollbar{display:none;}
+.rec{flex:none;width:148px;scroll-snap-align:start;background:var(--sf);border-radius:var(--r-md);
+  box-shadow:var(--sh-1);padding:12px;cursor:pointer;transition:transform .15s,box-shadow .2s;}
+.rec:active{transform:scale(.97);}
+.rec .top{display:flex;align-items:center;gap:6px;color:var(--on-sf-v);font-size:10.5px;}
+.rec .ic{width:22px;height:22px;border-radius:7px;display:flex;align-items:center;justify-content:center;
+  background:var(--sf-2);color:var(--p);font-size:15px;flex:none;}
+.rec .nm{margin-top:8px;font-size:13px;font-weight:700;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:34px;}
+.rec .bar{height:3px;border-radius:2px;background:var(--sf-3);margin-top:8px;overflow:hidden;}
+.rec .bar>i{display:block;height:100%;background:var(--p);border-radius:2px;}
+.rec .mt{margin-top:6px;font-size:10px;color:var(--on-sf-v);}
+
+/* 筛选 chips */
+.filters{display:flex;gap:8px;align-items:center;margin:6px 0 4px;flex-wrap:wrap;}
+.seg{display:flex;background:var(--sf-2);border-radius:999px;padding:3px;}
+.seg button{border:none;background:transparent;font:inherit;font-size:12.5px;font-weight:500;
+  color:var(--on-sf-v);padding:7px 13px;border-radius:999px;cursor:pointer;display:flex;
+  align-items:center;gap:4px;transition:.2s;}
+.seg button.on{background:var(--sf);color:var(--on-sf);box-shadow:var(--sh-1);}
+.chip{border:none;background:var(--sf-2);color:var(--on-sf-v);font:inherit;font-size:12.5px;
+  font-weight:500;padding:7px 14px;border-radius:999px;cursor:pointer;transition:.2s;display:flex;
+  align-items:center;gap:5px;}
+.chip.on{background:var(--p-c);color:var(--on-p-c);}
+.filters .count{margin-left:auto;font-size:11px;color:var(--on-sf-v);}
+
+/* 列表项 */
+.item{display:flex;align-items:center;gap:12px;padding:12px 4px;cursor:pointer;position:relative;
+  border-bottom:1px solid var(--out-v);}
+.item:last-child{border-bottom:none;}
+.item .fmt{width:44px;height:44px;border-radius:12px;flex:none;display:flex;align-items:center;
+  justify-content:center;font-size:22px;background:var(--sf-2);color:var(--p);}
+.item.folder .fmt{background:var(--sf-2);color:var(--on-sf-v);}
+.item.video .fmt{color:#D2691E;background:#FCEDE3;}
+.item.audio .fmt{color:var(--p);background:var(--p-c);}
+.item.doc .fmt{color:#3E6BB5;background:#E6EEF9;}
+.item .body{flex:1;min-width:0;}
+.item .nm{font-size:14.5px;font-weight:500;color:var(--on-sf);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
+.item .mt{font-size:11.5px;color:var(--on-sf-v);margin-top:3px;display:flex;gap:8px;align-items:center;}
+.item .mt .dot{width:6px;height:6px;border-radius:3px;background:var(--p);}
+.item .side{width:34px;height:34px;border-radius:17px;flex:none;display:flex;align-items:center;
+  justify-content:center;color:var(--on-sf-v);cursor:pointer;font-size:20px;}
+.item .side:hover{background:var(--sf-2);}
+.item .side.star{color:var(--p);}
+.item .progress{position:absolute;left:60px;right:8px;bottom:6px;height:3px;border-radius:2px;
+  background:var(--sf-3);overflow:hidden;}
+.item .progress>i{display:block;height:100%;background:var(--p);border-radius:2px;}
+
+/* 加载更多 */
+.loadmore{margin:14px auto;display:block;background:var(--sf-2);border:none;color:var(--on-sf-v);
+  font:inherit;font-size:13px;font-weight:500;padding:11px 20px;border-radius:999px;cursor:pointer;
+  box-shadow:var(--sh-1);}
+.loadmore:active{background:var(--sf-3);}
+
+/* 空态 */
+.empty{text-align:center;color:var(--on-sf-v);padding:48px 24px;font-size:13px;line-height:1.7;}
+.empty .big{font-size:46px;opacity:.5;margin-bottom:10px;}
+
+/* 说明卡 */
+.note{background:var(--sf-2);border-radius:var(--r-md);padding:13px 14px;font-size:12px;
+  color:var(--on-sf-v);line-height:1.65;margin-top:10px;}
+
+/* 设置分组 */
+.grp{margin-top:18px;}
+.grp .gt{font-size:12px;font-weight:500;color:var(--on-sf-v);margin:0 4px 8px;letter-spacing:.3px;}
+.row-card{display:flex;align-items:center;gap:12px;background:var(--sf);border-radius:var(--r-md);
+  box-shadow:var(--sh-1);padding:14px 16px;margin-bottom:10px;cursor:pointer;transition:transform .15s;}
+.row-card:active{transform:scale(.99);}
+.row-card .ic{width:38px;height:38px;border-radius:11px;flex:none;display:flex;align-items:center;
+  justify-content:center;background:var(--sf-2);color:var(--p);font-size:20px;}
+.row-card .txt{flex:1;min-width:0;}
+.row-card .txt .t{font-size:14px;font-weight:500;}
+.row-card .txt .s{font-size:11.5px;color:var(--on-sf-v);margin-top:2px;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;}
+.row-card .chev{color:var(--out);font-size:20px;}
+
+/* ============ Navigation Bar (M3) ============ */
+.navbar{flex:none;background:var(--bg);display:flex;padding:10px 12px 14px;position:relative;z-index:5;}
+.navbar::before{content:"";position:absolute;top:0;left:0;right:0;height:1px;background:var(--out-v);}
+.nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;cursor:pointer;
+  color:var(--on-sf-v);font-size:11px;font-weight:500;position:relative;padding-top:6px;border-radius:14px;}
+.nav-item .pill{width:56px;height:32px;border-radius:16px;display:flex;align-items:center;
+  justify-content:center;font-size:23px;transition:.25s;}
+.nav-item.on{color:var(--p);}
+.nav-item.on .pill{background:var(--p-c);color:var(--on-p-c);}
+.nav-item:not(.on) .pill{background:transparent;}
+
+/* ============ Mini player ============ */
+.mini{position:absolute;left:12px;right:12px;bottom:84px;height:58px;border-radius:18px;
+  background:var(--sf);box-shadow:var(--sh-2);display:flex;align-items:center;gap:11px;padding:0 10px;
+  cursor:pointer;z-index:6;transition:transform .2s,opacity .2s;}
+.mini .cov{width:40px;height:40px;border-radius:10px;background:var(--p-c);color:var(--on-p-c);
+  display:flex;align-items:center;justify-content:center;font-size:22px;flex:none;}
+.mini .bdy{flex:1;min-width:0;}
+.mini .t{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.mini .m{font-size:10.5px;color:var(--on-sf-v);margin-top:2px;}
+.mini .pb{width:42px;height:42px;border-radius:21px;display:flex;align-items:center;justify-content:center;
+  color:var(--p);font-size:26px;flex:none;}
+.mini .up{width:38px;height:38px;border-radius:19px;display:flex;align-items:center;justify-content:center;
+  color:var(--on-sf-v);font-size:22px;flex:none;}
+
+/* ============ Pages ============ */
+.page{position:absolute;inset:0;display:none;flex-direction:column;background:var(--bg);}
+.page.on{display:flex;}
+
+/* 面包屑 */
+.crumbs{display:flex;align-items:center;gap:2px;font-size:12px;color:var(--on-sf-v);
+  padding:4px 16px 8px;flex-wrap:wrap;}
+.crumbs .c{padding:4px 8px;border-radius:8px;cursor:pointer;}
+.crumbs .c.cur{color:var(--p);font-weight:500;background:var(--p-c);}
+
+/* ============ Player overlay ============ */
+.player{position:absolute;inset:0;display:none;flex-direction:column;z-index:20;
+  background:#000;color:#fff;}
+.player.on{display:flex;}
+.player.audio{background:linear-gradient(160deg,var(--p) 0%,#1c1410 95%);}
+.p-top{display:flex;align-items:center;gap:8px;padding:14px 12px;flex:none;}
+.p-top .icon-btn{width:42px;height:42px;border-radius:21px;display:flex;align-items:center;
+  justify-content:center;color:#fff;cursor:pointer;font-size:24px;}
+.p-top .pt{flex:1;font-size:15px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.p-video{flex:1;display:flex;align-items:center;justify-content:center;position:relative;}
+.p-video .bigplay{width:74px;height:74px;border-radius:37px;background:rgba(255,255,255,.16);
+  backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;font-size:40px;cursor:pointer;}
+.p-video .ctrls{position:absolute;right:14px;bottom:14px;display:flex;gap:6px;}
+.p-video .ctrls .icon-btn{width:40px;height:40px;border-radius:20px;background:rgba(0,0,0,.4);
+  display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer;}
+/* 音频大封面 */
+.p-cover{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:26px;}
+.p-cover .art{width:240px;height:240px;border-radius:28px;background:rgba(255,255,255,.14);
+  display:flex;align-items:center;justify-content:center;font-size:96px;box-shadow:0 20px 50px rgba(0,0,0,.4);}
+.p-cover .ti{font-size:22px;font-weight:700;text-align:center;padding:0 30px;}
+.p-cover .su{font-size:13px;opacity:.8;text-align:center;}
+/* 控制条 */
+.p-bar{flex:none;padding:18px 22px 26px;}
+.p-bar .seek{height:4px;border-radius:2px;background:rgba(255,255,255,.28);position:relative;cursor:pointer;}
+.p-bar .seek>i{position:absolute;left:0;top:0;bottom:0;width:38%;background:#fff;border-radius:2px;}
+.p-bar .seek .knob{position:absolute;left:38%;top:50%;width:14px;height:14px;border-radius:7px;
+  background:#fff;transform:translate(-50%,-50%);}
+.p-bar .times{display:flex;justify-content:space-between;font-size:11px;opacity:.8;margin-top:8px;}
+.p-bar .cons{display:flex;align-items:center;justify-content:center;gap:26px;margin-top:14px;}
+.p-bar .cons .ib{color:#fff;cursor:pointer;font-size:30px;}
+.p-bar .cons .ib.play{font-size:46px;}
+.p-bar .cons .ib.sm{font-size:26px;opacity:.9;}
+/* 课程切换 */
+.course{display:flex;align-items:center;gap:8px;padding:0 22px 20px;flex:none;}
+.course button{flex:1;background:rgba(255,255,255,.16);border:none;color:#fff;font:inherit;
+  font-size:12.5px;font-weight:500;padding:11px;border-radius:14px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:4px;}
+.course button:disabled{opacity:.4;cursor:default;}
+
+/* ============ Theme switch FAB ============ */
+.themeswitch{position:absolute;top:10px;right:10px;z-index:30;display:flex;gap:6px;}
+.themeswitch .tb{width:34px;height:34px;border-radius:17px;border:none;background:rgba(0,0,0,.35);
+  color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;
+  backdrop-filter:blur(4px);}
+
+.toast{position:absolute;left:50%;bottom:150px;transform:translateX(-50%) translateY(10px);
+  background:var(--on-sf);color:var(--sf);padding:10px 18px;border-radius:999px;font-size:12.5px;
+  opacity:0;pointer-events:none;transition:.25s;z-index:40;box-shadow:var(--sh-2);}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+</style>
+</head>
+<body>
+<div class="phone">
+  <div class="statusbar">
+    <span id="clock">21:02</span>
+    <span class="right"><span class="material-symbols-rounded" style="font-size:16px">signal_cellular_alt</span>
+    <span class="material-symbols-rounded" style="font-size:16px">wifi</span>
+    <span class="material-symbols-rounded" style="font-size:16px">battery_4_bar</span></span>
+  </div>
+
+  <!-- 主题切换 -->
+  <div class="themeswitch">
+    <button class="tb" id="btnTheme" title="浅色/深色"><span class="material-symbols-rounded">dark_mode</span></button>
+    <button class="tb" id="btnAccent" title="赤陶/森林绿"><span class="material-symbols-rounded">palette</span></button>
+  </div>
+
+  <div class="screen">
+    <!-- ============ 首页 ============ -->
+    <div class="page on" id="pg-home">
+      <div class="appbar">
+        <div class="title-wrap">
+          <h1>最近更新</h1>
+          <p class="sub">小鹤育儿资料库 · 今日 12 个新文件</p>
+        </div>
+        <div class="actions">
+          <div class="icon-btn"><span class="material-symbols-rounded">search</span></div>
+          <div class="icon-btn"><span class="material-symbols-rounded">refresh</span></div>
+        </div>
+      </div>
+      <div class="scroll">
+        <!-- 继续收听 -->
+        <div class="now" onclick="openPlayer('audio')">
+          <div class="playring"><span class="material-symbols-rounded">graphic_eq</span></div>
+          <div class="kicker">继续收听 · 音频</div>
+          <div class="t">睡前故事 — 月亮船</div>
+          <div class="row"><span>已播 65%</span><span>剩余 11:03</span></div>
+          <div class="bar"><i style="width:65%"></i></div>
+          <div class="fab"><span class="material-symbols-rounded">play_arrow</span></div>
+        </div>
+
+        <!-- 最近播放 -->
+        <div class="sec-title">最近播放 <span class="more">查看全部</span></div>
+        <div class="hscroll">
+          <div class="rec" onclick="openPlayer('audio')">
+            <div class="top"><span class="ic"><span class="material-symbols-rounded">music_note</span></span>启蒙儿歌</div>
+            <div class="nm">两只老虎 儿歌版</div>
+            <div class="bar"><i style="width:80%"></i></div>
+            <div class="mt">2:10 · 已听 80%</div>
+          </div>
+          <div class="rec" onclick="openPlayer('video')">
+            <div class="top"><span class="ic"><span class="material-symbols-rounded">movie</span></span>喂养课堂</div>
+            <div class="nm">如何科学冲泡奶粉</div>
+            <div class="bar"><i style="width:40%"></i></div>
+            <div class="mt">12:30 · 已听 40%</div>
+          </div>
+          <div class="rec" onclick="openPlayer('audio')">
+            <div class="top"><span class="ic"><span class="material-symbols-rounded">music_note</span></span>营养课</div>
+            <div class="nm">第3讲 辅食添加</div>
+            <div class="bar"><i style="width:25%"></i></div>
+            <div class="mt">18:05 · 已听 25%</div>
+          </div>
+        </div>
+
+        <!-- 筛选 -->
+        <div class="sec-title">全部更新</div>
+        <div class="filters">
+          <div class="seg" id="segMedia">
+            <button class="on" data-v="all"><span class="material-symbols-rounded" style="font-size:18px">apps</span>全部</button>
+            <button data-v="video"><span class="material-symbols-rounded" style="font-size:18px">movie</span>视频</button>
+            <button data-v="audio"><span class="material-symbols-rounded" style="font-size:18px">music_note</span>音频</button>
+          </div>
+        </div>
+        <div class="filters">
+          <button class="chip on" data-status="all">全部状态</button>
+          <button class="chip" data-status="unheard">未听</button>
+          <span class="count">共 38 个</span>
+        </div>
+
+        <!-- 列表 -->
+        <div class="list">
+          <div class="item folder" onclick="goBrowse('01 启蒙儿歌')">
+            <div class="fmt"><span class="material-symbols-rounded">folder</span></div>
+            <div class="body"><div class="nm">01 启蒙儿歌</div><div class="mt">文件夹 · 24 个文件</div></div>
+            <div class="side"><span class="material-symbols-rounded">chevron_right</span></div>
+          </div>
+          <div class="item folder" onclick="goBrowse('02 绘本故事')">
+            <div class="fmt"><span class="material-symbols-rounded">folder</span></div>
+            <div class="body"><div class="nm">02 绘本故事</div><div class="mt">文件夹 · 16 个文件</div></div>
+            <div class="side"><span class="material-symbols-rounded">chevron_right</span></div>
+          </div>
+          <div class="item video" onclick="openPlayer('video')">
+            <div class="fmt"><span class="material-symbols-rounded">movie</span></div>
+            <div class="body"><div class="nm">如何科学冲泡奶粉.mp4</div>
+              <div class="mt"><span class="dot"></span>12:30 · 18.4 MB · 已听 40%</div></div>
+            <div class="side star"><span class="material-symbols-rounded">star</span></div>
+            <div class="progress"><i style="width:40%"></i></div>
+          </div>
+          <div class="item audio" onclick="openPlayer('audio')">
+            <div class="fmt"><span class="material-symbols-rounded">music_note</span></div>
+            <div class="body"><div class="nm">睡前故事-月亮船.mp3</div>
+              <div class="mt"><span class="dot"></span>31:33 · 8.0 MB · 已听 65%</div></div>
+            <div class="side star"><span class="material-symbols-rounded" style="font-variation-settings:'FILL' 1">star</span></div>
+            <div class="progress"><i style="width:65%"></i></div>
+          </div>
+          <div class="item doc" onclick="toast('已触发 PDF 下载/预览')">
+            <div class="fmt"><span class="material-symbols-rounded">description</span></div>
+            <div class="body"><div class="nm">0-1岁喂养指南.pdf</div><div class="mt">2.9 MB · 文档</div></div>
+            <div class="side"><span class="material-symbols-rounded">download</span></div>
+          </div>
+          <div class="item audio" onclick="openPlayer('audio')">
+            <div class="fmt"><span class="material-symbols-rounded">music_note</span></div>
+            <div class="body"><div class="nm">营养课-第3讲 辅食.mp3</div>
+              <div class="mt">18:05 · 9.1 MB</div></div>
+            <div class="side"><span class="material-symbols-rounded">star</span></div>
+          </div>
+        </div>
+        <button class="loadmore" onclick="toast('已加载下一页')">加载下一页</button>
+      </div>
+
+      <!-- 迷你播放器 -->
+      <div class="mini" onclick="openPlayer('audio')">
+        <div class="cov"><span class="material-symbols-rounded">music_note</span></div>
+        <div class="bdy"><div class="t">睡前故事 — 月亮船</div><div class="m">音频 · 进度 65%</div></div>
+        <div class="pb"><span class="material-symbols-rounded" id="miniPlay">pause</span></div>
+        <div class="up"><span class="material-symbols-rounded">expand_less</span></div>
+      </div>
+    </div>
+
+    <!-- ============ 浏览 ============ -->
+    <div class="page" id="pg-browse">
+      <div class="appbar">
+        <div class="icon-btn" id="browseBack" style="visibility:hidden"><span class="material-symbols-rounded">arrow_back</span></div>
+        <div class="title-wrap"><h1>群目录</h1><p class="sub" id="browseSub">选择一个网盘群组</p></div>
+        <div class="actions"><div class="icon-btn"><span class="material-symbols-rounded">search</span></div></div>
+      </div>
+      <div class="crumbs" id="crumbs"><span class="c cur" onclick="browseRoot()">根目录</span></div>
+      <div class="scroll">
+        <div class="list" id="browseList"></div>
+        <button class="loadmore" onclick="toast('已加载下一页')">加载下一页</button>
+      </div>
+    </div>
+
+    <!-- ============ 收藏 ============ -->
+    <div class="page" id="pg-fav">
+      <div class="appbar">
+        <div class="title-wrap"><h1>收藏</h1><p class="sub">仅保存在本机</p></div>
+        <div class="actions"><div class="icon-btn"><span class="material-symbols-rounded">search</span></div></div>
+      </div>
+      <div class="scroll">
+        <div class="note">点文件或目录右侧的星标加入收藏，再点一次取消。建议收藏 ≤ 8 个，方便快速找到。</div>
+        <div class="sec-title">我的收藏 <span class="more">3 个</span></div>
+        <div class="list">
+          <div class="item audio" onclick="openPlayer('audio')">
+            <div class="fmt"><span class="material-symbols-rounded">music_note</span></div>
+            <div class="body"><div class="nm">睡前故事-月亮船.mp3</div><div class="mt">31:33 · 已听 65%</div></div>
+            <div class="side star"><span class="material-symbols-rounded" style="font-variation-settings:'FILL' 1">star</span></div>
+          </div>
+          <div class="item video" onclick="openPlayer('video')">
+            <div class="fmt"><span class="material-symbols-rounded">movie</span></div>
+            <div class="body"><div class="nm">如何科学冲泡奶粉.mp4</div><div class="mt">12:30 · 已听 40%</div></div>
+            <div class="side star"><span class="material-symbols-rounded" style="font-variation-settings:'FILL' 1">star</span></div>
+          </div>
+          <div class="item folder" onclick="goBrowse('02 绘本故事')">
+            <div class="fmt"><span class="material-symbols-rounded">folder</span></div>
+            <div class="body"><div class="nm">02 绘本故事</div><div class="mt">文件夹 · 16 个文件</div></div>
+            <div class="side star"><span class="material-symbols-rounded" style="font-variation-settings:'FILL' 1">star</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ 设置 ============ -->
+    <div class="page" id="pg-set">
+      <div class="appbar">
+        <div class="title-wrap"><h1>设置</h1><p class="sub">群组播放</p></div>
+      </div>
+      <div class="scroll">
+        <div class="grp">
+          <p class="gt">播放</p>
+          <div class="row-card" onclick="toast('已清除播放记录')">
+            <div class="ic"><span class="material-symbols-rounded">delete_sweep</span></div>
+            <div class="txt"><div class="t">清除播放记录</div><div class="s">最近播放、继续收听与视频续播点</div></div>
+            <div class="chev"><span class="material-symbols-rounded">chevron_right</span></div>
+          </div>
+        </div>
+        <div class="grp">
+          <p class="gt">数据源</p>
+          <div class="row-card" onclick="toast('打开群组选择')">
+            <div class="ic"><span class="material-symbols-rounded">group</span></div>
+            <div class="txt"><div class="t">勾选网盘群组</div><div class="s">当前：小鹤育儿资料库（ID 235…172）</div></div>
+            <div class="chev"><span class="material-symbols-rounded">chevron_right</span></div>
+          </div>
+          <div class="row-card" onclick="toast('重新登录百度网盘')">
+            <div class="ic"><span class="material-symbols-rounded">account_circle</span></div>
+            <div class="txt"><div class="t">百度网盘账号</div><div class="s">已登录 · 点击重新登录</div></div>
+            <div class="chev"><span class="material-symbols-rounded">chevron_right</span></div>
+          </div>
+        </div>
+        <div class="note">无账号体系、无云端同步；目录与播放进度只保存在本机，播放地址不缓存。</div>
+        <div class="grp"><p class="gt" style="text-align:center;color:var(--on-sf-v)" onclick="toast('群组播放 v1.0')">关于 · 群组播放 v1.0</p></div>
+      </div>
+    </div>
+
+    <!-- ============ 播放页（覆盖层） ============ -->
+    <div class="player" id="player">
+      <div class="p-top">
+        <div class="icon-btn" onclick="closePlayer()"><span class="material-symbols-rounded">keyboard_arrow_down</span></div>
+        <div class="pt" id="pTitle">睡前故事 — 月亮船</div>
+        <div class="icon-btn"><span class="material-symbols-rounded">more_vert</span></div>
+      </div>
+
+      <!-- 视频区 -->
+      <div class="p-video" id="pVideo">
+        <div class="bigplay" onclick="togglePlay(this)"><span class="material-symbols-rounded">play_arrow</span></div>
+        <div class="ctrls">
+          <div class="icon-btn"><span class="material-symbols-rounded">hd</span></div>
+          <div class="icon-btn"><span class="material-symbols-rounded">playlist_play</span></div>
+          <div class="icon-btn"><span class="material-symbols-rounded">fullscreen</span></div>
+        </div>
+      </div>
+
+      <!-- 音频大封面 -->
+      <div class="p-cover" id="pCover" style="display:none">
+        <div class="art"><span class="material-symbols-rounded">music_note</span></div>
+        <div class="ti" id="pCoverTitle">睡前故事 — 月亮船</div>
+        <div class="su">小鹤育儿资料库 · 音频</div>
+      </div>
+
+      <!-- 课程切换 -->
+      <div class="course" id="pCourse">
+        <button onclick="toast('上一节')"><span class="material-symbols-rounded">skip_previous</span>上一节</button>
+        <button onclick="toast('下一节')">下一节<span class="material-symbols-rounded">skip_next</span></button>
+      </div>
+
+      <!-- 控制条 -->
+      <div class="p-bar">
+        <div class="seek"><i></i><div class="knob"></div></div>
+        <div class="times"><span>12:11</span><span>-19:22</span></div>
+        <div class="cons">
+          <span class="ib sm"><span class="material-symbols-rounded">replay_10</span></span>
+          <span class="ib"><span class="material-symbols-rounded">skip_previous</span></span>
+          <span class="ib play" id="pPlay" onclick="togglePlayBig()"><span class="material-symbols-rounded">play_arrow</span></span>
+          <span class="ib"><span class="material-symbols-rounded">skip_next</span></span>
+          <span class="ib sm"><span class="material-symbols-rounded">forward_10</span></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 底部导航 -->
+    <div class="navbar" id="navbar">
+      <div class="nav-item on" data-pg="home"><div class="pill"><span class="material-symbols-rounded">home</span></div>最近</div>
+      <div class="nav-item" data-pg="browse"><div class="pill"><span class="material-symbols-rounded">folder_open</span></div>群目录</div>
+      <div class="nav-item" data-pg="fav"><div class="pill"><span class="material-symbols-rounded">star</span></div>收藏</div>
+      <div class="nav-item" data-pg="set"><div class="pill"><span class="material-symbols-rounded">settings</span></div>设置</div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div>
+</div>
+
+<script>
+/* ---- Tab 切换 ---- */
+document.querySelectorAll('#navbar .nav-item').forEach(el=>{
+  el.addEventListener('click',()=>{
+    document.querySelectorAll('#navbar .nav-item').forEach(n=>n.classList.remove('on'));
+    el.classList.add('on');
+    const pg=el.dataset.pg;
+    document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
+    document.getElementById('pg-'+pg).classList.add('on');
+  });
+});
+
+/* ---- 媒体筛选切换 ---- */
+function bindGroup(sel,attr){
+  document.querySelectorAll(sel+' button').forEach(b=>{
+    b.addEventListener('click',()=>{
+      document.querySelectorAll(sel+' button').forEach(x=>x.classList.remove('on'));
+      b.classList.add('on');
+      toast('已筛选：'+b.textContent.trim());
+    });
+  });
+}
+bindGroup('#segMedia','data-v');
+document.querySelectorAll('.filters .chip').forEach(c=>{
+  c.addEventListener('click',()=>{
+    document.querySelectorAll('.filters .chip').forEach(x=>x.classList.remove('on'));
+    c.classList.add('on');
+    toast('状态：'+c.textContent.trim());
+  });
+});
+
+/* ---- 浏览下钻 ---- */
+const browseData={
+  root:[
+    {t:'小鹤育儿资料库',m:'群组 · 38 个文件',f:'folder'},
+    {t:'会员专属课堂',m:'群组 · 12 个文件',f:'folder'},
+  ],
+  '01 启蒙儿歌':[{t:'两只老虎.mp3',m:'2:10 · 音频',f:'audio'},{t:'小星星.mp3',m:'1:55 · 音频',f:'audio'},{t:'儿歌合集.mp4',m:'8:20 · 视频',f:'video'}],
+  '02 绘本故事':[{t:'月亮船.mp3',m:'31:33 · 音频',f:'audio'},{t:'绘本朗读.mp4',m:'15:02 · 视频',f:'video'}],
+  '小鹤育儿资料库':[{t:'01 启蒙儿歌',m:'文件夹 · 24 个文件',f:'folder'},{t:'02 绘本故事',m:'文件夹 · 16 个文件',f:'folder'},{t:'如何科学冲泡奶粉.mp4',m:'12:30 · 视频',f:'video'},{t:'0-1岁喂养指南.pdf',m:'2.9 MB · 文档',f:'doc'}],
+  '会员专属课堂':[{t:'辅食添加第1讲.mp3',m:'18:05 · 音频',f:'audio'},{t:'营养课合集.mp4',m:'42:10 · 视频',f:'video'}]
+};
+let browsePath=[];
+function renderBrowse(){
+  const list=document.getElementById('browseList');
+  const key=browsePath.length?browsePath[browsePath.length-1]:'root';
+  const items=browseData[key]||[];
+  list.innerHTML=items.map(it=>{
+    const isF=it.f==='folder';
+    const icon=it.f==='audio'?'music_note':it.f==='video'?'movie':it.f==='doc'?'description':'folder';
+    return `<div class="item ${it.f}" onclick="${isF?"goBrowse('"+it.t.replace(/'/g,"\\'")+"')":"openPlayer('"+it.f+"')"}">
+      <div class="fmt"><span class="material-symbols-rounded">${icon}</span></div>
+      <div class="body"><div class="nm">${it.t}</div><div class="mt">${it.m}</div></div>
+      <div class="side"><span class="material-symbols-rounded">${isF?'chevron_right':'star'}</span></div>
+    </div>`;
+  }).join('');
+  // 面包屑
+  const cr=document.getElementById('crumbs');
+  let html='<span class="c'+(browsePath.length?'':' cur')+'" onclick="browseRoot()">根目录</span>';
+  browsePath.forEach((p,i)=>{
+    const cur=i===browsePath.length-1;
+    html+=`<span class="material-symbols-rounded" style="font-size:16px;opacity:.4">chevron_right</span>
+      <span class="c${cur?' cur':''}" onclick="jumpTo(${i})">${p}</span>`;
+  });
+  cr.innerHTML=html;
+  document.getElementById('browseBack').style.visibility=browsePath.length?'visible':'hidden';
+  document.getElementById('browseSub').textContent=browsePath.length?browsePath[browsePath.length-1]:'选择一个网盘群组';
+}
+function goBrowse(name){browsePath.push(name);renderBrowse();}
+function jumpTo(i){browsePath=browsePath.slice(0,i+1);renderBrowse();}
+function browseRoot(){browsePath=[];renderBrowse();}
+document.getElementById('browseBack').addEventListener('click',()=>{if(browsePath.length){browsePath.pop();renderBrowse();}});
+renderBrowse();
+
+/* ---- 播放页 ---- */
+const player=document.getElementById('player');
+function openPlayer(type){
+  player.classList.add('on');
+  player.classList.toggle('audio',type==='audio');
+  document.getElementById('pVideo').style.display=type==='audio'?'none':'flex';
+  document.getElementById('pCover').style.display=type==='audio'?'flex':'none';
+  document.getElementById('pCourse').style.display=type==='audio'?'flex':'none';
+  document.getElementById('navbar').style.opacity='.4';
+}
+function closePlayer(){player.classList.remove('on');document.getElementById('navbar').style.opacity='1';}
+function togglePlay(el){const s=el.querySelector('.material-symbols-rounded');s.textContent=s.textContent==='play_arrow'?'pause':'play_arrow';}
+function togglePlayBig(){const s=document.querySelector('#pPlay .material-symbols-rounded');const mini=document.getElementById('miniPlay');
+  const now=s.textContent==='play_arrow'?'pause':'play_arrow';s.textContent=now;if(mini)mini.textContent=now;}
+
+/* ---- 主题/配色 ---- */
+document.getElementById('btnTheme').addEventListener('click',()=>{
+  const h=document.documentElement;
+  h.dataset.theme=h.dataset.theme==='light'?'dark':'light';
+  document.getElementById('btnTheme').querySelector('.material-symbols-rounded').textContent=
+    h.dataset.theme==='light'?'dark_mode':'light_mode';
+});
+document.getElementById('btnAccent').addEventListener('click',()=>{
+  const h=document.documentElement;
+  h.dataset.accent=h.dataset.accent==='clay'?'green':'clay';
+  toast('配色：'+(h.dataset.accent==='clay'?'赤陶橙':'森林绿'));
+});
+
+/* ---- toast ---- */
+let tt;
+function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');
+  clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),1400);}
+</script>
+</body>
+</html>

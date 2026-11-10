@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拾课 · 网盘切换与监控目录 交互原型</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0f0f13;color:#f2f2f5;font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;padding:32px 20px 56px}
+.wrap{max-width:760px;margin:0 auto}
+h1{font-size:20px;font-weight:500;margin:0 0 6px}
+.lead{font-size:13px;color:#9a9aa8;line-height:1.7;margin:0 0 22px}
+.pw{display:flex;flex-direction:column;align-items:center;gap:14px}
+.pw-tabs{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;max-width:660px}
+.pw-tabs button{font:inherit;font-size:12px;padding:7px 12px;border-radius:999px;border:0.5px solid #3a3a44;background:transparent;color:#9a9aa8;cursor:pointer}
+.pw-tabs button.on{background:#3f4edb;border-color:#3f4edb;color:#fff}
+.pw-phone{width:320px;height:612px;border-radius:28px;background:#151519;border:0.5px solid #3a3a44;position:relative;overflow:hidden;display:flex;flex-direction:column}
+.pw-top{display:flex;justify-content:space-between;padding:10px 16px 0;font-size:11px;color:#c9c9d2}
+.pw-bar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px 4px;color:#d8d8e2}
+.pw-brand{display:flex;align-items:center;gap:8px;font-size:13px}
+.pw-logo{width:27px;height:27px;border-radius:9px;background:#f0f0f4;color:#151519;display:flex;align-items:center;justify-content:center;font-size:13px}
+.pw-hd{padding:9px 16px 0;display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.pw-h1{font-size:28px;font-weight:500;margin:0;line-height:1.25}
+.pw-sub{font-size:11px;color:#8e8e9a;margin:6px 0 0}
+.pw-chip{border-radius:999px;background:#26262e;border:0.5px solid #3a3a44;padding:8px 12px;font-size:11px;color:#d7d7e0;white-space:nowrap;cursor:pointer;outline:1.5px solid #4d5bf0;outline-offset:2px}
+.pw-chip:hover{background:#30303b}
+.pw-sec{display:flex;align-items:center;justify-content:space-between;padding:20px 16px 9px;font-size:14px;font-weight:500}
+.pw-meta{font-size:11px;font-weight:400;color:#8e8e9a}
+.pw-note{margin:2px 16px 9px;padding:10px 12px;border-radius:9px;background:#20202a;color:#a9a9ba;font-size:11px;line-height:1.6}
+.pw-rows{flex:1;overflow:auto;padding:0 16px}
+.pw-row{display:flex;align-items:center;gap:11px;padding:10px 0;border-bottom:0.5px solid #2a2a32}
+.pw-ic{width:44px;height:44px;border-radius:11px;flex:none;display:flex;align-items:center;justify-content:center}
+.pw-tt{flex:1;min-width:0}
+.pw-t1{font-size:13px;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pw-t2{font-size:11px;color:#8e8e9a;margin:4px 0 0}
+.pw-badge{font-size:10px;color:#aab4ff;background:#262b52;border-radius:999px;padding:4px 8px;white-space:nowrap}
+.pw-nav{display:flex;justify-content:space-around;padding:10px 6px 13px;border-top:0.5px solid #2a2a32;background:#17171c}
+.pw-tab{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:10px;color:#8e8e9a;cursor:pointer;min-width:58px}
+.pw-tab.on{color:#fff}
+.pw-pill{width:54px;height:29px;border-radius:16px;display:flex;align-items:center;justify-content:center}
+.pw-sheet{position:absolute;inset:auto 0 0 0;background:#1e1e25;border-radius:18px 18px 0 0;padding:18px 18px 20px;border-top:0.5px solid #3a3a44}
+.pw-lbl{font-size:11px;color:#8e8e9a;margin:0 0 8px}
+.pw-opts{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.pw-opt{font-size:12px;padding:8px 13px;border-radius:999px;background:#292932;color:#d7d7e0;border:0.5px solid #3a3a44;cursor:pointer}
+.pw-opt.on{background:#3f4edb;border-color:#3f4edb;color:#fff}
+.pw-srcline{font-size:12px;padding:10px 2px;border-bottom:0.5px solid #2a2a32;display:flex;justify-content:space-between;color:#d7d7e0;cursor:pointer}
+.pw-srcline:hover{color:#aab4ff}
+.pw-foot{display:flex;gap:9px;margin-top:16px}
+.pw-btn{flex:1;text-align:center;font-size:12px;padding:10px;border-radius:9px;background:#292932;color:#d7d7e0;border:0.5px solid #3a3a44;cursor:pointer}
+.pw-legend{font-size:11px;color:#9a9aa8;display:flex;gap:16px;align-items:center;flex-wrap:wrap;justify-content:center}
+.pw-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#4d5bf0;margin-right:5px}
+.cmp{width:100%;border-collapse:collapse;margin-top:38px;font-size:12px}
+.cmp th,.cmp td{text-align:left;padding:11px 12px;border-bottom:0.5px solid #2a2a32;vertical-align:top;line-height:1.6}
+.cmp th{color:#9a9aa8;font-weight:500}
+.cmp td:first-child{white-space:nowrap;color:#d7d7e0}
+h2{font-size:15px;font-weight:500;margin:34px 0 10px}
+.foot{font-size:11px;color:#77778a;margin-top:26px;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>网盘切换与监控目录 · 交互原型</h1>
+<p class="lead">按现有拾课深色视觉语言绘制。<strong style="color:#d7d7e0;font-weight:500">首页顶部不动</strong>：大标题就「首页」两个字，收藏与最近播放是全局数据、不分网盘；只有「群最新更新」区块按来源区分。百度群组与其他网盘的监控目录<strong style="color:#d7d7e0;font-weight:500">合到一个扁平下拉</strong>，首页不另放网盘切换。<strong style="color:#d7d7e0;font-weight:500">网盘页的 chip 只切网盘</strong>（百度 / 夸克两项），不列来源。点上方按钮切场景：首页与群组点蓝框 chip 看统一来源下拉，网盘点蓝框 chip 看网盘切换面板。</p>
+
+<div class="pw">
+<div class="pw-tabs" id="pwTabs"></div>
+<div class="pw-phone">
+<div class="pw-top"><span>09:53</span><span>5G &#9646; &#9678;</span></div>
+<div class="pw-bar">
+  <div class="pw-brand"><span class="pw-logo">拾</span><span>拾课</span></div>
+  <div style="display:flex;gap:14px;align-items:center;opacity:.8">
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="11" cy="11" r="7"/><path d="M16 16l4 4"/></svg>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7h6l2 2h10v10H3z"/><path d="M12 12v5M9.5 14.5h5"/></svg>
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20 11a8 8 0 1 0-2 6"/><path d="M20 5v6h-6"/></svg>
+  </div>
+</div>
+<div id="pwBody"></div>
+<div class="pw-nav" id="pwNav"></div>
+<div class="pw-sheet" id="pwSheet" style="display:none"></div>
+</div>
+<div class="pw-legend"><span><span class="pw-dot"></span>蓝框＝本次改动的切换入口</span><span>点 chip 看统一来源下拉（百度群组 + 夸克监控目录）</span></div>
+</div>
+
+<h2>改动点对照</h2>
+<table class="cmp">
+<thead><tr><th>位置</th><th>现状</th><th>方案</th></tr></thead>
+<tbody>
+<tr><td>网盘页右上 chip</td><td>「夸克网盘」，点击跳到独立 Activity</td><td><strong style="color:#d7d7e0;font-weight:500">只切网盘</strong>：点开只有「百度网盘 / 夸克网盘」两项，本页就地换列表；不列来源，与首页/群组的来源下拉互不影响</td></tr>
+<tr><td>群组 tab</td><td>只显示百度群组文件库</td><td>tab 保留；百度＝群组组件，夸克＝监控目录清单（带「N 项更新」角标）</td></tr>
+<tr><td>首页顶部</td><td>大标题「首页」+ 顶栏图标</td><td><strong style="color:#d7d7e0;font-weight:500">一行都不动</strong>：标题仍是「首页」两个字，<strong style="color:#d7d7e0;font-weight:500">首页不放网盘切换器</strong></td></tr>
+<tr><td>收藏 / 最近播放</td><td>全局数据，不区分网盘</td><td>完全不动，保持跨网盘全局；每日使用习惯不变</td></tr>
+<tr><td>群最新更新区块</td><td>只绑定当前百度群组</td><td>保留区块，右上 chip 改为<strong style="color:#d7d7e0;font-weight:500">统一来源下拉</strong>：百度群组 / 联系人 + 其他网盘监控目录混在一个扁平列表，选中即切，无需先选网盘</td></tr>
+<tr><td>来源下拉</td><td>「切换文件库」只列百度来源</td><td>一个列表按网盘分组展示（分组标题 + 「群组 / 联系人 / 监控目录」小标签）；首页、群组页复用同一个下拉</td></tr>
+<tr><td>群组页右上来源 chip</td><td>只能切换百度文件库</td><td>与首页复用同一个下拉，不新增第二个 chip，也不做两级选择</td></tr>
+<tr><td>底部第 3 个 tab 文字</td><td>恒为「群组」</td><td>建议随网盘变：百度「群组」/ 夸克「监控目录」（待确认）</td></tr>
+<tr><td>夸克独立页</td><td>承载列表 / 播放 / 管理的第二套 UI</td><td>降级为登录、Cookie 导入、监控目录配置页</td></tr>
+</tbody>
+</table>
+<p class="foot">对应文档：docs/网盘切换与监控目录-实施方案.md（首版落地口径）、docs/多网盘融合-重构实施方案.md v0.2（Phase 2 分层）。原型仅表达信息架构与交互，不代表最终视觉稿；示意文案与条目数取自现有截图及夸克实测记录。</p>
+</div>
+
+<script>
+(function(){
+var I={folder:['#8a5f0a','<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'],audio:['#3b3b58','<path d="M9 18V6l10-2v12"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/>'],video:['#3b4bd0','<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 9l5 3-5 3z"/>'],monitor:['#2f3a78','<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>']};
+var STAR='<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6a6a78" stroke-width="1.5"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.5l6.1-.9z"/></svg>';
+var S={
+homeDaily:{n:'首页 · 不改',t:'首页',s:'',chip:'',tab:0,custom:
+'<div style="display:flex;justify-content:space-between;align-items:center;margin:16px 0 9px"><span style="font-size:14px;font-weight:500">继续播放</span><span style="font-size:11px;color:#8e8e9a">播放记录</span></div>'+
+'<div style="border:0.5px solid #34343e;border-radius:12px;padding:2px 11px">'+
+'<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:0.5px solid #2a2a32"><span style="width:28px;height:28px;border-radius:8px;background:#3b3b58;flex:none"></span><span style="flex:1;min-width:0;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">214.m4a<br><span style="color:#8e8e9a">我的网盘 · 听到 1:07</span></span></div>'+
+'<div style="display:flex;align-items:center;gap:9px;padding:7px 0;border-bottom:0.5px solid #2a2a32"><span style="width:28px;height:28px;border-radius:8px;background:#3b3b58;flex:none"></span><span style="flex:1;min-width:0;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">02.｜数据同步：查历史、补记录<br><span style="color:#8e8e9a">DEDAO · 听到 22:59</span></span></div>'+
+'<div style="display:flex;align-items:center;gap:9px;padding:7px 0"><span style="width:28px;height:28px;border-radius:8px;background:#3b4bd0;flex:none"></span><span style="flex:1;min-width:0;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">宇宙空间360度VR全景视频.mp4<br><span style="color:#8e8e9a">我的网盘 · 看到 0:15</span></span></div>'+
+'</div>'+
+'<div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 9px"><span style="font-size:14px;font-weight:500">收藏 3</span><span style="font-size:11px;color:#8e8e9a">查看全部</span></div>'+
+'<div style="display:flex;gap:8px;overflow:hidden">'+
+'<div style="flex:1;border:0.5px solid #34343e;border-radius:12px;padding:10px;font-size:11px;line-height:1.5">hg-1107｜11月5日直播回放｜A股三季报…<br><span style="color:#8e8e9a">视频 · DEDAO</span></div>'+
+'<div style="flex:1;border:0.5px solid #34343e;border-radius:12px;padding:10px;font-size:11px;line-height:1.5">02. 电脑手…<br><span style="color:#8e8e9a">音频 · DEDAO</span></div>'+
+'</div>'+
+'<div style="display:flex;justify-content:space-between;align-items:center;margin:18px 0 9px"><span style="font-size:14px;font-weight:500">群最新更新</span><span id="pwHomeSrc" style="font-size:11px;padding:5px 10px;border-radius:999px;background:#26262e;border:0.5px solid #3a3a44;color:#d7d7e0;cursor:pointer;outline:1.5px solid #4d5bf0;outline-offset:2px">{{SRC}} ⌄</span></div>'+
+'<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px">'+['全部','音频','视频','文档','目录'].map(function(x,i){return '<span style="font-size:10px;padding:5px 11px;border-radius:999px;'+(i===0?'background:#3f4edb;color:#fff':'background:#26262e;color:#9a9aa8')+'">'+x+'</span>'}).join('')+'</div>'+
+'<div style="font-size:10px;color:#8e8e9a;margin-bottom:4px">缓存内容 · 上次同步 20:07</div>'+
+'<div style="display:flex;gap:9px;padding:9px 0;border-top:0.5px solid #2a2a32"><span style="width:34px;height:34px;border-radius:9px;background:#3b3b58;flex:none"></span><span style="font-size:11px;line-height:1.5">26.1108｜肯尼亚论文「枪手」被AI抢生意的背后…<br><span style="color:#8e8e9a">音频 · 快刀广播站 · 5 MB</span></span></div>'
+},
+sheetView:{n:'统一来源下拉',t:'首页',s:'',chip:'',tab:0,custom:'<div style="padding:24px 4px;color:#8e8e9a;font-size:12px;line-height:1.7">点上方任一来源即可切换。<br>首页顶部没有网盘切换器，「群最新更新」区块右上这个 chip 是唯一入口。</div>'},
+diskSwitch:{n:'网盘切换面板',t:'我的网盘',s:'个人文件 · 夸克网盘',chip:'夸克网盘 ⌄',tab:1,custom:'<div style="padding:24px 4px;color:#8e8e9a;font-size:12px;line-height:1.7">网盘页右上的 chip 只切网盘，不列来源。<br>点它弹出的面板只有「百度网盘 / 夸克网盘」两项，选中后本页就地换列表。</div>'},
+diskBaidu:{n:'网盘 · 百度',t:'我的网盘',s:'个人文件 · 已转存内容可直接播放',chip:'百度网盘 ⌄',sec:'文件',meta:'共 28 项 · 名称降序',tab:1,rows:[['folder','windows','目录'],['folder','mac 软件备份','目录'],['folder','apps','目录'],['folder','照片','目录'],['folder','云一朵知识问答','目录'],['folder','音频','目录']]},
+diskQuark:{n:'网盘 · 夸克',t:'我的网盘',s:'个人文件 · 夸克网盘',chip:'夸克网盘 ⌄',sec:'文件',meta:'共 22 项',tab:1,rows:[['folder','来自：Qoder','目录'],['folder','课程资料','目录'],['folder','音频库','目录'],['video','VID_20261108_114902.mp4','视频 · 19 MB'],['folder','2026 归档','目录']]},
+groupsBaidu:{n:'群组 · 百度',t:'群组',s:'群组文件库',chip:'DEDAO ⌄',sec:'文件',meta:'共 43 项',tab:2,rows:[['audio','11月5日直播回放｜A股三季报.mp3','音频 · DEDAO · 更新中'],['video','宇宙空间360度VR全景视频.mp4','视频 · 18 MB'],['folder','2026 年 11 月','目录'],['audio','导读：怎么读一份财报.m4a','音频 · 8 MB']]},
+groupsQuark:{n:'群组 · 监控目录',t:'监控目录',s:'夸克网盘 · 5 个监控目录',chip:'夸克网盘 ⌄',sec:'监控目录',meta:'2 个目录有更新',tab:2,rows:[['monitor','课程资料','3 项更新 · 刚刚','3 项更新'],['monitor','音频库','2 项更新 · 10 分钟前','2 项更新'],['monitor','2026 归档','无更新'],['monitor','讲义 PDF','无更新'],['monitor','家庭视频','无更新']]}
+};
+var K=Object.keys(S),cur='diskQuark',active='diskQuark',prov='QUARK',diskProv='QUARK',sheet=false,homeSrcName='DEDAO';
+var tabs=document.getElementById('pwTabs'),body=document.getElementById('pwBody'),nav=document.getElementById('pwNav'),sh=document.getElementById('pwSheet');
+K.forEach(function(k){var b=document.createElement('button');b.textContent=S[k].n;b.dataset.k=k;b.onclick=function(){active=k;if(k==='sheetView'){cur='homeDaily';sheet=true;draw();drawSheet()}else if(k==='diskSwitch'){cur='diskQuark';sheet=true;draw();drawDiskSheet()}else{cur=k;sheet=false;sh.style.display='none';draw()}};tabs.appendChild(b)});
+function icon(k){var c=I[k];return '<div class="pw-ic" style="background:'+c[0]+'"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'+c[1]+'</svg></div>'}
+function navIcon(k,on){var p={0:'<path d="M4 11l8-7 8 7v9h-6v-6h-4v6H4z"/>',1:'<path d="M6 18a4 4 0 0 1-.5-8A6 6 0 0 1 17 9a4.5 4.5 0 0 1 1 9z"/>',2:'<circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0 1 12 0"/><circle cx="17" cy="9" r="2.5"/><path d="M15 20a5 5 0 0 1 7-4.6"/>',3:'<path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="#17171c"/><circle cx="15" cy="12" r="2" fill="#17171c"/>'}[k];return '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="'+(on?'#fff':'#8e8e9a')+'" stroke-width="1.6">'+p+'</svg>'}
+function draw(){
+var s=S[cur];
+var h='<div class="pw-hd"><div style="min-width:0"><h1 class="pw-h1">'+s.t+'</h1>'+(s.s?'<p class="pw-sub">'+s.s+'</p>':'')+'</div>'+(s.chip?'<div class="pw-chip" id="pwChip">'+s.chip+'</div>':'')+'</div>';
+if(s.custom){body.innerHTML=h+'<div class="pw-rows" style="padding:0 16px">'+s.custom.replace('{{SRC}}',homeSrcName)+'</div>'}
+else{
+h+='<div class="pw-sec"><span>'+s.sec+'</span><span class="pw-meta">'+s.meta+'</span></div>';
+if(s.note)h+='<div class="pw-note">'+s.note+'</div>';
+h+='<div class="pw-rows">';
+s.rows.forEach(function(r){h+='<div class="pw-row">'+icon(r[0])+'<div class="pw-tt"><p class="pw-t1">'+r[1]+'</p><p class="pw-t2">'+r[2]+'</p></div>'+(r[3]?'<span class="pw-badge">'+r[3]+'</span>':STAR)+'</div>'});
+h+='</div>';body.innerHTML=h;
+}
+if(s.chip)document.getElementById('pwChip').onclick=function(){sheet=true;if(s.tab===1)drawDiskSheet();else drawSheet()};
+if(s.custom){var hs=document.getElementById('pwHomeSrc');if(hs)hs.onclick=function(){sheet=true;drawSheet()}};
+var labels=['首页','网盘',prov==='QUARK'?'监控目录':'群组','设置'];
+nav.innerHTML=labels.map(function(l,i){var on=i===s.tab;return '<div class="pw-tab'+(on?' on':'')+'" data-i="'+i+'"><div class="pw-pill" style="background:'+(on?'#3f4edb':'transparent')+'">'+navIcon(i,on)+'</div><span>'+l+'</span></div>'}).join('');
+Array.prototype.forEach.call(nav.children,function(el){el.onclick=function(){var i=+el.dataset.i;sheet=false;sh.style.display='none';if(i===0){cur='homeDaily';active='homeDaily'}else if(i===1){cur=active=diskProv==='QUARK'?'diskQuark':'diskBaidu'}else if(i===2){cur=active=prov==='QUARK'?'groupsQuark':'groupsBaidu'}else return;draw()}});
+Array.prototype.forEach.call(tabs.children,function(b){b.className=b.dataset.k===active?'on':''});
+sh.style.display=sheet?'block':'none';
+}
+function drawDiskSheet(){
+sh.style.display='block';
+var items=[['BAIDU','百度网盘','已登录 · 28 项'],['QUARK','夸克网盘','已登录 · 22 项']];
+var h='<div style="font-size:14px;font-weight:500;margin-bottom:4px">切换网盘</div><p class="pw-lbl" style="margin-bottom:12px">网盘页只切网盘，不选来源。首页与群组的来源在各自的 chip 里选。</p>';
+items.forEach(function(it){var on=it[0]===diskProv;h+='<div class="pw-srcline" data-d="'+it[0]+'" style="'+(on?'color:#aab4ff':'')+'"><span>'+it[1]+'</span><span style="color:'+(on?'#aab4ff':'#8e8e9a')+'">'+it[2]+(on?' · 当前':'')+'</span></div>'});
+h+='<div class="pw-foot"><span class="pw-btn" id="pwDiskCfg">网盘设置</span><span class="pw-btn" id="pwDiskClose">完成</span></div>';
+sh.innerHTML=h;
+Array.prototype.forEach.call(sh.querySelectorAll('[data-d]'),function(el){el.onclick=function(){diskProv=el.dataset.d;cur=active=diskProv==='QUARK'?'diskQuark':'diskBaidu';sheet=false;sh.style.display='none';draw()}});
+document.getElementById('pwDiskClose').onclick=function(){sheet=false;sh.style.display='none'};
+document.getElementById('pwDiskCfg').onclick=function(){sheet=false;sh.style.display='none'};
+}
+function drawSheet(){
+sh.style.display='block';
+var G=[['百度网盘',[['DEDAO','群组'],['快刀广播站','群组'],['张三','联系人']]],['夸克网盘',[['课程资料','监控目录 · 3 项更新'],['音频库','监控目录 · 2 项更新'],['2026 归档','监控目录']]]];
+var h='<div style="font-size:14px;font-weight:500;margin-bottom:4px">选择来源</div><p class="pw-lbl" style="margin-bottom:12px">百度群组与其他网盘的监控目录，一个下拉搞定</p>';
+G.forEach(function(g){h+='<p class="pw-lbl" style="margin:12px 0 4px">'+g[0]+'</p>';g[1].forEach(function(it){var on=it[0]===homeSrcName;h+='<div class="pw-srcline" data-p="'+(g[0]==='夸克网盘'?'QUARK':'BAIDU')+'" data-n="'+it[0]+'" style="'+(on?'color:#aab4ff':'')+'"><span>'+it[0]+'</span><span style="color:'+(on?'#aab4ff':'#8e8e9a')+'">'+it[1]+(on?' · 当前':'')+'</span></div>'})});
+h+='<div class="pw-foot"><span class="pw-btn" id="pwManage">管理来源</span><span class="pw-btn" id="pwClose">完成</span></div>';
+sh.innerHTML=h;
+Array.prototype.forEach.call(sh.querySelectorAll('[data-n]'),function(el){el.onclick=function(){homeSrcName=el.dataset.n;prov=el.dataset.p;sheet=false;sh.style.display='none';if(active==='sheetView'||cur==='homeDaily'){cur='homeDaily';active='homeDaily'}else{cur=active=prov==='QUARK'?'groupsQuark':'groupsBaidu'}draw()}});
+document.getElementById('pwClose').onclick=function(){sheet=false;sh.style.display='none'};
+document.getElementById('pwManage').onclick=function(){sheet=false;sh.style.display='none'};
+}
+draw();
+})();
+</script>
+</body>
+</html>

@@ -43,6 +43,24 @@ internal data class PanSearchHit(
 /** 文档《媒体取址技术方案》§2：按扩展名分流后的媒体类别。 */
 internal enum class MediaKind { VIDEO, AUDIO, PDF, DOCUMENT, DIRECTORY, OTHER }
 
+internal fun mediaKind(name: String, directory: Boolean): MediaKind {
+    if (directory) return MediaKind.DIRECTORY
+    return when (name.substringAfterLast('.', "").lowercase()) {
+        in VIDEO_EXT -> MediaKind.VIDEO
+        in AUDIO_EXT -> MediaKind.AUDIO
+        "pdf" -> MediaKind.PDF
+        in DOC_EXT -> MediaKind.DOCUMENT
+        else -> MediaKind.OTHER
+    }
+}
+
+private val VIDEO_EXT = setOf("mp4", "mkv", "mov", "avi", "flv", "wmv", "webm", "ts", "m4v")
+private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "wav", "wma", "ogg", "m4b", "amr")
+private val DOC_EXT = setOf(
+    "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "zip", "rar", "7z",
+    "jpg", "jpeg", "png", "gif", "webp", "bmp",
+)
+
 internal object PanApi {
     const val HOST = "pan.baidu.com"
     const val MOBILE_HOME = "https://pan.baidu.com/wap/home#/"
@@ -52,27 +70,7 @@ internal object PanApi {
     /** §5.3 / §6.3：dlink 直链要带这个 UA 才 302 到 CDN；签名自带，不需要 Cookie。 */
     const val DLINK_USER_AGENT = "pan.baidu.com"
 
-    /**
-     * §2 取址总决策表：目录 / 视频(HLS) / 音频(原始文件 dlink) / PDF(下载后阅读) /
-     * 其它文档(只能 dlink，当前版本没做下载)。只按扩展名分类，不做网络请求。
-     */
-    fun kindOf(entry: PanEntry): MediaKind {
-        if (entry.directory) return MediaKind.DIRECTORY
-        return when (entry.name.substringAfterLast('.', "").lowercase()) {
-            in VIDEO_EXT -> MediaKind.VIDEO
-            in AUDIO_EXT -> MediaKind.AUDIO
-            "pdf" -> MediaKind.PDF
-            in DOC_EXT -> MediaKind.DOCUMENT
-            else -> MediaKind.OTHER
-        }
-    }
-
-    private val VIDEO_EXT = setOf("mp4", "mkv", "mov", "avi", "flv", "wmv", "webm", "ts", "m4v")
-    private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "wav", "wma", "ogg", "m4b", "amr")
-    private val DOC_EXT = setOf(
-        "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "zip", "rar", "7z",
-        "jpg", "jpeg", "png", "gif", "webp", "bmp",
-    )
+    fun kindOf(entry: PanEntry): MediaKind = mediaKind(entry.name, entry.directory)
 
     val login: String = Uri.parse("https://wappass.baidu.com/passport?login")
         .buildUpon()

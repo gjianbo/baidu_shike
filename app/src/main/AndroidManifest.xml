@@ -38,6 +38,8 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <activity android:name=".QuarkDriveActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout" />
         <activity
             android:name=".BackupActivity"
             android:exported="false"

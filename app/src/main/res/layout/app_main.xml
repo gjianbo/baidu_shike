@@ -136,6 +136,17 @@
             android:textSize="30sp"
             android:textStyle="bold" />
 
+        <TextView
+            android:id="@+id/btnQuarkDrive"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:background="@drawable/bg_source_chip"
+            android:gravity="center"
+            android:paddingHorizontal="12dp"
+            android:text="夸克网盘"
+            android:textColor="@color/ink2"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/btnBrowse"
             android:layout_width="wrap_content"
