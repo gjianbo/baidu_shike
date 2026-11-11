@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>媒体页统一骨架 · 原型</title>
+<style>
+  :root {
+    --bg: #0A0B0E;
+    --surface: #15151D;
+    --surface2: #1C1E28;
+    --line: rgba(255,255,255,.08);
+    --text: #F2F3F7;
+    --text2: #C5C5D0;
+    --text3: #8E909C;
+    --accent: #3B4CCB;
+    --accentSoft: #BFC6FF;
+    --star: #FFC857;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1184px; margin: 0 auto; padding: 44px 24px 96px; }
+  h1 { font-size: 21px; font-weight: 600; margin: 0 0 10px; letter-spacing: .3px; }
+  .lead { color: var(--text3); font-size: 13px; line-height: 1.85; max-width: 720px; margin: 0; }
+  .lead b { color: var(--text2); font-weight: 500; }
+
+  .phones { display: flex; gap: 34px; flex-wrap: wrap; justify-content: center; margin: 36px 0 8px; }
+  .col { width: 320px; }
+  .phone {
+    position: relative; width: 320px; height: 660px; border-radius: 38px;
+    background: #04050A; border: 1px solid #262933; overflow: hidden;
+    box-shadow: 0 24px 70px rgba(0,0,0,.65), inset 0 0 0 1px rgba(255,255,255,.02);
+  }
+  .screen { position: absolute; inset: 0; display: flex; flex-direction: column; }
+  .caption { margin-top: 14px; text-align: center; font-size: 12px; color: var(--text3); line-height: 1.7; }
+  .caption b { display: block; color: var(--text2); font-weight: 500; font-size: 13px; margin-bottom: 4px; }
+
+  /* ── A 导航槽 ── */
+  .slot-a {
+    height: 52px; flex: none; display: flex; align-items: center; gap: 4px;
+    padding: 0 6px; position: relative; z-index: 3;
+    background: linear-gradient(to bottom, rgba(10,11,14,.92), rgba(10,11,14,0));
+  }
+  .icon-btn {
+    width: 40px; height: 40px; flex: none; display: grid; place-items: center;
+    border-radius: 50%; cursor: pointer; color: var(--text);
+  }
+  .icon-btn:hover { background: rgba(255,255,255,.07); }
+  .a-title { flex: 1; min-width: 0; padding: 0 4px; }
+  .a-title .t1 {
+    font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; color: var(--text);
+  }
+  .a-title .t2 { font-size: 11px; color: var(--text3); margin-top: 2px; }
+
+  /* ── B 内容槽 ── */
+  .slot-b { flex: 1; position: relative; overflow: hidden; }
+  .frame-video {
+    position: absolute; inset: 0; background:
+      radial-gradient(120% 90% at 50% 30%, #232B44 0%, #12151E 55%, #080A0F 100%);
+  }
+  .frame-video::after {
+    content: ""; position: absolute; left: 50%; top: 46%; width: 54px; height: 54px;
+    margin: -27px 0 0 -27px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,.14);
+  }
+  .video-tag {
+    position: absolute; left: 16px; bottom: 96px; font-size: 10px; letter-spacing: 1px;
+    color: rgba(255,255,255,.32); text-transform: uppercase;
+  }
+
+  /* 转音频后的 B 槽（视频页专有） */
+  .audio-mode-layer {
+    position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; gap: 18px; padding-bottom: 56px;
+    background: radial-gradient(120% 100% at 50% 28%, #1B2340 0%, #0E1119 62%, #07080D 100%);
+  }
+  .am-glyph {
+    width: 148px; height: 148px; border-radius: 50%; display: grid; place-items: center;
+    background: radial-gradient(120% 120% at 32% 24%, #4A5BD6 0%, #2A3480 52%, #161A33 100%);
+    box-shadow: 0 20px 48px rgba(20,26,60,.7), inset 0 0 0 1px rgba(255,255,255,.06);
+    color: rgba(255,255,255,.9);
+  }
+  .am-title { font-size: 13.5px; color: var(--text2); }
+  .am-sub { font-size: 11px; color: var(--text3); margin-top: -8px; letter-spacing: .2px; }
+  .video.audio-mode .audio-mode-layer { display: flex; }
+  .video.audio-mode .frame-video,
+  .video.audio-mode .video-tag { display: none; }
+
+  /* 传输组：B 槽底部居中 */
+  .transport {
+    position: absolute; left: 0; right: 0; bottom: 16px; display: flex;
+    align-items: center; justify-content: center; gap: 26px;
+  }
+  .transport .side { width: 44px; height: 44px; display: grid; place-items: center; color: rgba(255,255,255,.86); cursor: pointer; }
+  .transport .side:hover { color: #fff; }
+  .play {
+    width: 56px; height: 56px; border-radius: 50%; background: var(--accent);
+    display: grid; place-items: center; cursor: pointer;
+    box-shadow: 0 8px 24px rgba(59,76,203,.45); color: #fff;
+  }
+  .play:active { transform: scale(.96); }
+
+  /* ── C 进度槽 ── */
+  .slot-c {
+    height: 40px; flex: none; display: flex; align-items: center; gap: 10px;
+    padding: 0 16px; font-size: 11px; color: var(--text3); font-variant-numeric: tabular-nums;
+  }
+  .track { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.18); position: relative; }
+  .track .played { position: absolute; inset: 0 auto 0 0; width: 28%; background: var(--accentSoft); border-radius: 2px; }
+  .track .knob {
+    position: absolute; top: 50%; left: 28%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px;
+    border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(59,76,203,.35);
+  }
+
+  /* ── D 动作槽 ── */
+  .slot-d {
+    height: 66px; flex: none; display: flex; align-items: center;
+    border-top: 1px solid var(--line); background: rgba(12,13,18,.86);
+    backdrop-filter: blur(12px); padding-bottom: 2px;
+  }
+  .act {
+    flex: 1; display: flex; flex-direction: column; align-items: center; gap: 5px;
+    cursor: pointer; color: var(--text3); padding: 4px 0;
+  }
+  .act svg { display: block; }
+  .act .lb { font-size: 10.5px; letter-spacing: .2px; }
+  .act:active { color: var(--text2); }
+  .act.on { color: var(--accentSoft); }
+  .act.on .lb { color: var(--accentSoft); }
+  .act.star.on { color: var(--star); }
+  .act.star.on .lb { color: var(--star); }
+
+  /* ── 音频 ── */
+  .slot-b.audio { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px 28px 96px; }
+  .cover {
+    width: 236px; height: 236px; border-radius: 18px; position: relative;
+    background: radial-gradient(120% 120% at 30% 20%, #4A5BD6 0%, #2A3480 48%, #161A33 100%);
+    box-shadow: 0 22px 60px rgba(20,26,60,.75), inset 0 0 0 1px rgba(255,255,255,.06);
+    display: grid; place-items: center;
+  }
+  .cover .vinyl {
+    width: 150px; height: 150px; border-radius: 50%;
+    border: 1px solid rgba(255,255,255,.16);
+    display: grid; place-items: center;
+  }
+  .cover .vinyl::after {
+    content: ""; width: 46px; height: 46px; border-radius: 50%;
+    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.18);
+  }
+  .a-title-b { margin-top: 26px; text-align: center; }
+  .a-title-b .h { font-size: 17px; font-weight: 500; letter-spacing: .2px; }
+  .a-title-b .s { font-size: 11.5px; color: var(--text3); margin-top: 7px; }
+  .audio .transport { bottom: 14px; }
+
+  /* ── 图片 ── */
+  .frame-img {
+    position: absolute; inset: 0;
+    background: linear-gradient(155deg, #2B2233 0%, #3A2E28 38%, #1A1B22 100%);
+  }
+  .img-chip {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 14px;
+    height: 26px; padding: 0 12px; border-radius: 13px; display: flex; align-items: center;
+    background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.16);
+    font-size: 11px; color: var(--text2); backdrop-filter: blur(8px);
+  }
+  .slot-c-empty { height: 0; }
+
+  /* ── 显隐状态机 ── */
+  .video.chrome-hidden .slot-c,
+  .video.chrome-hidden .slot-d,
+  .video.chrome-hidden .transport { opacity: 0; pointer-events: none; transform: translateY(6px); }
+  .image.chrome-hidden .slot-a,
+  .image.chrome-hidden .slot-d,
+  .image.chrome-hidden .img-chip { opacity: 0; pointer-events: none; }
+  .slot-a, .slot-c, .slot-d, .transport, .img-chip { transition: opacity .18s ease, transform .18s ease; }
+
+  /* 倍速菜单 */
+  .speed-sheet {
+    position: absolute; right: 14px; bottom: 74px; width: 130px; z-index: 9;
+    background: #1B1D26; border: 1px solid rgba(255,255,255,.1); border-radius: 12px;
+    padding: 6px; display: none; box-shadow: 0 18px 40px rgba(0,0,0,.6);
+  }
+  .speed-sheet.open { display: block; }
+  .speed-sheet button {
+    display: block; width: 100%; text-align: left; padding: 8px 10px; border: 0; border-radius: 8px;
+    background: transparent; color: var(--text2); font-size: 12px; cursor: pointer;
+    font-family: inherit;
+  }
+  .speed-sheet button:hover { background: rgba(255,255,255,.07); }
+  .speed-sheet button.sel { color: var(--accentSoft); background: rgba(59,76,203,.22); }
+
+  /* ── 规格表 ── */
+  .spec-title { margin: 56px 0 14px; font-size: 15px; font-weight: 500; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--text3); font-weight: 500; font-size: 11.5px; letter-spacing: .3px; }
+  td { color: var(--text2); line-height: 1.65; }
+  td.slot { color: var(--accentSoft); font-weight: 500; white-space: nowrap; }
+  td.size { color: var(--text3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .rules { margin: 22px 0 0; padding: 0; list-style: none; counter-reset: r; }
+  .rules li {
+    counter-increment: r; position: relative; padding: 9px 0 9px 34px;
+    font-size: 12.5px; color: var(--text2); line-height: 1.7; border-bottom: 1px dashed rgba(255,255,255,.05);
+  }
+  .rules li::before {
+    content: "R" counter(r); position: absolute; left: 0; top: 9px;
+    color: var(--accentSoft); font-size: 11px; font-weight: 500; letter-spacing: .5px;
+  }
+  .hint { margin-top: 10px; font-size: 11.5px; color: #6E717D; text-align: center; }
+
+  /* ── 横屏（控制层叠加） ── */
+  .ls-row { display: flex; gap: 24px; justify-content: center; flex-wrap: wrap; margin: 6px 0 4px; }
+  .ls-wrap { width: 548px; height: 254px; position: relative; }
+  .ls-phone {
+    position: absolute; top: 0; left: 0; width: 720px; height: 334px; border-radius: 22px;
+    overflow: hidden; background: #04050A; border: 1px solid #262933;
+    transform: scale(.76); transform-origin: top left;
+    box-shadow: 0 24px 70px rgba(0,0,0,.65); cursor: pointer;
+  }
+  .ls-screen { position: absolute; inset: 0; }
+  .ls-video { position: absolute; inset: 0; }
+  .ls-a {
+    position: absolute; top: 0; left: 0; right: 0; height: 48px; padding: 0 10px;
+    display: flex; align-items: center; gap: 4px;
+    background: linear-gradient(to bottom, rgba(10,11,14,.86), rgba(10,11,14,0));
+  }
+  .ls-a .a-title .t1 { font-size: 13px; }
+  .ls-bottom {
+    position: absolute; left: 0; right: 0; bottom: 0; padding-top: 20px;
+    background: linear-gradient(to top, rgba(10,11,14,.94) 0%, rgba(10,11,14,.62) 58%, rgba(10,11,14,0) 100%);
+    transition: opacity .18s ease;
+  }
+  .ls-c {
+    height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 20px;
+    font-size: 11px; color: var(--text3); font-variant-numeric: tabular-nums;
+  }
+  .ls-side { width: 36px; height: 36px; display: grid; place-items: center; color: rgba(255,255,255,.86); flex: none; }
+  .ls-play {
+    width: 36px; height: 36px; border-radius: 50%; background: var(--accent); flex: none;
+    display: grid; place-items: center; color: #fff; box-shadow: 0 6px 18px rgba(59,76,203,.4);
+  }
+  .ls-d { height: 56px; display: flex; align-items: center; padding-bottom: 4px; }
+  .ls-d .act svg { width: 19px; height: 19px; }
+  .ls-d .act .lb { font-size: 10px; }
+  .land.chrome-hidden .slot-a, .land.chrome-hidden .ls-bottom { opacity: 0; pointer-events: none; }
+  .ls-hint {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    font-size: 11px; color: rgba(255,255,255,.26); letter-spacing: .5px;
+  }
+  .ls-note { margin-top: 12px; font-size: 11.5px; color: #6E717D; line-height: 1.7; max-width: 548px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>媒体页统一骨架</h1>
+  <p class="lead">
+    视频、音频、图片共用一套<b>四槽骨架</b>：A 导航槽 · B 内容槽 · C 进度槽 · D 动作槽。
+    只替换 B 槽的内容和 D 槽的动作集合，槽位高度、字号、间距、颜色全一致。
+    <b>点画面可切换控制层，点「倍速」看档位菜单，点「转音频」看视频切音频态。</b><br>
+    <b>唯一不共用的格是「转音频」</b>：只有竖屏视频需要把视频转成音频收听，所以只有竖屏视频页有这一格（6 格）；横屏和音频页都保持 5 格。
+  </p>
+
+  <div class="phones">
+    <!-- 视频 -->
+    <div class="col">
+      <div class="phone">
+        <div class="screen video" id="pVideo" data-toggle>
+          <div class="slot-a">
+            <div class="icon-btn" aria-label="返回">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+            </div>
+            <div class="a-title"><div class="t1">011.Little Fox 分级动画</div></div>
+            <div class="icon-btn" aria-label="全屏">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/></svg>
+            </div>
+            <div class="icon-btn" aria-label="更多">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+            </div>
+          </div>
+
+          <div class="slot-b">
+            <div class="frame-video"></div>
+            <div class="video-tag">16 : 9 · 全出血</div>
+            <div class="audio-mode-layer">
+              <div class="am-glyph">
+                <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13.5v-1.5a8 8 0 0 1 16 0v1.5"/><rect x="2.6" y="12.6" width="4.2" height="6.6" rx="1.9"/><rect x="17.2" y="12.6" width="4.2" height="6.6" rx="1.9"/></svg>
+              </div>
+              <div class="am-title">正在以音频模式播放</div>
+              <div class="am-sub">画面已收起 · 可后退或切到后台继续听</div>
+            </div>
+            <div class="transport">
+              <div class="side" aria-label="上一集">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14l-11-7z"/></svg>
+              </div>
+              <div class="play" id="playBtn" aria-label="播放">
+                <svg id="playIcon" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </div>
+              <div class="side" aria-label="下一集">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5h-2v14h2zM4 5v14l11-7z"/></svg>
+              </div>
+            </div>
+          </div>
+
+          <div class="slot-c">
+            <span>01:09</span>
+            <div class="track"><div class="played" id="played"></div><div class="knob" id="knob"></div></div>
+            <span>44:06</span>
+          </div>
+
+          <div class="slot-d">
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h13M4 12h9M4 17h13"/><path d="M19 15l2 2-2 2"/></svg>
+              <span class="lb">选集</span>
+            </div>
+            <div class="act" id="speedAct">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l4.5-3.5"/></svg>
+              <span class="lb" id="speedLb">1.0x</span>
+            </div>
+            <div class="act" data-audio title="仅视频页有这一格">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 13.5v-1.5a8 8 0 0 1 16 0v1.5"/><rect x="2.6" y="12.6" width="4.2" height="6.6" rx="1.9"/><rect x="17.2" y="12.6" width="4.2" height="6.6" rx="1.9"/></svg>
+              <span class="lb">转音频</span>
+            </div>
+            <div class="act star" id="favAct">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 4l2.5 5.2 5.5.7-4 3.9 1 5.6-5-2.8-5 2.8 1-5.6-4-3.9 5.5-.7z"/></svg>
+              <span class="lb">收藏</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="13" r="7"/><path d="M12 10v3l2 1.5M9 3h6"/></svg>
+              <span class="lb">定时</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+              <span class="lb">更多</span>
+            </div>
+          </div>
+
+          <div class="speed-sheet" id="speedSheet">
+            <button data-speed="0.5x">0.5x</button>
+            <button data-speed="0.75x">0.75x</button>
+            <button data-speed="1.0x" class="sel">1.0x</button>
+            <button data-speed="1.25x">1.25x</button>
+            <button data-speed="1.5x">1.5x</button>
+            <button data-speed="2.0x">2.0x</button>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>视频 · 竖屏播放</b>D 槽 6 格（多出「转音频」）· 点画面收起 C + D</div>
+    </div>
+
+    <!-- 音频 -->
+    <div class="col">
+      <div class="phone">
+        <div class="screen">
+          <div class="slot-a">
+            <div class="icon-btn" aria-label="收起">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </div>
+            <div class="a-title"><div class="t1" style="font-size:12px;color:var(--text3)">正在播放</div></div>
+            <div class="icon-btn" aria-label="更多">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+            </div>
+          </div>
+
+          <div class="slot-b audio">
+            <div class="cover"><div class="vinyl"></div></div>
+            <div class="a-title-b">
+              <div class="h">01. 志愿的人</div>
+              <div class="s">内地唱片百佳 1979-2019 · m4a</div>
+            </div>
+            <div class="transport">
+              <div class="side" aria-label="上一节">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14l-11-7z"/></svg>
+              </div>
+              <div class="play" aria-label="播放">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              </div>
+              <div class="side" aria-label="下一节">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5h-2v14h2zM4 5v14l11-7z"/></svg>
+              </div>
+            </div>
+          </div>
+
+          <div class="slot-c">
+            <span>00:02</span>
+            <div class="track"><div class="played" style="width:3%"></div><div class="knob" style="left:3%"></div></div>
+            <span>03:13</span>
+          </div>
+
+          <div class="slot-d">
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h13M4 12h9M4 17h13"/><path d="M19 15l2 2-2 2"/></svg>
+              <span class="lb">选集</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l4.5-3.5"/></svg>
+              <span class="lb">1.0x</span>
+            </div>
+            <div class="act star on">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 4l2.5 5.2 5.5.7-4 3.9 1 5.6-5-2.8-5 2.8 1-5.6-4-3.9 5.5-.7z"/></svg>
+              <span class="lb">已收藏</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="13" r="7"/><path d="M12 10v3l2 1.5M9 3h6"/></svg>
+              <span class="lb">定时</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+              <span class="lb">更多</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>音频 · 常驻</b>D 槽 5 格，<b style="display:inline">不含「转音频」</b>；C/D 不自动收起</div>
+    </div>
+
+    <!-- 图片 -->
+    <div class="col">
+      <div class="phone">
+        <div class="screen image" id="pImage" data-toggle>
+          <div class="slot-a">
+            <div class="icon-btn" aria-label="返回">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+            </div>
+            <div class="a-title" style="text-align:center">
+              <div class="t1">IMG_20250126_113907.jpg</div>
+              <div class="t2">3 / 9 · 2.4 MB</div>
+            </div>
+            <div class="icon-btn" aria-label="更多">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+            </div>
+          </div>
+
+          <div class="slot-b">
+            <div class="frame-img"></div>
+            <div class="img-chip">原图 · 2.4 MB</div>
+          </div>
+
+          <div class="slot-c-empty"></div>
+
+          <div class="slot-d">
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8V5h3M20 8V5h-3M4 16v3h3M20 16v3h-3"/><circle cx="12" cy="12" r="3"/></svg>
+              <span class="lb">原图</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+              <span class="lb">上一张</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5l7 7-7 7"/></svg>
+              <span class="lb">下一张</span>
+            </div>
+            <div class="act star">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 4l2.5 5.2 5.5.7-4 3.9 1 5.6-5-2.8-5 2.8 1-5.6-4-3.9 5.5-.7z"/></svg>
+              <span class="lb">收藏</span>
+            </div>
+            <div class="act">
+              <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+              <span class="lb">更多</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>图片 · 沉浸看图</b>点击画面：收起 A + D 与胶囊</div>
+    </div>
+  </div>
+  <p class="hint">原型为交互示意，尺寸按 375×812dp 等比缩放</p>
+
+  <div class="spec-title">横屏 · 视频（控制层叠加在画面上）</div>
+  <p class="lead" style="max-width:760px;margin:0 0 20px">
+    横屏不压缩画面：A / C / D 全部叠在视频上，默认全隐，点一下出现、3 秒收起。
+    传输组并入进度行左端（上一 · 播放 · 下一）；D 槽沿用竖屏的 5 格，<b style="color:var(--text2)">不放「转音频」</b>。
+  </p>
+  <div class="ls-row">
+    <div>
+      <div class="ls-wrap">
+        <div class="ls-phone">
+          <div class="ls-screen land" data-toggle>
+            <div class="frame-video ls-video"></div>
+            <div class="video-tag" style="bottom:auto;top:14px;right:16px;left:auto">16 : 9 · 全屏</div>
+
+            <div class="slot-a ls-a">
+              <div class="icon-btn" aria-label="返回" style="width:36px;height:36px">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+              </div>
+              <div class="a-title"><div class="t1">011.Little Fox 分级动画</div></div>
+              <div class="icon-btn" aria-label="退出全屏" style="width:36px;height:36px">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/></svg>
+              </div>
+              <div class="icon-btn" aria-label="更多" style="width:36px;height:36px">
+                <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+              </div>
+            </div>
+
+            <div class="ls-bottom">
+              <div class="slot-c ls-c">
+                <div class="ls-side" aria-label="上一集">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14l-11-7z"/></svg>
+                </div>
+                <div class="ls-play" aria-label="播放">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                </div>
+                <div class="ls-side" aria-label="下一集">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M18 5h-2v14h2zM4 5v14l11-7z"/></svg>
+                </div>
+                <span style="margin-left:6px">01:09</span>
+                <div class="track"><div class="played"></div><div class="knob"></div></div>
+                <span>44:06</span>
+              </div>
+
+              <div class="slot-d ls-d">
+                <div class="act">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h13M4 12h9M4 17h13"/><path d="M19 15l2 2-2 2"/></svg>
+                  <span class="lb">选集</span>
+                </div>
+                <div class="act">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l4.5-3.5"/></svg>
+                  <span class="lb">1.0x</span>
+                </div>
+                <div class="act star">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 4l2.5 5.2 5.5.7-4 3.9 1 5.6-5-2.8-5 2.8 1-5.6-4-3.9 5.5-.7z"/></svg>
+                  <span class="lb">收藏</span>
+                </div>
+                <div class="act">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="13" r="7"/><path d="M12 10v3l2 1.5M9 3h6"/></svg>
+                  <span class="lb">定时</span>
+                </div>
+                <div class="act">
+                  <svg width="19" height="19" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+                  <span class="lb">更多</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>横屏 · 控制层显示</b>D 槽 5 格，<b style="display:inline">不设「转音频」</b></div>
+    </div>
+
+    <div>
+      <div class="ls-wrap">
+        <div class="ls-phone">
+          <div class="ls-screen land">
+            <div class="frame-video ls-video"></div>
+            <div class="ls-hint">点击画面显示控制层</div>
+          </div>
+        </div>
+      </div>
+      <div class="caption"><b>横屏 · 默认态</b>3 秒无操作自动收起</div>
+    </div>
+  </div>
+  <p class="ls-note">
+    竖屏与横屏的差别不在样式，而在<b style="color:var(--text2)">布局模式</b>：竖屏是四槽纵向排布，画面被上下压缩；
+    横屏是四槽全部叠加，画面 100% 铺满。同一个动作栏、同一套图标尺寸，只是 A 槽 52→48、C 槽 40→36、D 槽 66→56；
+    D 槽只在竖屏为 6 格（含「转音频」）；横屏仍 5 格，不设这一格。
+  </p>
+
+  <div class="spec-title">槽位对照表</div>
+  <table>
+    <thead>
+      <tr><th>槽位</th><th>视频</th><th>音频</th><th>图片</th><th>规格</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="slot">A 导航</td>
+        <td>返回 + 单行标题 + 全屏 + ···</td>
+        <td>收起 + 「正在播放」+ ···</td>
+        <td>返回 + 两行标题（文件名 / 3·9） + ···</td>
+        <td class="size">高 52dp｜图标 24｜标题 14/11sp｜右侧 ≤2</td>
+      </tr>
+      <tr>
+        <td class="slot">B 内容</td>
+        <td>画面全出血 + 底部传输组（转音频后换为音频态）</td>
+        <td>封面 236 + 标题 + 来源 + 传输组</td>
+        <td>图片全出血 + 原图胶囊</td>
+        <td class="size">内容居中｜封面圆角 18｜标题 17sp</td>
+      </tr>
+      <tr>
+        <td class="slot">C 进度</td>
+        <td>时间 — 轨道 — 时间</td>
+        <td>同左（完全一致）</td>
+        <td>无（用胶囊替代）</td>
+        <td class="size">高 40dp｜轨道 3dp｜拇指 9dp｜数字 11sp</td>
+      </tr>
+      <tr>
+        <td class="slot">D 动作</td>
+        <td>选集 / 倍速 / <b>转音频</b> / 收藏 / 定时 / 更多</td>
+        <td>选集 / 倍速 / 收藏 / 定时 / 更多 <b>（无「转音频」）</b></td>
+        <td>原图 / 上一张 / 下一张 / 收藏 / 更多</td>
+        <td class="size">高 66dp｜视频竖屏 6 等分、横屏 5 等分｜音频、图片 5 等分｜图标 21｜标签 10.5sp</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="spec-title">规则</div>
+  <ul class="rules">
+    <li>一页四槽。槽位高度、字号、间距、颜色全局固定，页面之间只换 B 槽内容与 D 槽动作集合。</li>
+    <li>视频与音频的 D 槽<b>共有五项同序</b>：选集 · 倍速 · 收藏 · 定时 · 更多。</li>
+    <li>倍速只作为 D 槽的一格存在，标签直接显示当前值（1.0x）。不再以文字按钮混入传输组，对称问题从根上消失。</li>
+    <li>传输组固定三件：上一 / 播放 / 下一，56dp 圆钮居中，浮在 B 槽底部；不与进度条同排，不参与任何权重分配。</li>
+    <li>主标题全局只出现一次：视频在 A（B 是画面），音频在 B（大标题 + 封面），图片在 A（两行）。</li>
+    <li>显隐状态机：视频竖屏只收 C + D、保留 A；横屏全收；音频三槽常驻；图片单击收 A + D。</li>
+    <li>低频动作只能落在 D 槽或 A 槽的 ··· 里；A 槽右侧硬上限两个图标，超出即收进菜单。</li>
+    <li>所有可点元素最小热区 44×44；图标线宽 1.7，尺寸 21（D 槽）/ 24（A 槽）。</li>
+    <li><b>「转音频」只在竖屏视频页</b>：固定紧跟「倍速」右侧，是竖屏视频独有的第 6 格；<b>音频页与横屏都是 5 格，不设该格、也不留空位</b>。激活后标签变「音频中」并高亮，B 槽由画面切为音频态，再点一次恢复画面。</li>
+  </ul>
+</div>
+
+<script>
+  document.querySelectorAll('[data-toggle]').forEach(function (el) {
+    el.addEventListener('click', function (e) {
+      if (e.target.closest('.slot-a, .slot-d, .speed-sheet, .transport')) return;
+      el.classList.toggle('chrome-hidden');
+    });
+  });
+
+  var sheet = document.getElementById('speedSheet');
+  var lb = document.getElementById('speedLb');
+  document.getElementById('speedAct').addEventListener('click', function (e) {
+    e.stopPropagation();
+    sheet.classList.toggle('open');
+  });
+  sheet.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    lb.textContent = b.dataset.speed;
+    sheet.querySelectorAll('button').forEach(function (x) { x.classList.toggle('sel', x === b); });
+    sheet.classList.remove('open');
+    e.stopPropagation();
+  });
+
+  document.getElementById('playBtn').addEventListener('click', function (e) {
+    e.stopPropagation();
+    var icon = document.getElementById('playIcon');
+    var playing = icon.dataset.playing === '1';
+    icon.dataset.playing = playing ? '0' : '1';
+    icon.innerHTML = playing
+      ? '<path d="M8 5v14l11-7z"/>'
+      : '<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>';
+  });
+
+  document.getElementById('favAct').addEventListener('click', function (e) {
+    e.stopPropagation();
+    this.classList.toggle('on');
+    var filled = this.classList.contains('on');
+    this.querySelector('svg').setAttribute('fill', filled ? 'currentColor' : 'none');
+    this.querySelector('.lb').textContent = filled ? '已收藏' : '收藏';
+  });
+
+  // 转音频：只有竖屏视频页有这一格，横屏不设。切换后 B 槽变音频态。
+  function setAudioMode(on) {
+    document.querySelectorAll('.video').forEach(function (s) {
+      s.classList.toggle('audio-mode', on);
+    });
+    document.querySelectorAll('[data-audio]').forEach(function (el) {
+      el.classList.toggle('on', on);
+      el.querySelector('.lb').textContent = on ? '音频中' : '转音频';
+    });
+  }
+  document.querySelectorAll('[data-audio]').forEach(function (el) {
+    el.addEventListener('click', function (e) {
+      e.stopPropagation();
+      setAudioMode(!document.querySelector('.video').classList.contains('audio-mode'));
+    });
+  });
+</script>
+</body>
+</html>
