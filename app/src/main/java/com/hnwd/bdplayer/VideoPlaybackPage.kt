@@ -183,12 +183,12 @@ internal class VideoPlaybackPage(
                             setImageResource(R.drawable.ic_headset)
                             setColorFilter(Color.WHITE)
                             scaleType = ImageView.ScaleType.CENTER_INSIDE
-                            setPadding(dp(32), dp(32), dp(32), dp(32))
+                            setPadding(dp(26), dp(26), dp(26), dp(26))
                         },
                         FrameLayout.LayoutParams(-1, -1),
                     )
                 },
-                LinearLayout.LayoutParams(dp(104), dp(104)),
+                LinearLayout.LayoutParams(dp(72), dp(72)),
             )
             addView(
                 TextView(activity).apply {
@@ -197,16 +197,7 @@ internal class VideoPlaybackPage(
                     setTextColor(0xFFC5C5D0.toInt())
                     gravity = Gravity.CENTER
                 },
-                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) },
-            )
-            addView(
-                TextView(activity).apply {
-                    text = "画面已收起 · 可锁屏或切到后台继续听"
-                    textSize = 10.5f
-                    setTextColor(0xFF8E909C.toInt())
-                    gravity = Gravity.CENTER
-                },
-                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) },
+                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(10) },
             )
         }
         fun actionCell(iconRes: Int, caption: String, description: String, action: () -> Unit): ActionCell {
@@ -235,13 +226,17 @@ internal class VideoPlaybackPage(
             }
             return ActionCell(root, icon, label)
         }
-        val audioOnly = actionCell(R.drawable.ic_headset, "转音频", "转音频播放") {}
+        // 转音频是高频动作：竖屏顶栏常驻耳机（··· 左侧），不再藏在 D 槽或菜单里
+        val audioOnly = iconButton(R.drawable.ic_headset, "转音频播放", padding = 10) {}
         fun paintListening() {
-            audioOnly.label.text = if (listening) "音频中" else "转音频"
-            audioOnly.icon.setColorFilter(if (listening) actionActiveColor else Color.WHITE)
-            audioOnly.label.setTextColor(if (listening) actionActiveColor else actionLabelColor)
-            audioOnly.root.contentDescription =
+            audioOnly.contentDescription =
                 if (listening) "退出音频模式，恢复画面" else "转音频播放"
+            audioOnly.setBackgroundResource(
+                if (listening) R.drawable.bg_play_accent else R.drawable.bg_video_icon_ripple
+            )
+            audioOnly.setColorFilter(
+                if (listening) ContextCompat.getColor(activity, R.color.onAccent) else Color.WHITE
+            )
         }
         fun setListening(enabled: Boolean) {
             listening = enabled
@@ -253,9 +248,9 @@ internal class VideoPlaybackPage(
             message.visibility = if (listening) View.GONE else View.VISIBLE
             if (enabled) ensureAudioSession() else stopAudioSession()
         }
-        audioOnly.root.setOnClickListener { setListening(!listening) }
-        audioOnly.root.isEnabled = false
-        audioOnly.root.alpha = 0.35f
+        audioOnly.setOnClickListener { setListening(!listening) }
+        audioOnly.isEnabled = false
+        audioOnly.alpha = 0.35f
         paintListening()
         if (listening) setListening(true)
         val favorite = actionCell(R.drawable.ic_star, "收藏", "收藏") {}
@@ -277,15 +272,24 @@ internal class VideoPlaybackPage(
         fun shouldRotateForFullscreen() = !activity.isInMultiWindowMode && !activity.hasWideWindow &&
             activity.resources.configuration.smallestScreenWidthDp < WIDE_WINDOW_DP
         val fullscreen = iconButton(R.drawable.ic_fullscreen, "全屏") { updateFullscreen(!immersive) }
-        val speed = actionCell(R.drawable.ic_speed, "1.0x", "播放倍速") {}
+        // 倍速：控制行右端的文字胶囊，直接显示当前值，不占独立一格
+        val speed = TextView(activity).apply {
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_video_chip)
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            gravity = Gravity.CENTER
+            minWidth = dp(46)
+            isClickable = true
+        }
         fun paintSpeed() {
             val value = player.playbackParameters.speed
-            speed.label.text = PlaybackSpeed.label(value)
-            speed.root.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(value)}"
+            speed.text = PlaybackSpeed.label(value)
+            speed.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(value)}"
         }
         paintSpeed()
-        speed.root.setOnClickListener {
-            val menu = PopupMenu(dialog.context, speed.root, Gravity.END)
+        speed.setOnClickListener {
+            val menu = PopupMenu(dialog.context, speed, Gravity.END)
             PlaybackSpeed.values.forEachIndexed { index, value ->
                 menu.menu.add(0, index, index, PlaybackSpeed.spoken(value))
                     .setChecked(value == player.playbackParameters.speed)
@@ -462,7 +466,7 @@ internal class VideoPlaybackPage(
         }
         paintCourseList()
         if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
-        val courseButton = actionCell(R.drawable.ic_layers, "选集", "选集") {
+        fun showCourseDialog() {
             val holder = FrameLayout(activity)
             embeddedCourses.removeView(coursePanel)
             val rows = listedCourses.size.coerceIn(1, 6)
@@ -486,7 +490,7 @@ internal class VideoPlaybackPage(
             sheet.show()
             sheet.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(0xFFBFC6FF.toInt())
             if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
-        }.also { it.root.visibility = View.GONE }
+        }
         val sleepHandler = Handler(Looper.getMainLooper())
         val timer = actionCell(R.drawable.ic_timer, "定时", "睡眠定时") {}
         fun paintTimer() {
@@ -515,7 +519,7 @@ internal class VideoPlaybackPage(
                 }
             }
         }
-        timer.root.setOnClickListener { anchor ->
+        fun showTimerMenu(anchor: View) {
             val menu = PopupMenu(activity, anchor, Gravity.END)
             menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed()
             listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
@@ -540,28 +544,72 @@ internal class VideoPlaybackPage(
             video.controllerShowTimeoutMs = 0
             menu.show()
         }
+        timer.root.setOnClickListener { showTimerMenu(it) }
         paintTimer()
-        // D 槽：选集 · 倍速 · 转音频 · 收藏 · 定时，等分铺满；音频页的转音频不在此列（音频页另有实现）
-        val actionBar = LinearLayout(activity).apply {
-            orientation = LinearLayout.HORIZONTAL
+        // 横屏没有课程列表，选集做成控制行右端的文字胶囊；竖屏列表常驻，不再重复放入口
+        val courseChip = TextView(activity).apply {
+            text = "选集"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_video_chip)
+            setPadding(dp(9), dp(5), dp(9), dp(5))
             gravity = Gravity.CENTER
-            listOf(courseButton, speed, audioOnly, favorite, timer).forEach { cell ->
-                addView(cell.root, LinearLayout.LayoutParams(0, -1, 1f))
-            }
+            isClickable = true
+            visibility = View.GONE
+            setOnClickListener { showCourseDialog() }
         }
-        val actionsContainer = video.findViewById<FrameLayout>(R.id.videoActions)
-        actionsContainer.addView(actionBar, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
+        val subtitle = TextView(activity).apply {
+            val folder = PanApi.readablePath(entry.path)
+                .substringBeforeLast('/', "").substringAfterLast('/')
+            text = listOfNotNull(
+                folder.takeIf { it.isNotEmpty() },
+                "${listedCourses.size} 节".takeIf { listedCourses.isNotEmpty() },
+            ).joinToString(" · ").ifBlank { "视频" }
+            setTextColor(0xFFB4B7C4.toInt())
+            textSize = 11f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        val titleColumn = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(title, LinearLayout.LayoutParams(-1, -2))
+            addView(subtitle, LinearLayout.LayoutParams(-1, -2))
+        }
+        val moreButton = iconButton(R.drawable.ic_more_horiz, "更多", padding = 12) {}
         val topBar = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setBackgroundColor(0xD9111118.toInt())
-            setPadding(dp(6), dp(4), dp(6), dp(4))
+            setBackgroundResource(R.drawable.bg_video_scrim_top)
+            setPadding(dp(6), dp(10), dp(6), dp(10))
             addView(
                 iconButton(R.drawable.ic_arrow_back, "返回") { handleBack() },
                 LinearLayout.LayoutParams(dp(44), dp(44)),
             )
-            addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(fullscreen, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(titleColumn, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(audioOnly, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(moreButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+        }
+        // ···：只放低频动作；竖屏下方已有课程列表，不再放「选集」，转音频已常驻顶栏
+        moreButton.setOnClickListener { anchor ->
+            val menu = PopupMenu(dialog.context, anchor, Gravity.END)
+            menu.menu.add(0, 0, 0, if (favorite.label.text == "已收藏") "取消收藏" else "收藏")
+            menu.menu.add(0, 1, 1, "睡眠定时")
+            menu.menu.add(0, 2, 2, "文件信息")
+            menu.setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    0 -> favorite.root.performClick()
+                    1 -> showTimerMenu(anchor)
+                    2 -> AlertDialog.Builder(dialog.context)
+                        .setTitle(entry.name)
+                        .setMessage(PanApi.readablePath(entry.path))
+                        .setPositiveButton("关闭", null)
+                        .show()
+                }
+                true
+            }
+            video.controllerShowTimeoutMs = 0
+            menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
+            menu.show()
         }
         val playbackStatus = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
@@ -569,14 +617,16 @@ internal class VideoPlaybackPage(
             addView(message, LinearLayout.LayoutParams(-2, -2))
             addView(retry, LinearLayout.LayoutParams(-2, -2))
         }
-        // 只覆盖画面区域（不含底部进度+动作栏）的浮层容器，音频态与缓冲提示都居中在这里
+        // 缓冲提示居中在画面里；音频态单独挂，避免共用容器的边距把文案裁掉
         val stageOverlay = FrameLayout(activity).apply {
-            addView(audioStage, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
             addView(playbackStatus, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
         }
         val content = FrameLayout(activity).apply {
             addView(video, FrameLayout.LayoutParams(-1, -1))
             addView(stageOverlay, FrameLayout.LayoutParams(-1, -1))
+            addView(audioStage, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER).apply {
+                bottomMargin = dp(40)
+            })
         }
         val root = FrameLayout(activity).apply {
             setBackgroundColor(Color.BLACK)
@@ -587,36 +637,23 @@ internal class VideoPlaybackPage(
                     insets
                 }
             }
-            addView(content, FrameLayout.LayoutParams(-1, -1).apply { topMargin = dp(52) })
+            addView(content, FrameLayout.LayoutParams(-1, -1))
             addView(embeddedCourses, FrameLayout.LayoutParams(-1, -1))
             addView(topBar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
         }
         // 兜底到 PlayerView 自身：万一以后换布局少了 content_frame，也不至于整个播放器崩掉
         val videoFrame = video.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_content_frame) ?: video
-        // 进度行 36 + D 槽 66 + 上下内边距 18 = 120dp，与 view_video_controls.xml 对齐；
-        // 画面按 16:9 排版时正好用满剩余高度
-        val controlsHeight = dp(120)
         var controllerVisible = true
         val progressRow = video.findViewById<LinearLayout>(R.id.videoProgressRow)
-        var transportInline = false
-        fun mountTransport(inRow: Boolean) {
-            if (transportInline == inRow && transport.parent != null) return
-            (transport.parent as? ViewGroup)?.removeView(transport)
-            if (inRow) {
-                progressRow.addView(transport, 0, LinearLayout.LayoutParams(-2, dp(36)))
-            } else {
-                content.addView(
-                    transport,
-                    FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
-                        .apply { bottomMargin = controlsHeight },
-                )
-            }
-            styleTransport(inRow)
-            transportInline = inRow
-            transport.visibility = if (controllerVisible) View.VISIBLE else View.GONE
-        }
+        // 控制层只有一行：传输组 · 当前时间 · 轨道 · 时长 · 倍速 · 选集(横屏) · 全屏。
+        // 全部挂在 PlayerView 的 bottom bar 内，叠在 16:9 画面内底部，不占布局高度。
+        styleTransport(true)
+        progressRow.addView(transport, 0, LinearLayout.LayoutParams(-2, dp(36)))
+        progressRow.addView(speed, LinearLayout.LayoutParams(-2, dp(30)).apply { marginStart = dp(6) })
+        progressRow.addView(courseChip, LinearLayout.LayoutParams(-2, dp(30)).apply { marginStart = dp(6) })
+        progressRow.addView(fullscreen, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
         fun arrangePlayer() {
-            val top = if (immersive) 0 else dp(52)
+            val top = 0
             val availableWidth = root.width - root.paddingLeft - root.paddingRight
             val availableHeight = root.height - root.paddingTop - root.paddingBottom - top
             val landscape = immersive || availableWidth > availableHeight + top
@@ -624,11 +661,10 @@ internal class VideoPlaybackPage(
             val inlineCourses = !landscape && hasCourses
             val sideCourses = !immersive && landscape && availableWidth >= dp(EXPANDED_WINDOW_DP) && hasCourses
             val sideWidth = if (sideCourses) dp(320) else 0
-            // 控制层收起后不再为它预留 120dp：让课程列表上移把这块填满，
-            // 画面本身仍是标准 16:9（stageHeight 与 videoFrame 底距同步减少），不会跳动或变形。
-            val reserve = if (controllerVisible) controlsHeight else 0
+            // 画面按 16:9 铺满 stage；控制层叠在画面内底部，不预留任何高度。
+            // 课程列表固定从画面下沿开始，显隐都不改变占位 → 无空白。
             val stageHeight = if (inlineCourses && availableWidth > 0 && availableHeight > 0) {
-                minOf(availableWidth * 9 / 16 + reserve, (availableHeight * 0.58f).toInt())
+                minOf(availableWidth * 9 / 16, (availableHeight * 0.58f).toInt())
             } else -1
             val stage = content.layoutParams as FrameLayout.LayoutParams
             if (stage.height != stageHeight || stage.topMargin != top || stage.rightMargin != sideWidth) {
@@ -638,17 +674,9 @@ internal class VideoPlaybackPage(
                 content.layoutParams = stage
             }
             val frame = videoFrame.layoutParams as FrameLayout.LayoutParams
-            val margin = if (inlineCourses) reserve else 0
-            if (frame.bottomMargin != margin) {
-                frame.bottomMargin = margin
+            if (frame.bottomMargin != 0) {
+                frame.bottomMargin = 0
                 videoFrame.layoutParams = frame
-            }
-            // 浮层容器跟着画面让位，并额外让出传输组的高度，避免提示文案压在播放键下面
-            val overlayMargin = if (controllerVisible) margin + dp(56) else margin
-            val overlay = stageOverlay.layoutParams as FrameLayout.LayoutParams
-            if (overlay.bottomMargin != overlayMargin) {
-                overlay.bottomMargin = overlayMargin
-                stageOverlay.layoutParams = overlay
             }
 
             val list = embeddedCourses.layoutParams as FrameLayout.LayoutParams
@@ -664,8 +692,12 @@ internal class VideoPlaybackPage(
             val showEmbeddedCourses = showInline || sideCourses
             if (showEmbeddedCourses && courseDialog?.isShowing == true) courseDialog?.dismiss()
             embeddedCourses.visibility = if (showEmbeddedCourses) View.VISIBLE else View.GONE
-            courseButton.root.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
-            mountTransport(landscape)
+            courseChip.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
+            audioOnly.visibility = if (immersive) View.GONE else View.VISIBLE
+            // 竖屏宽度有限：传输组只留播放键，上一/下一交给下方常驻课程列表；
+            // 横屏够宽，三件全显示。避免时间/轨道/倍速被挤到重叠。
+            previous.visibility = if (landscape) View.VISIBLE else View.GONE
+            next.visibility = if (landscape) View.VISIBLE else View.GONE
             fullscreen.contentDescription = when {
                 immersive -> "退出全屏"
                 shouldRotateForFullscreen() -> "横屏全屏"
@@ -812,16 +844,10 @@ internal class VideoPlaybackPage(
         }
         videoFrame.addView(gestureLayer, FrameLayout.LayoutParams(-1, -1))
         video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-            val shown = visibility == View.VISIBLE
-            if (controllerVisible != shown) {
-                controllerVisible = shown
-                // 显隐变化时重排：收起则把预留的 120dp 还给内容区，避免留下空白黑条
-                arrangePlayer()
-            }
-            // 竖屏保留顶栏（Dialog 没有系统返回入口，全隐就没法退出），只收进度条与动作栏；
-            // 横屏才是完全沉浸。
+            controllerVisible = visibility == View.VISIBLE
+            // 布局恒定（控制层叠加、不占位），显隐不再触发重排。
+            // 竖屏保留顶栏（Dialog 没有系统返回入口），横屏才完全沉浸。
             topBar.visibility = if (immersive) visibility else View.VISIBLE
-            transport.visibility = visibility
         })
         var orientationRequested = startFullscreen && activity.requestedOrientation != orientationBeforeFullscreen
         updateFullscreen = { enabled ->
@@ -882,9 +908,9 @@ internal class VideoPlaybackPage(
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                audioOnly.root.isEnabled = tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)
-                audioOnly.root.alpha = if (audioOnly.root.isEnabled) 1f else 0.35f
-                if (!tracks.isEmpty && listening && !audioOnly.root.isEnabled) setListening(false)
+                audioOnly.isEnabled = tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)
+                audioOnly.alpha = if (audioOnly.isEnabled) 1f else 0.35f
+                if (!tracks.isEmpty && listening && !audioOnly.isEnabled) setListening(false)
             }
 
             override fun onRenderedFirstFrame() {
