@@ -68,7 +68,8 @@ internal interface DiskMutationHost {
  * 网盘文件管理：所有对网盘产生副作用的操作集中在这里。
  *
  * 三条不变式（搬出时原样保留，改动前请先确认）：
- * 1. 同一时刻只允许一笔写操作 + 一笔删除核对，由 [guards] 统一把关。
+ * 1. 同一时刻只允许一笔写操作或一笔删除核对，由 [guards] 的 token 锁统一把关；
+ *    迟到回调必须带回自己的 token 才能释放，不能清掉后来者的锁。
  * 2. 写操作全程绑定 [DiskMutationHost.probeId]，账号变了就丢弃结果，不写回旧账号的 UI。
  * 3. 删除先核对 `path -> fs_id` 未被改动（[checkDeleteTargets]），提交后还要回读列表确认
  *    （[reconcileDeletedFiles]）；两步都不能靠接口返回值就宣告成功。
@@ -91,18 +92,18 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
 
     /** 提交写请求；acceptAnyErrno 让我们拿到网盘具体错误码做友好提示。 */
     private fun submitWrite(op: String, request: PanApi.WriteRequest, onSuccess: (JSONObject) -> Unit) {
-        if (!guards.beginWrite()) {
+        val lock = guards.beginWrite() ?: run {
             host.say("已有网盘操作正在处理，请稍候")
             return
         }
         host.showStatus("正在${op}…")
         val session = host.probeId
         fun finish(message: String) {
-            if (session == host.probeId && guards.writeInFlight) {
-                guards.endWrite()
-                host.showStatus(message)
-                host.say(message)
-            }
+            // 账号变了也要释放自己那把锁，否则要等 invalidateAccount() 的 reset() 兜底。
+            if (!guards.endWrite(lock)) return
+            if (session != host.probeId) return
+            host.showStatus(message)
+            host.say(message)
         }
         host.fetchJson(
             request.url, post = true, form = request.form, lane = RequestLane.WRITE,
@@ -110,7 +111,8 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             onCancelled = { finish("${op}结果未确认，请刷新查看") },
             onFailure = { finish("${op}结果未确认，请刷新查看") },
         ) { json ->
-            guards.endWrite()
+            // 旧回调（锁已被 reset / 换了持有者）不能碰当前锁，更不能把结果写回旧账号的 UI。
+            if (!guards.endWrite(lock) || session != host.probeId) return@fetchJson
             val errno = PanApi.writeErrno(json)
             if (errno == 132) {
                 showSecurityVerify(op)
@@ -306,7 +308,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
 
     /** 删除接口按路径操作，先确认缓存里的路径仍指向原来的文件。 */
     private fun checkDeleteTargets(token: String, dir: String, entries: List<PanEntry>, onVerified: () -> Unit) {
-        if (!guards.beginDelete()) {
+        val lock = guards.beginDelete() ?: run {
             host.say("已有网盘操作正在处理，请稍候")
             return
         }
@@ -314,8 +316,9 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         val remaining = entries.associate { it.path to it.fileId }.toMutableMap()
         host.say("正在核对要删除的文件")
         fun finish(verified: Boolean) {
-            if (session != host.probeId || host.activityDestroyed() || !guards.deleteInFlight) return
-            guards.endDelete()
+            // 会话变更 / Activity 销毁时同样要释放，且只释放自己那把锁。
+            if (!guards.endDelete(lock)) return
+            if (session != host.probeId || host.activityDestroyed()) return
             if (verified) onVerified()
             else host.say("无法确认文件仍在原位置，请刷新后重新选择")
         }
@@ -349,19 +352,27 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
     private fun reconcileDeletedFiles(token: String, dir: String, cacheKey: String, ids: Set<String>) {
         val session = host.probeId
         // 这是删除链路的下半段：核对已在 checkDeleteTargets 里释放、提交已成功，
-        // 此刻抢占删除通道理论上必然成功；万一是脏状态就中止，绝不在未持锁的情况下回读确认。
-        if (!guards.beginDelete()) {
+        // 此刻抢占删除通道理论上必然成功；抢不到就中止，绝不在未持锁的情况下回读确认。
+        val lock = guards.beginDelete() ?: run {
             host.say("删除结果未确认，请刷新查看")
+            // 删除请求已经提交，刷新当前目录让用户看到网盘真实状态，而不是停在旧列表上。
+            if (host.onDiskScreen() && host.diskCacheKey() == cacheKey) host.reloadPage()
             return
         }
         host.say("删除请求已提交，正在等待网盘确认")
 
         val seenPages = mutableSetOf<List<String>>()
-        fun current() = !host.activityDestroyed() && guards.deleteInFlight &&
-            session == host.probeId && host.accountVerified()
+        /** 仍有效才继续；一旦失效立刻释放自己那把锁，不再依赖账号失效时的 reset()。 */
+        fun active(): Boolean {
+            if (!host.activityDestroyed() && guards.deleteToken == lock &&
+                session == host.probeId && host.accountVerified()) return true
+            guards.endDelete(lock)
+            return false
+        }
         fun finish(confirmed: Boolean) {
-            if (!current()) return
-            guards.endDelete()
+            val live = active()
+            if (!guards.endDelete(lock)) return
+            if (!live) return
             if (confirmed) {
                 host.bumpCourseRequest()
                 host.invalidateDiskCaches()
@@ -371,10 +382,10 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         }
 
         fun scan(attempt: Int, page: Int) {
-            if (!current()) return
+            if (!active()) return
             if (page == 1) seenPages.clear()
             fun retry() {
-                if (!current()) return
+                if (!active()) return
                 if (attempt >= 8) finish(false)
                 else host.delay(1_000L) { scan(attempt + 1, 1) }
             }
