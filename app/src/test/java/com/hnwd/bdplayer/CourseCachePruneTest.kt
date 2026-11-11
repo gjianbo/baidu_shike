@@ -193,4 +193,47 @@ class CourseCachePruneTest {
         assertEquals(3, groups.keys["dir:old"]?.size)
         assertTrue(groups.keys["dir:fresh"] != null)
     }
+
+    // ---- readSyncedAt：只扫 JSON 头部，避免为取一个时间戳解析整份 entries ----
+
+    @Test
+    fun `头部直接读到 syncedAt`() {
+        assertEquals(123L, readSyncedAt("""{"syncedAt":123,"entries":[]}"""))
+    }
+
+    @Test
+    fun `syncedAt 为字符串数字也能读`() {
+        assertEquals(456L, readSyncedAt("""{"syncedAt":"456","entries":[]}"""))
+    }
+
+    @Test
+    fun `缺少 syncedAt 返回 0`() {
+        assertEquals(0L, readSyncedAt("""{"entries":[]}"""))
+    }
+
+    @Test
+    fun `脏 JSON 返回 0`() {
+        assertEquals(0L, readSyncedAt("{not json"))
+    }
+
+    @Test
+    fun `超大 entries 只扫头部`() {
+        val padding = "x".repeat(2_000)
+        val raw = """{"syncedAt":42,"entries":["$padding"]}"""
+        assertTrue(raw.length > 256)
+        assertEquals(42L, readSyncedAt(raw))
+    }
+
+    @Test
+    fun `头部没有 syncedAt 时回落整份解析`() {
+        val padding = "x".repeat(400)
+        val raw = """{"entries":["$padding"],"syncedAt":789}"""
+        assertEquals(789L, readSyncedAt(raw))
+    }
+
+    @Test
+    fun `readSyncedAt 与整份解析结果一致`() {
+        val raw = """{"syncedAt":1700000000000,"entries":[{"name":"a"}],"nextCursor":null}"""
+        assertEquals(JSONObject(raw).optLong("syncedAt"), readSyncedAt(raw))
+    }
 }

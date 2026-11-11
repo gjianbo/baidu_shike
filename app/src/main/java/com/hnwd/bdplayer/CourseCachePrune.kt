@@ -21,6 +21,24 @@ internal data class CacheGroups(
 )
 
 /**
+ * `CourseCache.write` 把 syncedAt 写在 JSON 最前面（`{"syncedAt":…,"entries":[…]}`），
+ * 所以只看头部 [SYNCED_AT_WINDOW] 个字符就够。历史欠账大时，prune 首次要扫描所有键，
+ * 逐个 `JSONObject(raw)` 会把几 MB 的 entries 全解析一遍，这是启动/写缓存卡顿的来源。
+ */
+private const val SYNCED_AT_WINDOW = 256
+private val SYNCED_AT_FIELD = Regex("\"syncedAt\"\\s*:\\s*\"?(\\d{1,19})")
+
+/**
+ * 快速读取 syncedAt：先扫头部，命中即返回；没命中才回落完整解析（兼容字段被挪到后面的老数据）。
+ * 脏 JSON / 缺字段一律返回 0，调用方按「最旧」处理，只在超限时优先淘汰。
+ */
+internal fun readSyncedAt(raw: String): Long {
+    val head = if (raw.length <= SYNCED_AT_WINDOW) raw else raw.substring(0, SYNCED_AT_WINDOW)
+    SYNCED_AT_FIELD.find(head)?.groupValues?.get(1)?.toLongOrNull()?.let { return it }
+    return runCatching { JSONObject(raw).optLong("syncedAt") }.getOrDefault(0L)
+}
+
+/**
  * 从 SharedPreferences 的原始键值聚合目录组。[prefix] 之外的账号缓存一概不碰，
  * 只认 `<目录>:<数字页码>` 格式的键；组内取所有页里最新的 syncedAt。
  * 脏 JSON / 非 String 值的页记为 0（不主动删，超限时才作为最旧淘汰）。
@@ -32,9 +50,7 @@ internal fun collectCacheGroups(all: Map<String, Any?>, prefix: String): CacheGr
         if (!stored.startsWith(prefix)) continue
         if (stored.substringAfterLast(':').toIntOrNull() == null) continue
         val group = stored.removePrefix(prefix).substringBeforeLast(':')
-        val at = (value as? String)?.let { raw ->
-            runCatching { JSONObject(raw).optLong("syncedAt") }.getOrDefault(0L)
-        } ?: 0L
+        val at = (value as? String)?.let(::readSyncedAt) ?: 0L
         syncedAt[group] = maxOf(syncedAt[group] ?: 0L, at)
         keys.getOrPut(group) { mutableListOf() }.add(stored)
     }
