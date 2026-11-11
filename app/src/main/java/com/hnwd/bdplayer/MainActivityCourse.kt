@@ -1,0 +1,509 @@
+package com.hnwd.bdplayer
+
+import android.view.View
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.PopupMenu
+import android.widget.TextView
+import androidx.media3.common.Player
+
+/**
+ * 课程列表：排序、分页、行渲染与选集切换。
+ *
+ * 从 MainActivity.kt 按域原样搬出的扩展函数：函数体与语义未改，
+ * 仅把 private 提升为 internal，并用 this@? 保真原 this@MainActivity 引用。
+ */
+
+internal fun MainActivity.renderCourse() {
+    status.text = if (courseEntries.isEmpty()) "没有条目" else cacheNote
+    sectionTitle.text = "文件"
+    content.removeAllViews()
+    addFilteredCourseRows(courseEntries.toList(), sortable = screen != Screen.HOME)
+}
+
+
+internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
+    val home = screen == Screen.HOME
+    val transferred = if (entries.any { !it.isDisk }) transferredIndex() else emptySet()
+    val transferredCount = entries.count { matchesTransferred(it, transferred) }
+    if (home || transferredCount == 0) transferredOnly = false
+    transferredChip.visibility = if (!home && transferredCount > 0) View.VISIBLE else View.GONE
+    transferredChip.text = "已转存 $transferredCount"
+    transferredChip.contentDescription = "只看已转存，共 $transferredCount 项"
+    val kinds = entries.map(PanApi::kindOf).toSet()
+    val showFilters = if (home) {
+        MediaFilter.entries.any { it != MediaFilter.ALL && kinds.any(it::includes) }
+    } else {
+        kinds.size >= 2 || transferredCount > 0
+    }
+    filterBar.visibility = if (showFilters) View.VISIBLE else View.GONE
+    sortButton.text = courseOrder.label
+    showAvailableMediaFilters(kinds)
+    if (mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
+        mediaFilter = MediaFilter.ALL
+    }
+    val rows = column()
+    fun renderRows() {
+        val matching = entries.filter {
+            mediaFilter.includes(PanApi.kindOf(it)) &&
+                (!transferredOnly || matchesTransferred(it, transferred))
+        }
+        updateFilterChips()
+        val ordered = if (sortable) orderCourses(matching, courseOrder) else matching
+        filterCount.text = "共 ${ordered.size} 项"
+        lastRenderedEntries = ordered
+        sortButton.visibility = if (sortable && entries.isNotEmpty() && !selectionMode) View.VISIBLE else View.GONE
+        btnSelect.visibility = if (!selectionMode && sortable && ordered.isNotEmpty()) View.VISIBLE else View.GONE
+        rows.removeAllViews()
+        extendPlaybackQueue(ordered)
+        if (ordered.isEmpty() && entries.isNotEmpty()) rows.addView(label("当前已加载的内容中没有匹配项", 12f))
+        addCourseRows(rows, ordered, transferred)
+        renderCourseSwitch()
+    }
+    content.addView(rows)
+    redrawFilteredRows = ::renderRows
+    renderRows()
+}
+
+
+internal fun MainActivity.showCourseSort() {
+    val options = CourseOrder.entries
+    showChoiceSheet(
+        title = "排序",
+        choices = options.map { SheetChoice(it.label, checked = it == courseOrder, tag = it) },
+        onSelect = { choice ->
+            courseOrder = choice.tag as CourseOrder
+            ThemeStore.setCourseOrder(this, courseOrder.name)
+            sortButton.text = courseOrder.label
+            redrawFilteredRows?.invoke()
+        },
+    )
+}
+
+
+internal fun MainActivity.playbackOrderKey(entry: PanEntry, listKey: String?): String? {
+    if (entry.isDisk) return playbackPathOrderKey(entry)
+    val directory = directoryCacheKey(entry, listKey) ?: courseCache.directoryContaining(entry)
+    return directory?.let { AccountScope.key(it) } ?: playbackPathOrderKey(entry)
+}
+
+
+internal fun MainActivity.playbackPathOrderKey(entry: PanEntry): String? {
+    val path = PanApi.readablePath(entry.path)
+    if (!path.startsWith('/')) return null
+    return AccountScope.key("path:${entry.origin}:${entry.sourceId}:${path.substringBeforeLast('/')}")
+}
+
+
+internal fun MainActivity.playbackOrder(entry: PanEntry, listKey: String?): CourseOrder {
+    val preferences = getSharedPreferences("playback_order", android.content.Context.MODE_PRIVATE)
+    val saved = playbackOrderKey(entry, listKey)?.let {
+        preferences.getString(it, null)
+    } ?: playbackPathOrderKey(entry)?.let { preferences.getString(it, null) }
+    return when (saved) {
+        CourseOrder.DESCENDING.name -> CourseOrder.DESCENDING
+        CourseOrder.ASCENDING.name -> CourseOrder.ASCENDING
+        else -> if (courseOrder == CourseOrder.DESCENDING) CourseOrder.DESCENDING else CourseOrder.ASCENDING
+    }
+}
+
+
+internal fun MainActivity.playbackSortLabel(entry: PanEntry, listKey: String?): String =
+    if (playbackOrder(entry, listKey) == CourseOrder.DESCENDING) "降序 ▾" else "升序 ▾"
+
+
+internal fun MainActivity.showPlaybackSort(anchor: View, entry: PanEntry, listKey: String?, onSorted: (List<PanEntry>) -> Unit) {
+    val key = playbackOrderKey(entry, listKey) ?: return
+    val account = verifiedAccount
+    val options = listOf(CourseOrder.ASCENDING, CourseOrder.DESCENDING)
+    PopupMenu(anchor.context, anchor).apply {
+        val selected = playbackOrder(entry, listKey)
+        options.forEachIndexed { index, order ->
+            menu.add(0, index, index, order.label)
+        }
+        menu.setGroupCheckable(0, true, true)
+        menu.findItem(options.indexOf(selected)).isChecked = true
+        setOnMenuItemClickListener { item ->
+            if (account == verifiedAccount && hasVerifiedAccount() &&
+                PlaybackQueueState.listKey == listKey &&
+                PlaybackQueueState.anchor?.let { sameEntry(it, entry) } == true
+            ) {
+                val order = options[item.itemId]
+                getSharedPreferences("playback_order", android.content.Context.MODE_PRIVATE).edit().putString(key, order.name).apply()
+                val courses = orderCourses(PlaybackQueueState.entries, order)
+                PlaybackQueueState.entries = courses
+                pendingQueue = pendingQueue?.let { pending ->
+                    if (playbackOrderKey(pending.entry, pending.listKey) == key) {
+                        pending.copy(entries = orderCourses(pending.entries, order))
+                    } else pending
+                }
+                renderCourseSwitch()
+                onSorted(courses)
+            }
+            true
+        }
+        show()
+    }
+}
+
+
+internal fun MainActivity.playbackDirectory(entry: PanEntry, listKey: String?): Pair<String, List<PanEntry>>? {
+    val preferredKey = directoryCacheKey(entry, listKey)
+    val key = preferredKey?.takeIf { courseCache.readAll(it).any { file -> sameEntry(file, entry) } }
+        ?: courseCache.directoryContaining(entry)
+        ?: return null
+    val media = sameMediaKind(entry, courseCache.readAll(key))
+    val queueKey = when {
+        key == "disk:roots" -> "D:root"
+        key.startsWith("disk:dir:") -> "D:${key.removePrefix("disk:dir:")}"
+        key.startsWith("roots:") -> "G:${entry.gid}"
+        key.startsWith("dir:") -> "G:${key.removePrefix("dir:")}"
+        else -> if (entry.isDisk) "D:root" else "G:${entry.gid}"
+    }
+    return queueKey to orderCourses(media, playbackOrder(entry, queueKey))
+}
+
+
+internal fun MainActivity.nextDirectoryPage(entry: PanEntry, listKey: String?): String? {
+    val key = directoryCacheKey(entry, listKey) ?: return null
+    if (entry.isDisk || key.startsWith("disk:")) return null
+    val (page, cached) = courseCache.lastPage(key) ?: return null
+    if (key.startsWith("roots:")) {
+        val cursor = cached.nextCursor?.takeIf { it.isNotEmpty() } ?: return null
+        return PanApi.roots(entry.gid, cursor)
+    }
+    if (cached.nextCursor != "more" && (cached.nextCursor != null || cached.entries.size < 100)) return null
+    val directoryId = key.substringAfterLast(':')
+    return PanApi.children(entry, page + 1, directoryId)
+}
+
+
+internal fun MainActivity.loadMoreCourses(
+    entry: PanEntry,
+    listKey: String?,
+    isCurrentCourse: () -> Boolean = { PlaybackQueueState.anchor?.let { sameEntry(it, entry) } == true },
+    done: (List<PanEntry>?) -> Unit,
+) {
+    if (entry.provider == SourceProvider.QUARK) return done(null)
+    if (entry.isDisk) {
+        loadMoreDiskCourses(entry, listKey, isCurrentCourse, done)
+        return
+    }
+    val key = directoryCacheKey(entry, listKey) ?: return done(null)
+    val (page, cached) = courseCache.lastPage(key) ?: return done(null)
+    val url = nextDirectoryPage(entry, listKey) ?: return done(null)
+    val nested = key.startsWith("dir:")
+    var finished = false
+    fun complete(entries: List<PanEntry>?) {
+        if (finished) return
+        finished = true
+        done(entries)
+    }
+    load(
+        url, post = nested || entry.isContact, lane = RequestLane.COURSE,
+        onCancelled = { complete(null) }, onFailure = { complete(null) },
+    ) { json ->
+        val files = if (nested) PanApi.parseChildren(json, entry) else PanApi.parseRoots(json, entry.gid)
+        val next = if (nested) {
+            if (PanApi.hasMore(json) && files.isNotEmpty() && files != cached.entries) "more" else ""
+        } else {
+            nextRootCursor(json, entry.gid, cached.nextCursor.orEmpty())
+        }
+        val last = courseCache.lastPage(key)
+        if (last?.first == page && last.second == cached) {
+            courseCache.writeIfChanged(key, page + 1, files, next)
+        } else if (last == null || last.first <= page) {
+            complete(null)
+            return@load
+        }
+        if (PlaybackQueueState.listKey != listKey || !isCurrentCourse()) {
+            complete(null)
+            return@load
+        }
+        val courses = orderCourses(sameMediaKind(entry, courseCache.readAll(key)), playbackOrder(entry, listKey))
+        PlaybackQueueState.entries = courses
+        renderCourseSwitch()
+        complete(courses)
+    }
+}
+
+
+internal fun MainActivity.loadMoreDiskCourses(
+    entry: PanEntry,
+    listKey: String?,
+    isCurrentCourse: () -> Boolean,
+    done: (List<PanEntry>?) -> Unit,
+) {
+    val key = directoryCacheKey(entry, listKey) ?: return done(null)
+    if (!key.startsWith("disk:")) return done(null)
+    val (page, cached) = courseCache.lastPage(key) ?: return done(null)
+    if (cached.nextCursor != "more") return done(null)
+    val dir = if (key == "disk:roots") {
+        "/"
+    } else {
+        PanApi.readablePath(entry.path).substringBeforeLast('/').ifEmpty { "/" }
+    }
+    ensureBdstoken(
+        onReady = { token ->
+            val request = BaiduPersonalDrive(token).list(dir, page + 1, 100)
+            load(
+                request.url, lane = RequestLane.COURSE,
+                onCancelled = { done(null) }, onFailure = { done(null) },
+            ) { json ->
+                if (PlaybackQueueState.listKey != listKey || !isCurrentCourse()) {
+                    done(null)
+                    return@load
+                }
+                val (files, hasMore) = request.decode(json)
+                val last = courseCache.lastPage(key)
+                if (last?.first != page || last.second != cached) {
+                    done(null)
+                    return@load
+                }
+                courseCache.writeIfChanged(key, page + 1, files, if (hasMore) "more" else "")
+                diskIndexCache = null
+                val courses = orderCourses(
+                    sameMediaKind(entry, courseCache.readAll(key)),
+                    playbackOrder(entry, listKey),
+                )
+                PlaybackQueueState.entries = courses
+                renderCourseSwitch()
+                done(courses)
+            }
+        },
+        onFailure = { done(null) },
+    )
+}
+
+
+internal fun MainActivity.hasMoreCourses(entry: PanEntry, listKey: String?): Boolean {
+    if (entry.provider == SourceProvider.QUARK) return false
+    val key = directoryCacheKey(entry, listKey) ?: return false
+    val (_, cached) = courseCache.lastPage(key) ?: return false
+    return if (entry.isDisk) cached.nextCursor == "more" else nextDirectoryPage(entry, listKey) != null
+}
+
+
+internal fun MainActivity.directoryCacheKey(entry: PanEntry, listKey: String?): String? = when {
+    listKey == "D:root" && entry.isDisk -> "disk:roots"
+    listKey?.startsWith("D:") == true && entry.isDisk -> "disk:dir:${listKey.removePrefix("D:")}"
+    listKey == "G:${entry.gid}" -> "roots:${entry.gid}"
+    listKey?.startsWith("G:${entry.gid}:") == true -> "dir:${listKey.removePrefix("G:")}"
+    else -> null
+}
+
+
+internal fun MainActivity.styleContent() {
+    content.setBackgroundColor(color(R.color.transparent))
+}
+
+
+internal fun MainActivity.addCourseRows(
+    container: LinearLayout,
+    entries: List<PanEntry>,
+    transferred: Set<String> = emptySet(),
+) {
+    val favoriteKeys = favorites.all().map(::entryKey).toSet()
+    val sourceNames = if (screen == Screen.FAVORITES) {
+        shareSources().associate { it.id to it.name }
+    } else {
+        emptyMap()
+    }
+    if (!hasWideWindow) {
+        entries.forEach { container.addView(courseRow(it, entries, transferred, favoriteKeys, sourceNames)) }
+        return
+    }
+    entries.chunked(2).forEach { pair ->
+        val line = row()
+        pair.forEachIndexed { index, entry ->
+            val params = LinearLayout.LayoutParams(0, -2, 1f)
+            if (index == 0 && pair.size == 2) params.rightMargin = dp(8)
+            line.addView(courseRow(entry, entries, transferred, favoriteKeys, sourceNames), params)
+        }
+        if (pair.size == 1) line.addView(View(this), LinearLayout.LayoutParams(0, -2, 1f))
+        container.addView(line)
+    }
+}
+
+
+internal fun MainActivity.courseRow(
+    entry: PanEntry,
+    entries: List<PanEntry>,
+    transferred: Set<String> = emptySet(),
+    favoriteKeys: Set<String> = emptySet(),
+    sourceNames: Map<String, String> = emptyMap(),
+): View {
+    val format = formatOf(entry)
+    val kind = PanApi.kindOf(entry)
+    val row = layoutInflater.inflate(R.layout.item_course, content, false)
+    row.tag = entryKey(entry)
+    val fmt = row.findViewById<ImageView>(R.id.fmt)
+    paintMediaIcon(fmt, kind, entry.directory)
+    if (screen == Screen.HOME && folders.isEmpty() && !showingHomeDirectory &&
+        entry.provider == SourceProvider.BAIDU && !entry.isDisk && !entry.isContact &&
+        hasVerifiedAccount() && (kind == MediaKind.IMAGE || kind == MediaKind.VIDEO)
+    ) {
+        loadRecentThumbnail(entry, fmt)
+    }
+    row.findViewById<TextView>(R.id.itemTitle).text = entry.name
+    // 兼容旧收藏/历史里已持久化的编码路径；无斜杠时不再把整串路径回显到 meta
+    val folder = PanApi.readablePath(entry.path)
+        .substringBeforeLast('/', "")
+        .substringAfterLast('/')
+    val size = entry.size.toLongOrNull()?.let { if (it >= 1024 * 1024) "${it / 1024 / 1024} MB" else "" }.orEmpty()
+    val kindName = mediaKindLabel(kind, entry.directory, format)
+    val source = when {
+        screen != Screen.FAVORITES -> ""
+        entry.isDisk -> "我的网盘"
+        else -> sourceNames[entry.gid] ?: "共享文件库"
+    }
+    val transferredLabel = if (matchesTransferred(entry, transferred)) "已转存" else ""
+    row.findViewById<TextView>(R.id.itemMeta).text =
+        listOf(source, transferredLabel, kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
+    val side = row.findViewById<ImageView>(R.id.itemSide)
+    side.tag = favoriteTag(entry)
+    paintFavorite(side, entryKey(entry) in favoriteKeys)
+    side.setOnClickListener { toggleFavorite(entry) }
+    val mark = progressMark(entry)
+    if (mark != null) {
+        row.findViewById<View>(R.id.itemFoot).visibility = View.VISIBLE
+        val time = row.findViewById<TextView>(R.id.footTime)
+        time.text = mark.first
+        time.setTextColor(color(if (mark.second) R.color.ok else R.color.ink3))
+        row.findViewById<View>(R.id.footDot).setBackgroundResource(
+            if (mark.second) R.drawable.bg_dot_ok else R.drawable.bg_dot_accent,
+        )
+    }
+    val check = row.findViewById<ImageView>(R.id.itemCheck)
+    if (selectionMode) {
+        val key = entryKey(entry)
+        check.visibility = View.VISIBLE
+        check.isSelected = key in selectedKeys
+        check.contentDescription = if (check.isSelected) "已选：${entry.name}" else "未选：${entry.name}"
+        row.setOnClickListener { toggleSelection(entry) }
+        row.setOnLongClickListener(null)
+    } else {
+        check.visibility = View.GONE
+        row.setOnClickListener { openEntry(entry, entries, currentPlaybackListKey()) }
+        row.setOnLongClickListener {
+            showEntryActions(entry, entries)
+            true
+        }
+    }
+    return row
+}
+
+
+internal fun MainActivity.currentPlaybackListKey(): String {
+    val parent = folders.lastOrNull()
+    return when {
+        parent != null && parent.isDisk -> "D:${parent.fileId}"
+        parent != null -> "G:${parent.gid}:${parent.messageId}:${parent.fileId}"
+        screen == Screen.DISK -> "D:root"
+        screen == Screen.GROUPS || showingHomeDirectory -> "G:$gid"
+        else -> "${screen}:$gid"
+    }
+}
+
+
+internal fun MainActivity.selectPlayback(entry: PanEntry, entries: List<PanEntry>, listKey: String? = null) {
+    val directory = playbackDirectory(entry, listKey)
+    val queue = directory?.second ?: orderCourses(courseSiblings(entry, entries), playbackOrder(entry, null))
+    pendingQueue = QueueSelection(entry, queue, directory?.first)
+}
+
+
+internal fun MainActivity.extendPlaybackQueue(entries: List<PanEntry>) {
+    val anchor = PlaybackQueueState.anchor ?: return
+    if (PlaybackQueueState.listKey != currentPlaybackListKey() || entries.none { sameEntry(it, anchor) }) return
+    if (PanApi.kindOf(anchor) == MediaKind.VIDEO && videoPage != null) return
+    PlaybackQueueState.entries = playbackDirectory(anchor, PlaybackQueueState.listKey)?.second ?: return
+}
+
+
+internal fun MainActivity.currentAudioEntry(player: Player): PanEntry? {
+    if (!ownsAudio(player)) return null
+    val item = player.currentMediaItem ?: return null
+    val extras = item.mediaMetadata.extras ?: return null
+    val origin = runCatching { EntryOrigin.valueOf(extras.getString("origin") ?: "GROUP") }
+        .getOrDefault(EntryOrigin.GROUP)
+    return PanEntry(
+        extras.getString("gid").orEmpty(), extras.getString("message").orEmpty(),
+        extras.getString("owner").orEmpty(), item.mediaId, item.mediaMetadata.title?.toString().orEmpty(),
+        extras.getString("path").orEmpty(), extras.getString("size").orEmpty(), false, origin,
+    )
+}
+
+
+internal fun MainActivity.siblingOf(entry: PanEntry, delta: Int): PanEntry? {
+    val index = PlaybackQueueState.entries.indexOfFirst { sameEntry(it, entry) }
+    return if (index >= 0) PlaybackQueueState.entries.getOrNull(index + delta) else null
+}
+
+
+internal fun MainActivity.renderCourseSwitch() {
+    val anchor = PlaybackQueueState.anchor
+    val index = if (anchor == null) -1 else PlaybackQueueState.entries.indexOfFirst { sameEntry(it, anchor) }
+    if (anchor == null || index < 0 || folders.isEmpty() || courseEntries.none { sameEntry(it, anchor) }) {
+        courseSwitch.visibility = View.GONE
+        return
+    }
+    courseSwitch.visibility = View.VISIBLE
+    btnPrev.isEnabled = siblingOf(anchor, -1) != null
+    btnNext.isEnabled = siblingOf(anchor, 1) != null
+    btnPrev.alpha = if (btnPrev.isEnabled) 1f else 0.4f
+    btnNext.alpha = if (btnNext.isEnabled) 1f else 0.4f
+    courseHint.text = "第 ${index + 1} / ${PlaybackQueueState.entries.size} 节"
+    btnPrev.setOnClickListener { playSibling(anchor, -1) }
+    btnNext.setOnClickListener { playSibling(anchor, 1) }
+}
+
+
+internal fun MainActivity.advanceAfterEnd(entry: PanEntry, isCurrent: () -> Boolean, playNext: () -> Unit) {
+    val listKey = PlaybackQueueState.listKey
+    fun canAdvance() = hasActiveSession(entry.provider) && !isFinishing && !isDestroyed &&
+        PlaybackQueueState.listKey == listKey && isCurrent() &&
+        PlaybackQueueState.entries.any { sameEntry(it, entry) }
+
+    fun tryNext() {
+        if (!canAdvance()) return
+        if (SleepTimer.consumeStopAfterCurrent()) return
+        if (siblingOf(entry, 1) != null) {
+            playNext()
+            return
+        }
+        if (automaticCourseLoad?.let { sameEntry(it, entry) } == true ||
+            !hasMoreCourses(entry, listKey)
+        ) return
+        automaticCourseLoad = entry
+        loadMoreCourses(entry, listKey, ::canAdvance) { courses ->
+            if (automaticCourseLoad === entry) {
+                automaticCourseLoad = null
+                if (courses != null) tryNext()
+            }
+        }
+    }
+    tryNext()
+}
+
+
+internal fun MainActivity.playSibling(
+    entry: PanEntry,
+    delta: Int,
+    automatic: Boolean = false,
+    route: PlaybackRoute = PlaybackRoute.AUDIO,
+    videoState: VideoPlaybackPage.Snapshot? = null,
+) {
+    if (!hasActiveSession(entry.provider) || isFinishing || isDestroyed) return
+    val target = siblingOf(entry, delta) ?: return
+    when (PanApi.kindOf(target)) {
+        MediaKind.AUDIO -> resolveAudio(target, route, openPlayer = !automatic)
+        MediaKind.VIDEO -> {
+            startVideo(
+                target, audioOnly = videoState?.audioOnly == true,
+                fullscreen = videoState?.fullscreen == true,
+            )
+        }
+        else -> Unit
+    }
+}
