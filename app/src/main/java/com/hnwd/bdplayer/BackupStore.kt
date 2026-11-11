@@ -8,7 +8,9 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -22,6 +24,9 @@ internal object BackupStore {
     private const val APP = "com.hnwd.bdplayer"
     private const val DIR = "backups"
     private const val MAX = 3
+    /** 导入文件的硬上限。正常备份只有几 KB，5 MB 足够容纳极端大的收藏与进度列表。 */
+    const val RESTORE_LIMIT_MB = 5
+    const val MAX_RESTORE_BYTES = RESTORE_LIMIT_MB * 1024L * 1024L
     const val PREFS_SETTINGS = "app_settings"
     private const val DOWNLOAD_FOLDER = "拾课备份"
     private val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/$DOWNLOAD_FOLDER"
@@ -83,7 +88,9 @@ internal object BackupStore {
         val files = File(context.filesDir, DIR).listFiles { file -> file.name.endsWith(".json") } ?: return emptyList()
         return files.mapNotNull { file ->
             runCatching {
-                val payload = JSONObject(file.readText())
+                val payload = file.inputStream().use {
+                    JSONObject(String(readBounded(it), Charsets.UTF_8))
+                }
                 val time = payload.optLong("createdMillis", file.lastModified())
                 Snapshot(
                     time = time,
@@ -336,9 +343,51 @@ internal object BackupStore {
         editor.apply()
     }
 
-    fun read(context: Context, uri: Uri): JSONObject? = runCatching {
-        val text = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-            ?: return null
-        JSONObject(text)
-    }.getOrNull()
+    /** 导入文件的三种结局，让 UI 能区分「文件太大」和「内容不对」。 */
+    sealed class ReadResult {
+        data class Ok(val payload: JSONObject) : ReadResult()
+        data object TooLarge : ReadResult()
+        data object Invalid : ReadResult()
+    }
+
+    class BackupTooLargeException(limit: Long) :
+        IllegalArgumentException("备份文件超过 ${limit / 1024 / 1024} MB，请选择正确的备份文件")
+
+    /**
+     * provider 报出的长度是否可接受。负数（SAF 的 UNKNOWN_LENGTH）代表拿不到长度，
+     * 这里放行，由 [readBounded] 在读取过程中按字节数硬性兜底。
+     */
+    fun restoreSizeAllowed(size: Long): Boolean = size < 0 || size <= MAX_RESTORE_BYTES
+
+    /** 按字节上限流式读取：即使 provider 不报长度，也不会把整份大文件读进内存。 */
+    fun readBounded(input: InputStream, limit: Long = MAX_RESTORE_BYTES): ByteArray {
+        val out = ByteArrayOutputStream()
+        val buffer = ByteArray(8 * 1024)
+        var total = 0L
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            total += count
+            if (total > limit) throw BackupTooLargeException(limit)
+            out.write(buffer, 0, count)
+        }
+        return out.toByteArray()
+    }
+
+    fun read(context: Context, uri: Uri): ReadResult {
+        // 导入用的是 */*，用户完全可能选中几百 MB 的视频；先按 provider 报的长度挡一道。
+        val declared = runCatching {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { it.statSize } ?: -1L
+        }.getOrDefault(-1L)
+        if (!restoreSizeAllowed(declared)) return ReadResult.TooLarge
+        return try {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { readBounded(it) }
+                ?: return ReadResult.Invalid
+            ReadResult.Ok(JSONObject(String(bytes, Charsets.UTF_8)))
+        } catch (error: BackupTooLargeException) {
+            ReadResult.TooLarge
+        } catch (error: Exception) {
+            ReadResult.Invalid
+        }
+    }
 }

@@ -301,6 +301,8 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                             }
                         }
                     }
+                } else {
+                    host.say("请先刷新当前目录后重试")
                 }
             }
             .show()

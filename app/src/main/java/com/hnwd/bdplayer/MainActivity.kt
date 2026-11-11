@@ -300,14 +300,14 @@ class MainActivity : AppCompatActivity() {
         PdfCache.prune(this)
         ImageCache.prune(this)
         AccountScope.init(this)
-        DriveSourceRouter.bindActiveSource { gid }
+        DriveSourceRouter.bindActiveSource(this) { gid }
         diskProvider = runCatching {
             SourceProvider.valueOf(
                 getSharedPreferences("account_scope", MODE_PRIVATE)
                     .getString(AccountScope.key("disk_provider"), "").orEmpty(),
             )
         }.getOrDefault(SourceProvider.BAIDU)
-        DriveSourceRouter.bindDiskProvider({ diskProvider }, { diskProvider = it })
+        DriveSourceRouter.bindDiskProvider(this, { diskProvider }, { diskProvider = it })
         audioHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE))
         videoHistory = AudioHistory(getSharedPreferences("video_history", MODE_PRIVATE))
         favorites = Favorites(getSharedPreferences("favorites", MODE_PRIVATE))
@@ -811,6 +811,7 @@ class MainActivity : AppCompatActivity() {
         audioControls = null
         (web.parent as? ViewGroup)?.removeView(web)
         web.destroy()
+        DriveSourceRouter.unbind(this)
         super.onDestroy()
     }
 

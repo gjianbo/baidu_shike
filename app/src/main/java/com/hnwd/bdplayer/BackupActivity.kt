@@ -28,11 +28,16 @@ class BackupActivity : AppCompatActivity() {
             super.createIntent(context, input).putExtra(DocumentsContract.EXTRA_INITIAL_URI, BackupStore.restoreFolder)
     }) { uri ->
         if (uri != null) {
-            val payload = BackupStore.read(this, uri)
-            if (!BackupStore.valid(payload)) {
-                toast("备份文件无效或版本不兼容")
-            } else {
-                confirmRestore(payload!!, "从文件恢复")
+            when (val result = BackupStore.read(this, uri)) {
+                is BackupStore.ReadResult.Ok ->
+                    if (!BackupStore.valid(result.payload)) {
+                        toast("备份文件无效或版本不兼容")
+                    } else {
+                        confirmRestore(result.payload, "从文件恢复")
+                    }
+                BackupStore.ReadResult.TooLarge ->
+                    toast("备份文件超过 ${BackupStore.RESTORE_LIMIT_MB} MB，请选择正确的备份文件")
+                BackupStore.ReadResult.Invalid -> toast("备份文件无效或版本不兼容")
             }
         }
     }
