@@ -11,8 +11,10 @@ import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
+import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -404,6 +406,7 @@ class QuarkDriveActivity : AppCompatActivity() {
         val message = TextView(this).apply { setPadding(dp(16), dp(12), dp(16), dp(12)) }
         val web = WebView(this).apply {
             setBackgroundColor(android.graphics.Color.WHITE)
+            webChromeClient = WebChromeClient()
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.allowFileAccess = false
@@ -632,6 +635,12 @@ class QuarkDriveActivity : AppCompatActivity() {
             }
         }
         dialog.show()
+        // AlertController 在首次 show() 时才执行 setupCustomContent()：custom view 里只有
+        // WebView（onCheckIsTextEditor() 返回 false），系统会给窗口加 FLAG_ALT_FOCUSABLE_IM，
+        // 判定「不与输入法交互」，H5 输入框即便 focused 也拉不起键盘。必须放在 show() 之后清，
+        // 否则 installContent() 会重新加回来。
+        dialog.window?.clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { showCookieImport() }
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             // 未真正登录时别关弹窗：以前点「完成」会直接 dismiss，匿名 Cookie 造成
