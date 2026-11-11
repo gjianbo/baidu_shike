@@ -2,6 +2,7 @@ package com.hnwd.bdplayer
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.core.content.edit
 
 /** 账号命名空间前缀：迁移时用它区分「已是新键」与「历史旧键」。 */
 internal const val ACCOUNT_KEY_PREFIX = "acct_"
@@ -38,7 +39,7 @@ internal object AccountScope {
         uk = scope.getString(KEY_UK, "").orEmpty()
         if (!scope.getBoolean(KEY_MIGRATED, false)) {
             migrateLegacy(context)
-            scope.edit().putBoolean(KEY_MIGRATED, true).apply()
+            scope.edit { putBoolean(KEY_MIGRATED, true) }
         }
     }
 
@@ -46,22 +47,23 @@ internal object AccountScope {
         val next = value.trim()
         if (next.isEmpty() || next == uk) return false
         uk = next
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putString(KEY_UK, next).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_UK, next)
+        }
         return true
     }
 
     private fun migrateLegacy(context: Context) {
         NAMESPACED.forEach { name ->
             val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
-            val editor = prefs.edit()
-            legacyKeyMoves(prefs.all.keys, prefix()).forEach { (oldKey, target) ->
-                if (!prefs.contains(target)) copyValue(editor, prefs, oldKey, target)
-                // 旧键在新代码里永远读不到，留着只会让 preferences.all 越滚越大
-                // （prune/diskIndex 都是整表遍历）。复制成功后必须删掉。
-                editor.remove(oldKey)
+            prefs.edit {
+                legacyKeyMoves(prefs.all.keys, prefix()).forEach { (oldKey, target) ->
+                    if (!prefs.contains(target)) copyValue(this, prefs, oldKey, target)
+                    // 旧键在新代码里永远读不到，留着只会让 preferences.all 越滚越大
+                    // （prune/diskIndex 都是整表遍历）。复制成功后必须删掉。
+                    remove(oldKey)
+                }
             }
-            editor.apply()
         }
     }
 

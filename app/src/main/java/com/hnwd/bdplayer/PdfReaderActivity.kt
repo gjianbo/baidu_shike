@@ -29,6 +29,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import androidx.core.net.toUri
 
 /**
  * 独立的 PDF 阅读页。故意不复用 MainActivity：
@@ -54,7 +55,7 @@ class PdfReaderActivity : AppCompatActivity() {
         val raw = intent.getStringExtra(EXTRA_URI)
         tempFile = intent.getStringExtra(EXTRA_FILE)
         val name = intent.getStringExtra(EXTRA_TITLE).orEmpty()
-        val uri = raw?.let { Uri.parse(it) }
+        val uri = raw?.let { it.toUri() }
         if (uri == null || tempFile?.let { PdfCache.retain(File(it)) } != true) {
             Toast.makeText(this, "文档缓存已失效，请从列表重新打开。", Toast.LENGTH_SHORT).show()
             finish()
@@ -275,7 +276,7 @@ class PdfReaderActivity : AppCompatActivity() {
         // 配置变更后阅读器仍在使用同一份缓存。
         if (isFinishing) {
             intent.getStringExtra(EXTRA_URI)?.let {
-                revokeUriPermission(Uri.parse(it), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                revokeUriPermission(it.toUri(), Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             tempFile?.let { PdfCache.release(File(it)) }
         }

@@ -29,7 +29,6 @@
     <color name="logoBg">#E8E6EC</color>
     <color name="logoInk">#16171C</color>
     <color name="navPill">#27359B</color>
-    <color name="scrim">#99000000</color>
     <color name="white">#FFFFFF</color>
     <color name="transparent">#00000000</color>
 </resources>

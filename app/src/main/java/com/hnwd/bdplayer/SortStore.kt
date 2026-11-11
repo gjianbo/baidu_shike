@@ -1,6 +1,7 @@
 package com.hnwd.bdplayer
 
 import android.content.Context
+import androidx.core.content.edit
 
 /**
  * 排序偏好存储：列表页与播放页各记一份，同一目录互不覆盖。
@@ -43,7 +44,8 @@ internal object SortStore {
 
     private fun write(context: Context, scope: String, directory: String?, order: CourseOrder) {
         val dir = directory?.takeIf { it.isNotEmpty() } ?: return
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(scope + dir, order.name).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(scope + dir, order.name)
+        }
     }
 }

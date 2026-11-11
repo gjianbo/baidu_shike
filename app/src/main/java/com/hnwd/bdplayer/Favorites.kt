@@ -3,6 +3,7 @@ package com.hnwd.bdplayer
 import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.content.edit
 
 internal class Favorites(private val preferences: SharedPreferences) {
     fun all(): List<PanEntry> = runCatching {
@@ -74,7 +75,7 @@ internal class Favorites(private val preferences: SharedPreferences) {
                 .put("origin", it.origin.name)
                 .put("md5", it.md5))
         }
-        preferences.edit().putString(storageKey(), data.toString()).apply()
+        preferences.edit { putString(storageKey(), data.toString()) }
     }
 
     private fun storageKey() = AccountScope.key("favorites")

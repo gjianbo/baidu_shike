@@ -63,6 +63,8 @@ import java.util.concurrent.Executor
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import androidx.core.net.toUri
+import androidx.core.view.isGone
 
 internal const val CACHE_TTL_MS = 30 * 60 * 1000L
 internal const val HOME_RECHECK_COOLDOWN_MS = 30 * 1000L
@@ -351,7 +353,7 @@ class MainActivity : AppCompatActivity() {
                     if (url.scheme == "https" && url.host == PanApi.HOST && url.path == "/mbox/group/listshare") {
                         val group = url.getQueryParameter("gid").orEmpty()
                         if (group.matches(Regex("[0-9]{1,24}"))) view.post {
-                            val route = Uri.parse(view.url.orEmpty()).fragment.orEmpty()
+                            val route = view.url.orEmpty().toUri().fragment.orEmpty()
                             if (pickingSource && route.startsWith("/im/session?")) {
                                 observedGroup = route to group
                             }
@@ -361,11 +363,11 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
-                    if (Uri.parse(url).fragment == "/im/addrBook") observedGroup = null
+                    if (url.toUri().fragment == "/im/addrBook") observedGroup = null
                 }
 
                 override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                    if (pickingSource && Uri.parse(url).host == "wappass.baidu.com") loginPending = true
+                    if (pickingSource && url.toUri().host == "wappass.baidu.com") loginPending = true
                     ready = false
                     invalidateAccount()
                     if (native.visibility == View.VISIBLE) refresh()
@@ -373,7 +375,7 @@ class MainActivity : AppCompatActivity() {
 
                 override fun onPageFinished(view: WebView, url: String) {
                     if (view.url?.substringBefore('#') != url.substringBefore('#')) return
-                    val address = Uri.parse(url)
+                    val address = url.toUri()
                     ready = address.scheme == "https" && address.host == PanApi.HOST
                     if (ready) {
                         if (loginPending) CookieManager.getInstance().flush()
@@ -755,7 +757,7 @@ class MainActivity : AppCompatActivity() {
     override fun onBackPressed() {
         when {
             audioPage != null -> closeAudioPage()
-            native.visibility == View.GONE -> showApp()
+            native.isGone -> showApp()
             screen == Screen.FAVORITES -> closeFavorites()
             folders.isNotEmpty() -> returnToFolder(folders.lastIndex)
             screen != Screen.HOME -> showScreen(Screen.HOME)
@@ -831,7 +833,7 @@ class MainActivity : AppCompatActivity() {
     internal fun diskNewFolderReady() = ::btnDiskNewFolder.isInitialized
 
     internal fun apiError(url: String, errno: Int, json: JSONObject): String {
-        val path = Uri.parse(url).path.orEmpty()
+        val path = url.toUri().path.orEmpty()
         val showMsg = json.optString("show_msg").trim().take(60)
         val hint = when (errno) {
             -20 -> if (showMsg.isEmpty()) "百度网盘拒绝了此次请求。请在网盘页面确认该共享仍可访问，或稍后重试"

@@ -6,6 +6,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.net.toUri
 
 internal enum class EntryOrigin { GROUP, DISK }
 
@@ -171,7 +172,7 @@ internal object PanApi {
      * 因此无法在 JVM 单测里调用。
      */
     val login: String by lazy {
-        Uri.parse("https://wappass.baidu.com/passport?login")
+        "https://wappass.baidu.com/passport?login".toUri()
             .buildUpon()
             .appendQueryParameter("authsite", "1")
             .appendQueryParameter("tpl", "netdisk")
@@ -295,14 +296,12 @@ internal object PanApi {
         val rawImage = sequenceOf("vcode_img", "img")
             .mapNotNull { json.opt(it) as? String }
             .firstOrNull { it.isNotBlank() } ?: return null
-        val image = Uri.parse(
-            when {
-                rawImage.startsWith("//") -> "https:$rawImage"
-                rawImage.startsWith("/") -> "https://$HOST$rawImage"
-                rawImage.startsWith("http://") -> "https://" + rawImage.removePrefix("http://")
-                else -> rawImage
-            },
-        )
+        val image = when {
+            rawImage.startsWith("//") -> "https:$rawImage"
+            rawImage.startsWith("/") -> "https://$HOST$rawImage"
+            rawImage.startsWith("http://") -> "https://" + rawImage.removePrefix("http://")
+            else -> rawImage
+        }.toUri()
         if (image.scheme != "https" || image.userInfo != null ||
             image.port !in listOf(-1, 443) ||
             image.host !in setOf(HOST, "passport.baidu.com", "wappass.baidu.com")
@@ -330,7 +329,7 @@ internal object PanApi {
         val match = json.optJSONArray("list")?.objects()?.firstOrNull {
             it.optString("fs_id") == entry.fileId
         }
-        val uri = Uri.parse(match?.optString("dlink").orEmpty())
+        val uri = match?.optString("dlink").orEmpty().toUri()
         check(isFileLink(uri)) {
             "网盘未返回此文件的播放地址。"
         }
@@ -411,7 +410,7 @@ internal object PanApi {
     )
 
     fun parseDiskDownloadLink(json: JSONObject): Uri {
-        val uri = Uri.parse(json.getJSONArray("dlink").getJSONObject(0).getString("dlink"))
+        val uri = json.getJSONArray("dlink").getJSONObject(0).getString("dlink").toUri()
         check(isFileLink(uri)) { "网盘未返回有效的原始文件地址。" }
         return uri
     }
@@ -601,7 +600,7 @@ internal object PanApi {
             "adToken" to "", "src_id" to "1",
         )
         if (token.isNotEmpty()) query.add("bdstoken" to token)
-        return Uri.parse(api("/api/streaming", *query.toTypedArray()))
+        return api("/api/streaming", *query.toTypedArray()).toUri()
     }
 
     fun isDiskStreaming(uri: Uri, entry: PanEntry): Boolean =
@@ -617,7 +616,7 @@ internal object PanApi {
     fun parseDocviewLink(json: JSONObject): Uri {
         check(json.optInt("errno", -1) == 0) { "网盘未返回文档地址。" }
         check(json.optInt("need_passwd", 0) == 0) { "该文档需要密码，当前版本暂不支持。" }
-        val uri = Uri.parse(json.optString("dlink"))
+        val uri = json.optString("dlink").toUri()
         check(uri.scheme == "https" && !uri.host.isNullOrEmpty()) { "文档地址无效，请重试。" }
         return uri
     }
@@ -633,7 +632,7 @@ internal object PanApi {
 
     fun parseGroupPreviewLink(json: JSONObject): Uri? {
         val data = json.optJSONObject("data") ?: return null
-        val uri = Uri.parse(data.optString("dlink"))
+        val uri = data.optString("dlink").toUri()
         return uri.takeIf { it.scheme == "https" && !it.host.isNullOrEmpty() }
     }
 
@@ -647,13 +646,13 @@ internal object PanApi {
 
     fun audioPlaylist(entry: PanEntry): Uri = playlist(entry, "M3U8_MP3_128")
 
-    private fun playlist(entry: PanEntry, streamType: String): Uri = Uri.parse(api(
+    private fun playlist(entry: PanEntry, streamType: String): Uri = api(
         "/mbox/msg/streaming",
         "from_uk" to entry.owner,
         "to" to if (entry.isContact) entry.contactRecipient(AccountScope.current) else rawSourceId(entry.gid),
         "msg_id" to entry.messageId, "fs_id" to entry.fileId,
         "type" to if (entry.isContact) "1" else "2", "stream_type" to streamType,
-    ))
+    ).toUri()
 
     fun parseRecent(json: JSONObject): List<PanEntry> {
         val data = json.getJSONObject("data")

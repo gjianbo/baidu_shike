@@ -5,6 +5,8 @@ import android.view.View
 import android.webkit.CookieManager
 import org.json.JSONObject
 import org.json.JSONTokener
+import androidx.core.view.isVisible
+import androidx.core.content.edit
 
 /**
  * 浏览主流程：刷新、网盘/夸克分页加载与账号校验。
@@ -283,9 +285,9 @@ internal fun MainActivity.applySourceProvider(target: SourceProvider) {
 
 internal fun MainActivity.applyDiskProvider(target: SourceProvider) {
     diskProvider = target
-    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit()
-        .putString(AccountScope.key("disk_provider"), target.name)
-        .apply()
+    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
+        putString(AccountScope.key("disk_provider"), target.name)
+    }
     folders.clear()
     courseEntries.clear()
     courseParentKey = ""
@@ -371,7 +373,7 @@ internal fun MainActivity.refreshDisk() {
 internal fun MainActivity.loadQuarkDiskPage(dirFid: String, parentPath: String, cacheKey: String) {
     status.text = "正在读取夸克网盘…"
     val request = ++requestId
-    Thread {
+    AppIo.execute {
         val result = runCatching {
             val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
             val page = session.execute(session.list(dirFid, 1, 200))
@@ -395,7 +397,7 @@ internal fun MainActivity.loadQuarkDiskPage(dirFid: String, parentPath: String, 
                 status.text = if (entries.isEmpty()) "此目录暂无内容" else ""
             }
         }
-    }.start()
+    }
 }
 
 
@@ -550,7 +552,7 @@ internal fun MainActivity.loadQuarkRoots(key: String, page: Int = 1, previousBut
     }
     status.text = if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else "正在读取夸克目录…"
     val token = ++requestId
-    Thread {
+    AppIo.execute {
         val result = runCatching {
             val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
             session.execute(session.list(rawSourceId(sourceId), page, 100))
@@ -581,7 +583,7 @@ internal fun MainActivity.loadQuarkRoots(key: String, page: Int = 1, previousBut
                 renderRootMore(key)
             }
         }
-    }.start()
+    }
 }
 
 
@@ -596,7 +598,7 @@ internal fun MainActivity.loadQuarkChildren(
     val sourceId = parent.gid
     status.text = if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else "正在读取…"
     val token = ++requestId
-    Thread {
+    AppIo.execute {
         val result = runCatching {
             val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
             session.execute(session.list(parent.fileId, page, 100))
@@ -625,7 +627,7 @@ internal fun MainActivity.loadQuarkChildren(
                 renderChildMore(parent, key)
             }
         }
-    }.start()
+    }
 }
 
 
@@ -680,13 +682,13 @@ internal fun MainActivity.invalidateAccount() {
 internal fun MainActivity.verifyAndRefresh(force: Boolean = false) {
     invalidateAccount()
     checkingAccount = true
-    if (native.visibility == View.VISIBLE) refresh()
+    if (native.isVisible) refresh()
     probeAccount { changed, confirmed ->
         checkingAccount = false
         if (loginPending && confirmed) {
             loginPending = false
             if (pickingSource) openContacts() else showApp()
-        } else if (native.visibility == View.VISIBLE) {
+        } else if (native.isVisible) {
             refresh(force = force || changed)
         }
         // 无论本次探测是否成功都要清标记，否则残留到后续任意一次 verifyAndRefresh

@@ -51,7 +51,7 @@
             android:layout_height="20dp"
             android:layout_marginStart="12dp"
             android:importantForAccessibility="no"
-            android:src="@drawable/ic_check"
+            android:src="@drawable/ic_check_local"
             android:visibility="gone"
             app:tint="@color/accentInk" />
     </LinearLayout>

@@ -17,6 +17,8 @@ import android.widget.ListView
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import java.net.URL
+import androidx.core.graphics.createBitmap
+import androidx.core.content.edit
 
 /**
  * 首页：收藏、最近播放、历史与账号头像。
@@ -588,7 +590,7 @@ internal fun MainActivity.renderAccountAvatar(target: ImageView) {
 /** 生成圆形字母头像。 */
 internal fun MainActivity.letterAvatar(initial: String): android.graphics.Bitmap {
     val size = 96
-    val bitmap = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+    val bitmap = createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
     val canvas = android.graphics.Canvas(bitmap)
     val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
     paint.color = color(R.color.accent)
@@ -615,10 +617,10 @@ internal fun MainActivity.confirmClearHistory() {
                 audioHistory.clear()
                 videoHistory.clear()
                 val progress = getSharedPreferences("video_progress", android.content.Context.MODE_PRIVATE)
-                val editor = progress.edit()
-                val prefix = AccountScope.prefix()
-                progress.all.keys.filter { it.startsWith(prefix) }.forEach { editor.remove(it) }
-                editor.apply()
+                progress.edit {
+                    val prefix = AccountScope.prefix()
+                    progress.all.keys.filter { it.startsWith(prefix) }.forEach { remove(it) }
+                }
                 runOnUiThread {
                     if (isDestroyed || isFinishing) return@runOnUiThread
                     toast("播放记录已清除")

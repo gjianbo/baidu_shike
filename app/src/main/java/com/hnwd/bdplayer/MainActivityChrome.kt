@@ -15,6 +15,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
+import androidx.core.view.isNotEmpty
 
 /**
  * 页面外壳：导航、筛选、面包屑、通用弹窗与窗口布局。
@@ -303,7 +304,7 @@ internal fun MainActivity.showChoiceSheet(
             }
         }
         val params = LinearLayout.LayoutParams(-2, dp(44))
-        if (actions.childCount > 0) params.marginStart = dp(8)
+        if (actions.isNotEmpty()) params.marginStart = dp(8)
         actions.addView(button, params)
     }
     if (multi && confirmLabel != null) {

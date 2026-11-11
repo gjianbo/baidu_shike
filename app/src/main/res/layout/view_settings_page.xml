@@ -76,6 +76,7 @@
             android:layout_width="18dp"
             android:layout_height="18dp"
             android:layout_marginStart="6dp"
+            android:importantForAccessibility="no"
             android:src="@drawable/ic_chevron_right" />
     </LinearLayout>
 
@@ -112,6 +113,7 @@
                 android:layout_height="40dp"
                 android:background="@drawable/bg_empty_icon"
                 android:padding="10dp"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_trash" />
 
             <LinearLayout
@@ -146,6 +148,7 @@
                 android:layout_width="18dp"
                 android:layout_height="18dp"
                 android:layout_marginStart="6dp"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_chevron_right" />
         </LinearLayout>
     </LinearLayout>
@@ -183,6 +186,7 @@
                 android:layout_height="40dp"
                 android:background="@drawable/bg_empty_icon"
                 android:padding="10dp"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_contrast" />
 
             <LinearLayout
@@ -217,6 +221,7 @@
                 android:layout_width="18dp"
                 android:layout_height="18dp"
                 android:layout_marginStart="6dp"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_chevron_right" />
         </LinearLayout>
 
@@ -242,6 +247,7 @@
                 android:layout_height="40dp"
                 android:background="@drawable/bg_empty_icon"
                 android:padding="10dp"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_archive" />
 
             <LinearLayout
@@ -269,6 +275,7 @@
                 android:layout_width="18dp"
                 android:layout_height="18dp"
                 android:layout_marginStart="6dp"
+                android:importantForAccessibility="no"
                 android:src="@drawable/ic_chevron_right" />
         </LinearLayout>
     </LinearLayout>
@@ -295,6 +302,7 @@
         <ImageView
             android:layout_width="18dp"
             android:layout_height="18dp"
+            android:importantForAccessibility="no"
             android:src="@drawable/ic_info" />
 
         <TextView

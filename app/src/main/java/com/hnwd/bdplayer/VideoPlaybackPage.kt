@@ -50,6 +50,8 @@ import androidx.media3.session.SessionToken
 import androidx.media3.ui.PlayerView
 import com.google.common.util.concurrent.ListenableFuture
 import kotlin.math.abs
+import androidx.core.graphics.toColorInt
+import androidx.core.content.edit
 
 @OptIn(UnstableApi::class)
 internal class VideoPlaybackPage(
@@ -107,8 +109,8 @@ internal class VideoPlaybackPage(
     private var audioControllerFuture: ListenableFuture<MediaController>? = null
     private lateinit var updateFullscreen: (Boolean) -> Unit
 
-    private val actionLabelColor = Color.parseColor("#8E909C")
-    private val actionActiveColor = Color.parseColor("#BFC6FF")
+    private val actionLabelColor = "#8E909C".toColorInt()
+    private val actionActiveColor = "#BFC6FF".toColorInt()
     private val starColor = Color.rgb(255, 200, 87)
 
     /** D 槽的一格：图标 24 + 标签 10sp，整格可点 */
@@ -928,7 +930,7 @@ internal class VideoPlaybackPage(
                 }
                 if (playbackState == Player.STATE_ENDED) {
                     stopAudioSession()
-                    progress.edit().remove(progressKey).remove(legacyProgressKey).apply()
+                    progress.edit { remove(progressKey).remove(legacyProgressKey) }
                     history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
                     readyToSave = false
                     video.post {
@@ -1004,7 +1006,7 @@ internal class VideoPlaybackPage(
         // 旧版本进度键不含来源；首次打开时迁移一次，避免升级后丢失续播位置。
         val legacy = progress.getLong(legacyProgressKey, 0L)
         if (legacy > 0) {
-            progress.edit().putLong(progressKey, legacy).remove(legacyProgressKey).apply()
+            progress.edit { putLong(progressKey, legacy).remove(legacyProgressKey) }
         }
         return legacy
     }
@@ -1012,7 +1014,7 @@ internal class VideoPlaybackPage(
     private fun saveProgress() {
         if (!readyToSave) return
         val position = player.currentPosition
-        progress.edit().putLong(progressKey, position).apply()
+        progress.edit { putLong(progressKey, position) }
         history.save(entry, (position / 1000).toInt(), completed = false, duration = durationSeconds())
     }
 

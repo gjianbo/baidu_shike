@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  dataExtractionRules 只在 Android 12（API 31）及以上生效；本项目 minSdk 29，
+  Android 10/11 设备仍走旧的 Key/Value 备份机制，需要用 fullBackupContent
+  把同样的排除规则覆盖到低版本。allowBackup=false 已经关闭云备份，这里
+  保持一致：所有 domain 全部排除，避免登录会话 / 播放记录 / 目录缓存被搬走。
+-->
+<full-backup-content>
+    <exclude domain="root" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>

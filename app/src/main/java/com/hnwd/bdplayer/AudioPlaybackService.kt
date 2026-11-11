@@ -29,6 +29,7 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import androidx.core.net.toUri
 
 @OptIn(UnstableApi::class)
 class AudioPlaybackService : MediaSessionService() {
@@ -175,7 +176,7 @@ class AudioPlaybackService : MediaSessionService() {
             return SessionResult.RESULT_ERROR_INVALID_STATE
         }
         val account = args.getString("account").orEmpty()
-        val uri = Uri.parse(args.getString("uri").orEmpty())
+        val uri = args.getString("uri").orEmpty().toUri()
         val playlist = args.getByteArray("playlist")
         val origin = runCatching { EntryOrigin.valueOf(args.getString("origin") ?: "GROUP") }
             .getOrDefault(EntryOrigin.GROUP)
@@ -231,7 +232,7 @@ class AudioPlaybackService : MediaSessionService() {
         if (playbackAccount != AccountScope.current || extras.getString("playbackId") != args.getString("playbackId") ||
             extras.getBoolean("renewed") || (!wasHls && !error.isExpiredMediaLink())
         ) return SessionResult.RESULT_ERROR_BAD_VALUE
-        val uri = Uri.parse(args.getString("uri").orEmpty())
+        val uri = args.getString("uri").orEmpty().toUri()
         val current = entry ?: return SessionResult.RESULT_ERROR_BAD_VALUE
         if (!isAudioSource(current, uri, null)) return SessionResult.RESULT_ERROR_BAD_VALUE
 
@@ -257,7 +258,7 @@ class AudioPlaybackService : MediaSessionService() {
         ) return SessionResult.RESULT_ERROR_BAD_VALUE
         val current = entry ?: return SessionResult.RESULT_ERROR_BAD_VALUE
         if (!current.isDisk) return SessionResult.RESULT_ERROR_BAD_VALUE
-        val uri = Uri.parse(args.getString("uri").orEmpty())
+        val uri = args.getString("uri").orEmpty().toUri()
         val playlist = args.getByteArray("playlist")
         if (playlist == null || playlist.isEmpty() || !PanApi.isDiskStreaming(uri, current)) {
             return SessionResult.RESULT_ERROR_BAD_VALUE

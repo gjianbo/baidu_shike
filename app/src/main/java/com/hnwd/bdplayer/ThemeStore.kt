@@ -2,6 +2,7 @@ package com.hnwd.bdplayer
 
 import android.content.Context
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.core.content.edit
 
 internal object ThemeStore {
     private const val PREFS = "app_settings"
@@ -38,12 +39,10 @@ internal object ThemeStore {
 
     fun set(context: Context, mode: String, pendingScreen: String? = null) {
         val safe = mode.takeIf { it == SYSTEM || it == LIGHT || it == DARK } ?: LIGHT
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_THEME, safe)
-            .apply {
-                if (pendingScreen != null) putString(KEY_PENDING_SCREEN, pendingScreen)
-            }
-            .apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_THEME, safe)
+            if (pendingScreen != null) putString(KEY_PENDING_SCREEN, pendingScreen)
+        }
         AppCompatDelegate.setDefaultNightMode(
             when (safe) {
                 DARK -> AppCompatDelegate.MODE_NIGHT_YES
@@ -56,13 +55,14 @@ internal object ThemeStore {
     fun takePendingScreen(context: Context): String? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val value = prefs.getString(KEY_PENDING_SCREEN, null)
-        if (value != null) prefs.edit().remove(KEY_PENDING_SCREEN).apply()
+        if (value != null) prefs.edit { remove(KEY_PENDING_SCREEN) }
         return value
     }
 
     fun rememberScreen(context: Context, value: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_PENDING_SCREEN, value).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_PENDING_SCREEN, value)
+        }
     }
 
     fun courseOrder(context: Context): String =
@@ -70,8 +70,9 @@ internal object ThemeStore {
             .getString(KEY_SORT, "ASCENDING") ?: "ASCENDING"
 
     fun setCourseOrder(context: Context, value: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(KEY_SORT, value).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            putString(KEY_SORT, value)
+        }
     }
 
     fun apply(context: Context) {

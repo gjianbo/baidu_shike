@@ -13,6 +13,7 @@ import androidx.appcompat.app.AlertDialog
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
+import androidx.core.net.toUri
 
 /**
  * 媒体取址层需要的最小宿主能力。
@@ -139,7 +140,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                                     connection.setRequestProperty("User-Agent", userAgent)
                                     if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
                                     check(connection.responseCode == HttpURLConnection.HTTP_MOVED_TEMP)
-                                    Uri.parse(connection.getHeaderField("Location").orEmpty())
+                                    connection.getHeaderField("Location").orEmpty().toUri()
                                         .also { check(PanApi.isCachedFileLink(it)) }
                                 } finally {
                                     connection.disconnect()

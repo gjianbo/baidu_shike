@@ -16,6 +16,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import javax.net.ssl.HttpsURLConnection
 import org.json.JSONObject
+import androidx.core.net.toUri
 
 /** 图片扩展名、MIME 与文件头校验，全部基于平台 API。 */
 internal object ImageTypes {
@@ -351,7 +352,7 @@ internal object ImagePreviewLoader {
     }
 
     private fun readBaiduMetadata(url: String, userAgent: String?): JSONObject {
-        val uri = Uri.parse(url)
+        val uri = url.toUri()
         require(uri.scheme == "https" && uri.authority == PanApi.HOST)
         val cookie = CookieManager.getInstance().getCookie(url)
         check(!cookie.isNullOrBlank()) { "请登录百度网盘后重试" }
@@ -374,7 +375,7 @@ internal object ImagePreviewLoader {
     }
 
     private fun fetch(url: String): ByteArray {
-        val uri = Uri.parse(url)
+        val uri = url.toUri()
         if (uri.scheme != "https" || uri.host.isNullOrBlank() || uri.userInfo != null) throw ImagePreviewExpired()
         val connection = URL(url).openConnection() as HttpsURLConnection
         try {

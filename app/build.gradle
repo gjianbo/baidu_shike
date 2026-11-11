@@ -81,5 +81,8 @@ dependencies {
     implementation 'androidx.pdf:pdf-viewer-fragment:1.0.0-beta01'
     implementation 'com.tom-roush:pdfbox-android:2.0.27.0'
     implementation 'androidx.appcompat:appcompat:1.7.0'
+    // core-ktx 之前靠传递依赖进入 classpath（1.13.1）；UseKtx 清理后大量用到
+    // toUri / edit / toColorInt / isVisible 等扩展，显式声明避免依赖树变化导致断供。
+    implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'com.google.android.material:material:1.11.0'
 }

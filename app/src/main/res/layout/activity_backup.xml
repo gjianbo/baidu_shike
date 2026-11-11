@@ -60,6 +60,7 @@
                     android:layout_height="54dp"
                     android:background="@drawable/bg_account_icon"
                     android:padding="15dp"
+                    android:importantForAccessibility="no"
                     android:src="@drawable/ic_archive" />
 
                 <LinearLayout

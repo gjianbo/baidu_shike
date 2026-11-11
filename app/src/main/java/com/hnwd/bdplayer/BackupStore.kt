@@ -14,6 +14,7 @@ import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.core.content.edit
 
 /**
  * 纯本机 JSON 快照。只备份当前账号的群组来源、收藏、播放进度和偏好；
@@ -256,91 +257,91 @@ internal object BackupStore {
                     .put("session", ""),
             )
         }
-        scope.edit()
-            .putString(AccountScope.key("share_sources", account), sources.toString())
-            .putString(AccountScope.key("group_id", account), data.getString("groupId"))
-            .apply()
+        scope.edit {
+            putString(AccountScope.key("share_sources", account), sources.toString())
+            putString(AccountScope.key("group_id", account), data.getString("groupId"))
+        }
 
-        prefs(context, "favorites").edit()
-            .putString(AccountScope.key("favorites", account), data.getString("favorites"))
-            .apply()
+        prefs(context, "favorites").edit {
+            putString(AccountScope.key("favorites", account), data.getString("favorites"))
+        }
 
         mergeHistory(prefs(context, "audio_history"), data.optJSONObject("audioHistory"), account)
         mergeHistory(prefs(context, "video_history"), data.optJSONObject("videoHistory"), account)
         mergeProgress(prefs(context, "video_progress"), data.optJSONObject("videoProgress"), account)
 
         data.optJSONObject("playbackOrder")?.let { orders ->
-            val editor = prefs(context, "playback_order").edit()
-            orders.keys().forEach { key ->
-                val order = orders.optString(key)
-                if (order == "ASCENDING" || order == "DESCENDING") {
-                    editor.putString(AccountScope.key(key, account), order)
+            prefs(context, "playback_order").edit {
+                orders.keys().forEach { key ->
+                    val order = orders.optString(key)
+                    if (order == "ASCENDING" || order == "DESCENDING") {
+                        putString(AccountScope.key(key, account), order)
+                    }
                 }
             }
-            editor.apply()
         }
 
         data.optJSONObject("prefs")?.let { settings ->
-            val editor = prefs(context, PREFS_SETTINGS).edit()
-            (settings.opt("appearance") as? String)?.let { editor.putString("appearance", it) }
-            (settings.opt("course_order") as? String)?.let { editor.putString("course_order", it) }
-            editor.apply()
+            prefs(context, PREFS_SETTINGS).edit {
+                (settings.opt("appearance") as? String)?.let { putString("appearance", it) }
+                (settings.opt("course_order") as? String)?.let { putString("course_order", it) }
+            }
         }
         return true
     }
 
     private fun mergeHistory(prefs: android.content.SharedPreferences, backup: JSONObject?, account: String) {
         if (backup == null) return
-        val editor = prefs.edit()
-        val keys = backup.keys()
-        while (keys.hasNext()) {
-            val suffix = keys.next()
-            val target = AccountScope.key(suffix, account)
-            val current = runCatching { JSONArray(prefs.getString(target, "[]") ?: "[]") }.getOrDefault(JSONArray())
-            val incoming = runCatching { JSONArray(backup.optString(suffix, "[]")) }.getOrDefault(JSONArray())
-            val merged = LinkedHashMap<String, JSONObject>()
-            for (index in 0 until current.length()) {
-                val item = current.optJSONObject(index) ?: continue
-                merged[item.optString("file", "$index")] = item
-            }
-            for (index in 0 until incoming.length()) {
-                val item = incoming.optJSONObject(index) ?: continue
-                val key = item.optString("file", "backup-$index")
-                val existing = merged[key]
-                if (existing == null) {
-                    merged[key] = item
-                } else {
-                    val seconds = maxOf(existing.optInt("seconds"), item.optInt("seconds"))
-                    val duration = maxOf(existing.optInt("duration"), item.optInt("duration"))
-                    val completed = existing.optBoolean("completed") || item.optBoolean("completed")
-                    val updatedAt = maxOf(existing.optLong("updatedAt"), item.optLong("updatedAt"))
-                    merged[key] = (if (updatedAt == item.optLong("updatedAt")) item else existing).apply {
-                        put("seconds", seconds)
-                        put("completed", completed)
-                        put("duration", duration)
-                        put("updatedAt", updatedAt)
+        prefs.edit {
+            val keys = backup.keys()
+            while (keys.hasNext()) {
+                val suffix = keys.next()
+                val target = AccountScope.key(suffix, account)
+                val current = runCatching { JSONArray(prefs.getString(target, "[]") ?: "[]") }.getOrDefault(JSONArray())
+                val incoming = runCatching { JSONArray(backup.optString(suffix, "[]")) }.getOrDefault(JSONArray())
+                val merged = LinkedHashMap<String, JSONObject>()
+                for (index in 0 until current.length()) {
+                    val item = current.optJSONObject(index) ?: continue
+                    merged[item.optString("file", "$index")] = item
+                }
+                for (index in 0 until incoming.length()) {
+                    val item = incoming.optJSONObject(index) ?: continue
+                    val key = item.optString("file", "backup-$index")
+                    val existing = merged[key]
+                    if (existing == null) {
+                        merged[key] = item
+                    } else {
+                        val seconds = maxOf(existing.optInt("seconds"), item.optInt("seconds"))
+                        val duration = maxOf(existing.optInt("duration"), item.optInt("duration"))
+                        val completed = existing.optBoolean("completed") || item.optBoolean("completed")
+                        val updatedAt = maxOf(existing.optLong("updatedAt"), item.optLong("updatedAt"))
+                        merged[key] = (if (updatedAt == item.optLong("updatedAt")) item else existing).apply {
+                            put("seconds", seconds)
+                            put("completed", completed)
+                            put("duration", duration)
+                            put("updatedAt", updatedAt)
+                        }
                     }
                 }
+                val array = JSONArray()
+                merged.values.sortedByDescending { it.optLong("updatedAt") }.forEach { array.put(it) }
+                putString(target, array.toString())
             }
-            val array = JSONArray()
-            merged.values.sortedByDescending { it.optLong("updatedAt") }.forEach { array.put(it) }
-            editor.putString(target, array.toString())
         }
-        editor.apply()
     }
 
     private fun mergeProgress(prefs: android.content.SharedPreferences, backup: JSONObject?, account: String) {
         if (backup == null) return
-        val editor = prefs.edit()
-        val keys = backup.keys()
-        while (keys.hasNext()) {
-            val suffix = keys.next()
-            val target = AccountScope.key(suffix, account)
-            val current = prefs.getLong(target, 0L)
-            val incoming = backup.optLong(suffix, 0L)
-            editor.putLong(target, maxOf(current, incoming))
+        prefs.edit {
+            val keys = backup.keys()
+            while (keys.hasNext()) {
+                val suffix = keys.next()
+                val target = AccountScope.key(suffix, account)
+                val current = prefs.getLong(target, 0L)
+                val incoming = backup.optLong(suffix, 0L)
+                putLong(target, maxOf(current, incoming))
+            }
         }
-        editor.apply()
     }
 
     /** 导入文件的三种结局，让 UI 能区分「文件太大」和「内容不对」。 */

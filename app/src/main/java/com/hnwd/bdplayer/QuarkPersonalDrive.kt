@@ -17,6 +17,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.net.toUri
 
 internal data class QuarkFile(
     val id: String,
@@ -60,7 +61,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
                 val url = request.url.toString()
                 val next = request.newBuilder().removeHeader("Cookie")
                 // 按实际请求地址读取会话，跨域重定向不转发夸克 Cookie。
-                if (isMediaUri(Uri.parse(url))) {
+                if (isMediaUri(url.toUri())) {
                     CookieManager.getInstance().getCookie(url)?.let { next.header("Cookie", it) }
                 }
                 chain.proceed(next.build())
@@ -182,7 +183,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
         signedUri(post("pdf/preview", JSONObject().put("fid", fileId)).getString("download_url"))
 
     private fun signedUri(value: String): Uri {
-        val uri = Uri.parse(value)
+        val uri = value.toUri()
         check(isMediaUri(uri)) {
             "网盘返回了无效的文件地址"
         }
@@ -190,7 +191,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
     }
 
     private fun url(path: String, vararg query: Pair<String, String>): String =
-        Uri.parse("$API/$path").buildUpon().appendQueryParameter("pr", "ucpro")
+        "$API/$path".toUri().buildUpon().appendQueryParameter("pr", "ucpro")
             .appendQueryParameter("fr", "pc").apply {
                 query.forEach { (key, value) -> appendQueryParameter(key, value) }
             }.build().toString()

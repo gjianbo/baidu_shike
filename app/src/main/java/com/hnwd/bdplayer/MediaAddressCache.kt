@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.AtomicFile
 import java.io.File
 import java.security.MessageDigest
+import androidx.core.net.toUri
 
 internal fun mediaCacheKey(account: String, entry: PanEntry): String =
     MessageDigest.getInstance("SHA-256")
@@ -23,7 +24,7 @@ internal class MediaAddressCache(context: Context) {
     fun clearPlaylist(key: String) = file(key, "m3u8").delete()
 
     fun link(key: String): Uri? =
-        read(key, "url")?.let { Uri.parse(it.decodeToString()).takeIf(PanApi::isCachedFileLink) }
+        read(key, "url")?.let { it.decodeToString().toUri().takeIf(PanApi::isCachedFileLink) }
 
     fun saveLink(key: String, uri: Uri) = write(key, "url", uri.toString().encodeToByteArray())
 

@@ -7,6 +7,7 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.content.edit
 
 /** 缓存里的看图签名地址最多沿用 2 小时（短于夸克 3h / 百度 8h 的有效期）。 */
 private const val PREVIEW_TTL_MS = 2 * 60 * 60 * 1000L
@@ -96,11 +97,13 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 .put("md5", it.md5)
                 .put("preview", it.previewUrl))
         }
-        preferences.edit().putString(
-            pageKey(key, page),
-            JSONObject().put("syncedAt", System.currentTimeMillis()).put("entries", data)
-                .put("nextCursor", nextCursor).put("latestEmpty", latestEmpty).toString(),
-        ).apply()
+        preferences.edit {
+            putString(
+                pageKey(key, page),
+                JSONObject().put("syncedAt", System.currentTimeMillis()).put("entries", data)
+                    .put("nextCursor", nextCursor).put("latestEmpty", latestEmpty).toString(),
+            )
+        }
         maybePrune()
     }
 
@@ -133,9 +136,9 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     fun prune(now: Long = System.currentTimeMillis(), prefix: String = AccountScope.prefix()): Int {
         val plan = planCachePrune(preferences.all, prefix, now)
         if (plan.keys.isEmpty()) return 0
-        val editor = preferences.edit()
-        plan.keys.forEach { editor.remove(it) }
-        editor.apply()
+        preferences.edit {
+            plan.keys.forEach { remove(it) }
+        }
         return plan.groups
     }
 
@@ -223,27 +226,27 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     /** 清除当前账号下所有「我的网盘」目录缓存（写操作成功后调用）。 */
     fun clearDisk() {
         val prefix = AccountScope.prefix()
-        val editor = preferences.edit()
-        preferences.all.keys.filter { stored ->
-            if (!stored.startsWith(prefix)) {
-                false
-            } else {
-                val key = stored.removePrefix(prefix).substringBeforeLast(':')
-                key == "disk:roots" || key.startsWith("disk:dir:")
-            }
-        }.forEach { editor.remove(it) }
-        editor.apply()
+        preferences.edit {
+            preferences.all.keys.filter { stored ->
+                if (!stored.startsWith(prefix)) {
+                    false
+                } else {
+                    val key = stored.removePrefix(prefix).substringBeforeLast(':')
+                    key == "disk:roots" || key.startsWith("disk:dir:")
+                }
+            }.forEach { remove(it) }
+        }
     }
 
     fun clear(key: String) = clearAfter(key, 0)
 
     fun clearAfter(key: String, page: Int) {
         val prefix = AccountScope.key("$key:")
-        val editor = preferences.edit()
-        preferences.all.keys.filter { storedKey ->
-            storedKey.startsWith(prefix) && (storedKey.removePrefix(prefix).toIntOrNull() ?: 0) > page
-        }.forEach { editor.remove(it) }
-        editor.apply()
+        preferences.edit {
+            preferences.all.keys.filter { storedKey ->
+                storedKey.startsWith(prefix) && (storedKey.removePrefix(prefix).toIntOrNull() ?: 0) > page
+            }.forEach { remove(it) }
+        }
     }
 
     private fun pageKey(key: String, page: Int) = AccountScope.key("$key:$page")

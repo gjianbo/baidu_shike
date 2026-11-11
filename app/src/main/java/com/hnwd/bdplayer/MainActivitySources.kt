@@ -6,6 +6,8 @@ import android.widget.EditText
 import androidx.appcompat.app.AlertDialog
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.net.toUri
+import androidx.core.content.edit
 
 /**
  * 来源管理：共享来源仓储、群组/联系人发现与切换。
@@ -21,8 +23,9 @@ internal fun MainActivity.quarkLoggedIn(): Boolean = QuarkPersonalDrive.hasLogin
 
 
 internal fun MainActivity.markQuarkEverLogged() {
-    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit()
-        .putBoolean("quark_ever_logged", true).apply()
+    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
+        putBoolean("quark_ever_logged", true)
+    }
 }
 
 
@@ -120,9 +123,9 @@ internal fun MainActivity.chooseSource() {
 
 
 internal fun MainActivity.selectSource(source: ShareSource) {
-    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit()
-        .putString(AccountScope.key("source_last_${source.provider.name.lowercase()}"), source.id)
-        .apply()
+    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
+        putString(AccountScope.key("source_last_${source.provider.name.lowercase()}"), source.id)
+    }
     activateGroup(source.id)
 }
 
@@ -335,10 +338,10 @@ internal fun MainActivity.saveShareSources(sources: List<ShareSource>, activeGro
                 .put("provider", it.provider.name),
         )
     }
-    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit()
-        .putString(AccountScope.key("share_sources"), entries.toString())
-        .putString(AccountScope.key("group_id"), activeGroup)
-        .apply()
+    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
+        putString(AccountScope.key("share_sources"), entries.toString())
+        putString(AccountScope.key("group_id"), activeGroup)
+    }
 }
 
 
@@ -356,7 +359,7 @@ internal fun MainActivity.associateCurrentSession() {
         toast("请先登录百度网盘")
         return
     }
-    val address = Uri.parse(web.url.orEmpty())
+    val address = web.url.orEmpty().toUri()
     val route = address.fragment.orEmpty()
     val isSession = address.scheme == "https" && address.host == PanApi.HOST &&
         address.path == "/disk/main" && route.startsWith("/im/session?")
@@ -434,6 +437,7 @@ internal fun MainActivity.setActiveGroup(group: String) {
     homeCheckToken++
     homeCheckInFlight = false
     lastHomeCheckAt = 0L
-    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit()
-        .putString(AccountScope.key("group_id"), gid).apply()
+    getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
+        putString(AccountScope.key("group_id"), gid)
+    }
 }

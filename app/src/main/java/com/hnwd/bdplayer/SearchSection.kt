@@ -16,6 +16,7 @@ import android.widget.ImageView
 import android.widget.ListView
 import android.widget.TextView
 import org.json.JSONObject
+import androidx.core.content.edit
 
 /**
  * 全局搜索需要的最小宿主能力：来源列表、一次 JSON 请求、弹窗尺寸与页面跳转。
@@ -116,8 +117,9 @@ internal class SearchSection(private val host: SearchHost) {
         fun choose(scope: SearchScope) {
             if (scope !in scopes) return
             searchScope = scope
-            host.settings().edit()
-                .putString("search_scope", scope.name).apply()
+            host.settings().edit {
+                putString("search_scope", scope.name)
+            }
             paintScope()
         }
         chipDisk.setOnClickListener { choose(SearchScope.DISK) }

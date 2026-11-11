@@ -32,7 +32,6 @@
     <color name="logoBg">#1B1C20</color>
     <color name="logoInk">#FFFFFF</color>
     <color name="navPill">#DFE1FF</color>
-    <color name="scrim">#661B1C20</color>
     <color name="white">#FFFFFF</color>
     <color name="transparent">#00000000</color>
 </resources>

@@ -9,10 +9,86 @@
     <issue id="SetTextI18n" severity="ignore" />
 
     <!--
-      纯风格建议（SharedPreferences.edit {}、String.toUri 等），共 82 处跨十几个文件。
-      MainActivityBrowse / MainActivityCourse 正被并行窗口修改，媒体页 S0 相关文件
-      刚合入，此刻批量改会制造冲突。等并行窗口收口后单独排一轮机械替换，并移除此条。
-      注意：这是「暂缓」而不是「规则不适用」，不要把它当成已修复的技术债。
+      UseKtx 已清理：toUri 30 / SharedPreferences.edit 33 / toColorInt 2 /
+      isVisible 2 / isGone 1 / isNotEmpty 2 / createBitmap 1 共 71 个代码点
+      已改用 KTX 扩展，并在 build.gradle 显式声明 androidx.core:core-ktx:1.13.1
+      （之前仅靠传递依赖）。全部为 apply() 语义，无 commit()，与 inline edit {} 等价。
+      仅剩 Int.toDrawable 8 条：core-ktx 1.13.1 的 DrawableKt 里没有
+      Int.toDrawable() 扩展（javap 核实只有 toBitmap/updateBounds/toBitmapOrNull），
+      lint 建议在当前依赖版本下不可实施，故按文件定点忽略、不做全局抑制。
     -->
-    <issue id="UseKtx" severity="ignore" />
+    <issue id="UseKtx">
+        <ignore regexp=".*DiskMutationSection\.kt" />
+        <ignore regexp=".*ImageViewerActivity\.kt" />
+        <ignore regexp=".*LoginDialog\.kt" />
+        <ignore regexp=".*MainActivityChrome\.kt" />
+        <ignore regexp=".*MainActivityHome\.kt" />
+        <ignore regexp=".*SearchSection\.kt" />
+    </issue>
+
+    <!-- ===== 单语言应用，不使用 RTL（17 + 6）===== -->
+    <!--
+      应用只提供简体中文资源，实际不会进入 RTL 布局。left/right 改成 start/end
+      需成对补 End 值，会改动已定稿的间距，零用户收益。supportsRtl 保留 true
+      仅为兼容系统，不代表有多语言布局。将来做阿语/希伯来语时移除这两条。
+    -->
+    <issue id="RtlHardcoded" severity="ignore" />
+    <issue id="RtlSymmetry" severity="ignore" />
+
+    <!-- ===== 视觉字号，由设计稿定版，不按 lint 阈值改（12）===== -->
+    <!--
+      9sp ~ 10.5sp 用于角标/次要元信息，是刻意压小的排版层级。改成 >=11sp
+      会改变行高与卡片密度，破坏已定稿的视觉。属于可读性偏好，不是缺陷。
+    -->
+    <issue id="SmallSp" severity="ignore" />
+
+    <!-- ===== 布局性能/结构建议：改动有视觉或行为风险，收益不可测（27）===== -->
+    <!--
+      Overdraw 9：根布局 background 与 theme windowBackground 重复绘制，去掉
+        任一处的视觉效果依赖具体 Activity 主题，且 view_video_player.xml 属媒体页。
+      InflateParams 8：inflate(..., null) 改成带 parent 的三参形式会改变
+        LayoutParams 解析（Dialog / 自定义容器），可能改变宽高，且涉及媒体页文件。
+      UseCompatTextViewDrawableXml 3：改 app:drawable*Compat 需引入 AppCompat
+        TextView 与 app 命名空间，存在兼容差异。
+      UseCompoundDrawables 1 / UselessParent 1：合并节点需重排布局层级。
+      IconLauncherShape 5：launcher 图标形状是设计资源，替换需要设计稿。
+      以上均为建议性规则，本轮不做无收益的视觉改动。
+    -->
+    <issue id="Overdraw" severity="ignore" />
+    <issue id="InflateParams" severity="ignore" />
+    <issue id="UseCompatTextViewDrawableXml" severity="ignore" />
+    <issue id="UseCompoundDrawables" severity="ignore" />
+    <issue id="UselessParent" severity="ignore" />
+    <issue id="IconLauncherShape" severity="ignore" />
+
+    <!-- ===== 第三方依赖，源码不在本项目（3）===== -->
+    <!--
+      TrustAllX509TrustManager 3 来自 androidx.pdf:pdf-viewer 传递依赖
+      bcpkix-jdk15to18-1.72.jar 里的空 TrustManager 实现，App 无法修改，
+      也不在本项目的网络栈上（usesCleartextTraffic=false）。
+    -->
+    <issue id="TrustAllX509TrustManager" severity="ignore" />
+
+    <!-- ===== 定点忽略：只忽略指定文件，不全局抑制以免掩盖别处的真实问题（7）===== -->
+    <!--
+      DefaultLocale 2 / ObsoleteSdkInt 2 在 ImageViewerActivity.kt；
+      ClickableViewAccessibility 1 在 VideoPlaybackPage.kt —— 均属媒体页文件，
+      S0 窗口刚合入，改它要重新走真机回归，留给该窗口处理。
+      SetJavaScriptEnabled 2 在 LoginDialog.kt / MainActivity.kt 属于「有意为之」：
+      百度/夸克 H5 登录必须开 JS，已限定 allowFileAccess/allowContentAccess=false
+      与 quark.cn 域名校验；仅在这两个文件忽略，未来新增 WebView 仍会被告警。
+    -->
+    <issue id="DefaultLocale">
+        <ignore regexp=".*ImageViewerActivity\.kt" />
+    </issue>
+    <issue id="ObsoleteSdkInt">
+        <ignore regexp=".*ImageViewerActivity\.kt" />
+    </issue>
+    <issue id="ClickableViewAccessibility">
+        <ignore regexp=".*VideoPlaybackPage\.kt" />
+    </issue>
+    <issue id="SetJavaScriptEnabled">
+        <ignore regexp=".*LoginDialog\.kt" />
+        <ignore regexp=".*MainActivity\.kt" />
+    </issue>
 </lint>

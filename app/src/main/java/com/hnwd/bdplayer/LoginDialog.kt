@@ -17,6 +17,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.net.toUri
 
 /**
  * 网页登录弹窗。独立 WebView + 应用级 CookieManager；
@@ -81,7 +82,7 @@ internal class LoginDialog(
             override fun onPageFinished(view: WebView, url: String) {
                 progress.visibility = View.GONE
                 updateUrl(url)
-                val address = Uri.parse(url)
+                val address = url.toUri()
                 if (!done && address.scheme == "https" && address.host == PanApi.HOST) {
                     done = true
                     CookieManager.getInstance().flush()
@@ -137,7 +138,7 @@ internal class LoginDialog(
     }
 
     private fun updateUrl(raw: String) {
-        val address = Uri.parse(raw)
+        val address = raw.toUri()
         urlText.text = address.host ?: raw
     }
 }

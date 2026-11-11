@@ -33,6 +33,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import java.util.concurrent.Executors
+import androidx.core.net.toUri
 
 /**
  * H5 短信登录页（client_id=503，触屏验证码）。该页提交验证码后只把 32 位
@@ -463,7 +464,7 @@ class QuarkDriveActivity : AppCompatActivity() {
                     if (!h5Mode || exchanged || loginDialog == null) return@post
                     // 桥只挂在登录页上，登录链路还会经过微信 / 阿里验证码等域名。
                     // 再校验一次当前页面域名，避免第三方页面伪造 ticket 把账号换成别人的。
-                    val host = Uri.parse(web.url.orEmpty()).host.orEmpty().lowercase()
+                    val host = web.url.orEmpty().toUri().host.orEmpty().lowercase()
                     if (host != "quark.cn" && !host.endsWith(".quark.cn")) return@post
                     exchanged = true
                     message.text = "验证通过，正在换取登录会话…"

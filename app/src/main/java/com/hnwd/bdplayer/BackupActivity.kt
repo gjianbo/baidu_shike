@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.view.isNotEmpty
 
 class BackupActivity : AppCompatActivity() {
     private lateinit var includes: LinearLayout
@@ -113,7 +114,7 @@ class BackupActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(16), dp(11), dp(16), dp(11))
             addView(ImageView(this@BackupActivity).apply {
-                setImageResource(R.drawable.ic_check)
+                setImageResource(R.drawable.ic_check_local)
                 setColorFilter(getColor(R.color.ok))
                 setBackgroundColor(getColor(R.color.okSoft))
                 setPadding(dp(7), dp(7), dp(7), dp(7))
@@ -131,7 +132,7 @@ class BackupActivity : AppCompatActivity() {
                 setTextColor(getColor(R.color.ink3))
             })
         }.also { row ->
-            if (includes.childCount > 0) {
+            if (includes.isNotEmpty()) {
                 // 分隔线由下一行顶部承担；保持简单无额外 View
             }
         })

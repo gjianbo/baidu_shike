@@ -41,6 +41,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import java.io.File
 import java.nio.ByteBuffer
 import kotlin.math.abs
+import androidx.core.net.toUri
 
 /**
  * 图片预览页。优先用签名地址，按需补取当前图及相邻图。
@@ -510,7 +511,7 @@ class ImageViewerActivity : AppCompatActivity() {
             }
         } else {
             if (currentUrl.isEmpty()) return
-            Intent(Intent.ACTION_VIEW, Uri.parse(currentUrl))
+            Intent(Intent.ACTION_VIEW, currentUrl.toUri())
         }
         try {
             startActivity(view)

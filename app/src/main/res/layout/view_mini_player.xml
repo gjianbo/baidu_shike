@@ -24,6 +24,7 @@
             android:layout_height="34dp"
             android:background="@drawable/bg_fmt_audio"
             android:padding="8dp"
+            android:importantForAccessibility="no"
             android:src="@drawable/ic_music" />
 
         <LinearLayout

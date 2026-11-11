@@ -2,6 +2,7 @@ package com.hnwd.bdplayer
 
 import android.content.Context
 import kotlin.math.abs
+import androidx.core.content.edit
 
 internal object PlaybackSpeed {
     val values = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
@@ -15,11 +16,11 @@ internal object PlaybackSpeed {
     fun audio(context: Context): Float = read(context, AUDIO_KEY)
 
     fun setVideo(context: Context, speed: Float) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putFloat(VIDEO_KEY, speed).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putFloat(VIDEO_KEY, speed) }
     }
 
     fun setAudio(context: Context, speed: Float) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putFloat(AUDIO_KEY, speed).apply()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit { putFloat(AUDIO_KEY, speed) }
     }
 
     fun label(speed: Float): String = when {

@@ -3,6 +3,7 @@ package com.hnwd.bdplayer
 import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.core.content.edit
 
 internal data class AudioHistoryItem(
     val entry: PanEntry,
@@ -100,14 +101,14 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
                 .put("duration", item.duration)
                 .put("updatedAt", item.updatedAt))
         }
-        preferences.edit().putString(storageKey(bucket), data.toString()).apply()
+        preferences.edit { putString(storageKey(bucket), data.toString()) }
     }
 
     fun clear() {
-        val editor = preferences.edit()
-        val prefix = AccountScope.prefix(account ?: AccountScope.current)
-        preferences.all.keys.filter { it.startsWith(prefix) }.forEach { editor.remove(it) }
-        editor.apply()
+        preferences.edit {
+            val prefix = AccountScope.prefix(account ?: AccountScope.current)
+            preferences.all.keys.filter { it.startsWith(prefix) }.forEach { remove(it) }
+        }
     }
 
     private fun sameFile(first: PanEntry, second: PanEntry): Boolean =
