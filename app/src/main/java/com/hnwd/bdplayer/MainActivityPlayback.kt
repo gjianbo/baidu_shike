@@ -231,7 +231,7 @@ internal fun MainActivity.resolveAudio(
 internal fun MainActivity.resolveQuarkPlayback(entry: PanEntry, onResult: (Result<QuarkPlayback>) -> Unit) {
     val account = AccountScope.current
     val session = QuarkPersonalDrive.openSession(WebSettings.getDefaultUserAgent(this))
-    Thread {
+    AppIo.execute {
         val result = runCatching {
             val drive = session ?: throw QuarkLoginRequired()
             val file = QuarkFile(entry.fileId, entry.name, false, entry.size.toLongOrNull() ?: 0)
@@ -240,7 +240,7 @@ internal fun MainActivity.resolveQuarkPlayback(entry: PanEntry, onResult: (Resul
         runOnUiThread {
             if (!isDestroyed && !isFinishing && account == AccountScope.current) onResult(result)
         }
-    }.start()
+    }
 }
 
 
@@ -943,10 +943,18 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     fun showPlaylist() {
         val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(this)
         (courseList.view.parent as? ViewGroup)?.removeView(courseList.view)
-        listHolder.addView(courseList.view, FrameLayout.LayoutParams(-1, dp(420)))
+        // 抽屉高度按实际条目数算：固定 420dp 时只有 1 条课程会留下大片空白。
+        val rows = PlaybackQueueState.entries.size.coerceAtLeast(1)
+        val sheetHeight = minOf(
+            dp(72) + dp(56) * rows.coerceAtMost(6),
+            (resources.displayMetrics.heightPixels * 0.72f).toInt(),
+        )
+        listHolder.addView(courseList.view, FrameLayout.LayoutParams(-1, sheetHeight))
         dialog.setContentView(listHolder)
         dialog.setOnDismissListener { listHolder.removeView(courseList.view) }
         dialog.show()
+        // 紧凑抽屉（1 条课程时仅 ~128dp）要有遮罩才看得出是浮层，否则像页面底部多了一行
+        dialog.window?.setDimAmount(0.45f)
     }
     listButton.setOnClickListener { showPlaylist() }
     val playbackContent = column().apply {

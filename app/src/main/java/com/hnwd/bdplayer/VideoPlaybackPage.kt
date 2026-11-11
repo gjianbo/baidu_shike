@@ -625,7 +625,10 @@ internal class VideoPlaybackPage(
             addView(video, FrameLayout.LayoutParams(-1, -1))
             addView(stageOverlay, FrameLayout.LayoutParams(-1, -1))
             addView(audioStage, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER).apply {
-                bottomMargin = dp(40)
+                // 顶栏是浮层（约 64dp），单行控制条叠在画面底部（约 36dp）。
+                // 把音频态限制在两者之间居中，避免圆形被顶栏压住、文案被控制条盖住。
+                topMargin = dp(68)
+                bottomMargin = dp(44)
             })
         }
         val root = FrameLayout(activity).apply {
