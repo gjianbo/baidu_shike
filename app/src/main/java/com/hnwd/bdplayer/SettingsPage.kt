@@ -82,43 +82,28 @@ internal class SettingsPage(private val host: SettingsHost) {
         host.renderCourseSwitch()
     }
 
-    private enum class DriveState { NEVER, ACTIVE, DORMANT }
-
-    private val baiduLogoutUrls = listOf(
-        "https://pan.baidu.com", "https://wappass.baidu.com",
-        "https://passport.baidu.com", "https://www.baidu.com", "https://baidu.com",
-    )
-    private val quarkLogoutUrls = listOf(
-        "https://pan.quark.cn", "https://drive-pc.quark.cn",
-        "https://uop.quark.cn", "https://quark.cn",
-    )
-
     private fun quarkEverLogged(): Boolean =
         host.settings().getBoolean("quark_ever_logged", false)
 
-    private fun baiduDriveState(): DriveState = when {
-        host.accountVerified() || host.account().isNotEmpty() -> DriveState.ACTIVE
-        // 退出登录刻意保留 viewer_uk（数据归属锚点），此时按 DORMANT 呈现。
-        AccountScope.current.isNotEmpty() -> DriveState.DORMANT
-        host.shareSources().any { it.provider == SourceProvider.BAIDU } -> DriveState.DORMANT
-        else -> DriveState.NEVER
-    }
+    private fun baiduDriveState(): DriveState = resolveBaiduState(
+        accountVerified = { host.accountVerified() },
+        account = { host.account() },
+        scopeUk = { AccountScope.current },
+        hasBaiduSource = { host.shareSources().any { it.provider == SourceProvider.BAIDU } },
+    )
 
-    private fun quarkDriveState(): DriveState = when {
-        host.quarkLoggedIn() -> DriveState.ACTIVE
-        quarkEverLogged() || host.shareSources().any { it.provider == SourceProvider.QUARK } -> DriveState.DORMANT
-        else -> DriveState.NEVER
-    }
+    private fun quarkDriveState(): DriveState = resolveQuarkState(
+        quarkLoggedIn = { host.quarkLoggedIn() },
+        everLogged = { quarkEverLogged() },
+        hasQuarkSource = { host.shareSources().any { it.provider == SourceProvider.QUARK } },
+    )
 
     private fun renderLinkedDrives(page: View) {
         val container = page.findViewById<LinearLayout>(R.id.setLinkedContainer)
         container.removeAllViews()
         if (host.quarkLoggedIn()) host.markQuarkEverLogged()
-        val states = listOf(
-            SourceProvider.BAIDU to baiduDriveState(),
-            SourceProvider.QUARK to quarkDriveState(),
-        )
-        val linked = states.filter { it.second != DriveState.NEVER }
+        val states = DriveStates(baiduDriveState(), quarkDriveState())
+        val linked = linkedDriveRows(states)
         if (linked.isEmpty()) {
             container.addView(emptyDriveRow())
         } else {
@@ -127,11 +112,10 @@ internal class SettingsPage(private val host: SettingsHost) {
                 container.addView(driveRow(provider, state))
             }
         }
-        val hasNever = states.any { it.second == DriveState.NEVER }
+        val hasNever = hasNeverDrive(states)
         page.findViewById<View>(R.id.setAddLoginRow).visibility =
             if (hasNever) View.VISIBLE else View.GONE
-        page.findViewById<TextView>(R.id.setAddLoginHint).text =
-            if (hasNever) "选择还没登录过的网盘类型" else "已没有可添加的网盘"
+        page.findViewById<TextView>(R.id.setAddLoginHint).text = addLoginHint(hasNever)
     }
 
     private fun driveDivider(): View = View(activity).apply {
@@ -164,32 +148,25 @@ internal class SettingsPage(private val host: SettingsHost) {
         val action = row.findViewById<TextView>(R.id.driveAction)
         name.text = if (baidu) "百度网盘" else "夸克网盘"
         val sources = host.shareSources().count { it.provider == provider }
+        status.text = driveStatusText(
+            provider, state,
+            account = { host.account() },
+            nickname = { host.accountName() },
+        )
+        pill.text = drivePillText(state)
+        count.text = driveCountText(state, sources)
+        action.text = driveActionText(state)
         if (state == DriveState.ACTIVE) {
             if (baidu) host.renderAccountAvatar(icon) else icon.setImageResource(R.drawable.ic_layers)
-            pill.text = "在用"
             pill.setBackgroundResource(R.drawable.bg_chip_on)
             pill.setTextColor(activity.color(R.color.accentInk))
-            status.text = if (baidu) {
-                val tail = if (host.account().length <= 4) "账号 ${host.account()}"
-                else "账号 …${host.account().takeLast(4)}"
-                val nickname = host.accountName().trim()
-                if (nickname.isNotEmpty()) "已登录 · $nickname（$tail）" else "已登录 · $tail"
-            } else {
-                "已登录 · Cookie 有效"
-            }
-            count.text = "$sources 个来源"
-            action.text = "退出登录"
             action.setTextColor(activity.color(R.color.danger))
             action.setOnClickListener { confirmLogout(provider) }
             row.setOnClickListener { openSourcesFor(provider) }
         } else {
             icon.setImageResource(if (baidu) R.drawable.ic_cloud else R.drawable.ic_layers)
-            pill.text = "已退出"
             pill.setBackgroundResource(R.drawable.bg_chip)
             pill.setTextColor(activity.color(R.color.ink3))
-            status.text = "暂未使用 · 数据已保留"
-            count.text = "保留 $sources 个来源"
-            action.text = "登录"
             action.setTextColor(activity.color(R.color.accentInk))
             action.setOnClickListener { startLoginFor(provider) }
             row.setOnClickListener { startLoginFor(provider) }
@@ -202,21 +179,7 @@ internal class SettingsPage(private val host: SettingsHost) {
     private fun startLoginFor(provider: SourceProvider) = host.startLogin(provider)
 
     private fun openAddLoginSheet() {
-        val choices = mutableListOf<SheetChoice>()
-        if (baiduDriveState() == DriveState.NEVER) {
-            choices += SheetChoice(
-                "百度网盘",
-                meta = "共享文件库可能在群组或联系人下",
-                tag = SourceProvider.BAIDU,
-            )
-        }
-        if (quarkDriveState() == DriveState.NEVER) {
-            choices += SheetChoice(
-                "夸克网盘",
-                meta = "关注根目录下的文件夹",
-                tag = SourceProvider.QUARK,
-            )
-        }
+        val choices = addLoginChoices(baiduDriveState(), quarkDriveState())
         if (choices.isEmpty()) return
         host.pickFromSheet(
             title = "添加登录",
@@ -227,18 +190,18 @@ internal class SettingsPage(private val host: SettingsHost) {
     }
 
     private fun confirmLogout(provider: SourceProvider) {
-        val label = if (provider == SourceProvider.BAIDU) "百度网盘" else "夸克网盘"
+        val label = logoutLabel(provider)
+        val (urls, domain) = logoutCookiePlan(provider)
         AlertDialog.Builder(activity)
             .setTitle("退出$label")
             .setMessage("退出只终止会话，已关联的来源和播放记录都会保留，可随时重新登录。")
             .setNegativeButton("取消", null)
             .setPositiveButton("退出登录") { _, _ ->
+                clearCookies(urls, domain)
                 if (provider == SourceProvider.BAIDU) {
-                    clearCookies(baiduLogoutUrls, "baidu.com")
                     host.invalidateAccount()
                     host.setCheckingAccount(false)
                 } else {
-                    clearCookies(quarkLogoutUrls, "quark.cn")
                     host.markQuarkEverLogged()
                 }
                 host.clearPendingAddProvider()
@@ -253,12 +216,8 @@ internal class SettingsPage(private val host: SettingsHost) {
         val manager = CookieManager.getInstance()
         urls.forEach { url ->
             val raw = manager.getCookie(url).orEmpty()
-            if (raw.isEmpty()) return@forEach
-            raw.split(';').forEach { part ->
-                val name = part.substringBefore('=').trim()
-                if (name.isEmpty()) return@forEach
-                manager.setCookie(url, "$name=; Max-Age=0; Path=/")
-                manager.setCookie(url, "$name=; Max-Age=0; Path=/; Domain=.$domain")
+            cookieExpiryCommands(raw, url, domain).forEach { (target, command) ->
+                manager.setCookie(target, command)
             }
         }
         manager.flush()

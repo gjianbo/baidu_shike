@@ -82,16 +82,11 @@ internal class SearchSection(private val host: SearchHost) {
         }
         val account = host.account()
         val groups = searchableGroups()
-        val scopes = buildList {
-            add(SearchScope.DISK)
-            if (groups.isNotEmpty()) {
-                add(SearchScope.GROUP)
-                add(SearchScope.ALL)
-            }
-        }
-        val stored = host.settings()
-            .getString("search_scope", SearchScope.DISK.name)
-        searchScope = SearchScope.entries.firstOrNull { it.name == stored && it in scopes } ?: SearchScope.DISK
+        val scopes = availableScopes(groups.isNotEmpty())
+        searchScope = restoreScope(
+            host.settings().getString("search_scope", SearchScope.DISK.name),
+            scopes,
+        )
         val view = activity.layoutInflater.inflate(R.layout.dialog_search_input, null, false)
         val input = view.findViewById<EditText>(R.id.searchInput)
         val chipDisk = view.findViewById<TextView>(R.id.scopeDisk)
@@ -113,18 +108,10 @@ internal class SearchSection(private val host: SearchHost) {
             paint(chipDisk, searchScope == SearchScope.DISK)
             paint(chipGroup, searchScope == SearchScope.GROUP)
             paint(chipAll, searchScope == SearchScope.ALL)
-            titleView.text = when (searchScope) {
-                SearchScope.DISK -> "搜索我的网盘"
-                SearchScope.GROUP -> "搜索群组"
-                SearchScope.ALL -> "搜索全部"
-            }
-            subtitle.text = when (searchScope) {
-                SearchScope.DISK -> "在我的网盘中搜索"
-                SearchScope.GROUP -> "在已关联的群组文件库中搜索"
-                SearchScope.ALL -> "在群组和我的网盘中搜索"
-            }
+            titleView.text = scopeTitle(searchScope)
+            subtitle.text = scopeSubtitle(searchScope)
             scopeHint.visibility = if (searchScope == SearchScope.ALL) View.VISIBLE else View.GONE
-            scopeHint.text = "将搜索 ${groups.size} 个群 + 我的网盘，结果可能较多"
+            scopeHint.text = scopeHintText(groups.size)
         }
         fun choose(scope: SearchScope) {
             if (scope !in scopes) return
@@ -161,7 +148,7 @@ internal class SearchSection(private val host: SearchHost) {
             activity.getSystemService(InputMethodManager::class.java)?.hideSoftInputFromWindow(input.windowToken, 0)
             dialog.dismiss()
             if (host.canSearch() && host.account() == account) {
-                runGlobalSearch(keyword, searchTargets(searchScope), searchScope)
+                runGlobalSearch(keyword, searchTargets(searchScope, searchableGroups()), searchScope)
             } else {
                 host.say("网盘连接已变化，请重新搜索")
             }
@@ -181,20 +168,8 @@ internal class SearchSection(private val host: SearchHost) {
         )
     }
 
-    private fun searchableGroups() = host.shareSources().filter {
-        it.provider == SourceProvider.BAIDU && !isContactSource(it.id)
-    }
-
-    /** V02-1 按范围组装搜索目标：群组 = 全部已关联的百度群组；全部 = 群组 + 我的网盘。 */
-    private fun searchTargets(scope: SearchScope): List<SearchTarget> = buildList {
-        if (scope != SearchScope.DISK) {
-            searchableGroups()
-                .forEach { add(SearchTarget(SearchScope.GROUP, it.id, it.name)) }
-        }
-        if (scope != SearchScope.GROUP) {
-            add(SearchTarget(SearchScope.DISK, DISK_SOURCE_ID, "我的网盘"))
-        }
-    }
+    /** 群组范围只认已关联的百度群组；联系人与夸克来源都不参与全局搜索。 */
+    private fun searchableGroups(): List<SearchTarget> = searchGroupTargets(host.shareSources())
 
     /** V02-1 全局搜索：串行遍历各来源（避免 SEARCH 单请求 id 并发互斥），聚合并按来源去重。 */
     private fun runGlobalSearch(keyword: String, targets: List<SearchTarget>, scope: SearchScope) {
@@ -242,8 +217,7 @@ internal class SearchSection(private val host: SearchHost) {
         val dialog = Dialog(activity)
         dialog.setContentView(view)
         host.sizeSheet(dialog) { available ->
-            minOf((available * 0.70f).toInt().coerceIn(activity.dp(320), activity.dp(640)), available - activity.dp(24))
-                .coerceAtLeast(1)
+            searchResultHeight(available, activity.dp(320), activity.dp(640), activity.dp(24))
         }
         dialog.window?.apply {
             setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
@@ -299,17 +273,17 @@ internal class SearchSection(private val host: SearchHost) {
                 list.visibility = View.GONE
                 emptyTitle.text = "没有找到匹配的文件"
                 emptyHint.text = "换个关键词，或缩小搜索范围"
-                summary.text = if (failed > 0) "0 个结果 · $failed 个来源失败" else "0 个结果"
+                summary.text = searchSummaryText(0, failed)
             } else {
                 empty.visibility = View.GONE
                 list.visibility = View.VISIBLE
                 list.alpha = 1f
                 list.isEnabled = true
-                summary.text = "已找到 ${hits.size} 项" + if (failed > 0) " · $failed 个来源失败" else " · 点选打开"
+                summary.text = searchSummaryText(hits.size, failed)
             }
         }
         fun updateProgress() {
-            if (isCurrent()) summary.text = "已搜 $index/${targets.size} · 已找到 ${hits.size} 项"
+            if (isCurrent()) summary.text = searchProgressText(index, targets.size, hits.size)
         }
         fun clampHits() {
             while (hits.size > MAX_GLOBAL_SEARCH_HITS) hits.removeAt(hits.size - 1)
@@ -334,7 +308,7 @@ internal class SearchSection(private val host: SearchHost) {
                         ) { json ->
                             if (!isCurrent() || !dialog.isShowing) return@fetchJson
                             request.decode(json).items.forEach { hit ->
-                                if (seen.add("D:${hit.entry.fileId}")) hits.add(hit)
+                                if (seen.add(diskHitKey(hit.entry.fileId))) hits.add(hit)
                             }
                             clampHits()
                             adapter.notifyDataSetChanged()
@@ -358,7 +332,7 @@ internal class SearchSection(private val host: SearchHost) {
                 ) { json ->
                     if (!isCurrent() || !dialog.isShowing) return@fetchJson
                     PanApi.parseSearch(json, target.sourceId).take(800).forEach { hit ->
-                        if (seen.add("G:${hit.entry.gid}:${hit.entry.fileId}")) hits.add(hit)
+                        if (seen.add(groupHitKey(hit.entry.gid, hit.entry.fileId))) hits.add(hit)
                     }
                     clampHits()
                     adapter.notifyDataSetChanged()
@@ -384,8 +358,7 @@ internal class SearchSection(private val host: SearchHost) {
             done(false, "搜索结果缺少目录信息，无法定位")
             return
         }
-        val targetPath = (if (hit.entry.directory) hit.entry.path else hit.parentPath)
-            .trimEnd('/').ifEmpty { "/" }
+        val targetPath = normalizeTargetPath(hit.entry.path, hit.entry.directory, hit.parentPath)
         if (hit.entry.directory && hit.entry.fileId == shareFsId) {
             host.openFolderTrail(group, listOf(hit.entry))
             done(true, null)
@@ -458,26 +431,21 @@ internal class SearchSection(private val host: SearchHost) {
             page = 1,
             seen = mutableSetOf(),
             match = { child ->
-                val childPath = child.path.trimEnd('/')
-                when {
-                    fileHit && !child.directory && child.fileId == hit.entry.fileId -> child
-                    child.directory && childPath == targetPath -> child
-                    child.directory && childPath.isNotEmpty() && targetPath.startsWith("$childPath/") -> child
-                    else -> null
-                }
+                if (matchesTrailChild(
+                        child.path, child.directory, child.fileId,
+                        targetPath, fileHit, hit.entry.fileId,
+                    )
+                ) child else null
             },
             onFound = { found ->
                 val foundPath = found.path.trimEnd('/')
-                var rootPath = foundPath.substringBeforeLast('/', "")
-                if (rootPath.isEmpty()) rootPath = "/"
-                val rootName = if (rootPath == "/") "文件库" else rootPath.substringAfterLast('/').ifEmpty { "文件库" }
+                val (rootPath, rootName) = trailRoot(found.path)
                 val actualRoot = root.copy(name = rootName, path = rootPath)
                 when {
                     targetPath == rootPath -> open(listOf(actualRoot))
                     found.directory && foundPath == targetPath -> open(listOf(actualRoot, found))
                     else -> {
-                        val parts = targetPath.removePrefix(rootPath).trim('/')
-                            .split('/').filter { it.isNotEmpty() }
+                        val parts = trailParts(targetPath, rootPath)
                         if (parts.isEmpty()) {
                             fail("目录结构已变化，无法定位")
                         } else {
@@ -489,7 +457,7 @@ internal class SearchSection(private val host: SearchHost) {
                                     return
                                 }
                                 val current = trail.last()
-                                val expected = current.path.trimEnd('/') + "/" + parts[index]
+                                val expected = trailExpectedPath(current.path, parts[index])
                                 scanDirectory(
                                     entry = current,
                                     page = 1,
@@ -513,10 +481,5 @@ internal class SearchSection(private val host: SearchHost) {
                 fail(if (fileHit) "未找到文件所在目录，可能已被移动" else "未找到该目录，可能已被移动")
             },
         )
-    }
-
-    private companion object {
-        /** 全局搜索单次会话的结果上限，超过即停止继续遍历来源。 */
-        const val MAX_GLOBAL_SEARCH_HITS = 1000
     }
 }
