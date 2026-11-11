@@ -1,6 +1,5 @@
 package com.hnwd.bdplayer
 
-import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.webkit.CookieManager
@@ -85,7 +84,7 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
             return
         }
         content.addView(headAction("登录$providerName") {
-            if (quark) quarkLoginLauncher.launch(Intent(this, QuarkDriveActivity::class.java))
+            if (quark) quarkLoginLauncher.launch(QuarkDriveActivity.loginIntent(this))
             else showLoginDialog()
         })
         return
@@ -317,7 +316,7 @@ internal fun MainActivity.refreshDisk() {
         if (diskProvider == SourceProvider.QUARK) {
             appSub.text = "连接夸克网盘后浏览我的网盘"
             content.addView(headAction("登录夸克网盘") {
-                quarkLoginLauncher.launch(Intent(this, QuarkDriveActivity::class.java))
+                quarkLoginLauncher.launch(QuarkDriveActivity.loginIntent(this))
             })
         } else {
             appSub.text = "连接百度网盘后浏览我的网盘"
@@ -386,7 +385,7 @@ internal fun MainActivity.loadQuarkDiskPage(dirFid: String, parentPath: String, 
                 status.text = "无法读取夸克网盘：${error.message ?: "未知错误"}"
                 if (courseEntries.isEmpty()) {
                     content.addView(headAction("重新登录夸克网盘") {
-                        quarkLoginLauncher.launch(Intent(this, QuarkDriveActivity::class.java))
+                        quarkLoginLauncher.launch(QuarkDriveActivity.loginIntent(this))
                     })
                 }
             }.onSuccess { entries ->

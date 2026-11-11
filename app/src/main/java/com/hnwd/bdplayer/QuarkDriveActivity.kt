@@ -67,6 +67,13 @@ private val H5_ST_HOOK = """
 
 class QuarkDriveActivity : AppCompatActivity() {
     companion object {
+        /** 从「登录夸克网盘」入口进来：登录成功后自动回主界面并刷新来源。 */
+        private const val EXTRA_LOGIN_ONLY = "quark_login_only"
+        private const val KEY_AUTO_LOGIN_SHOWN = "quark_auto_login_shown"
+
+        internal fun loginIntent(context: Context): Intent =
+            Intent(context, QuarkDriveActivity::class.java).putExtra(EXTRA_LOGIN_ONLY, true)
+
         internal fun openFile(context: Context, entry: PanEntry): Intent =
             Intent(context, QuarkDriveActivity::class.java)
                 .putExtra("file_id", entry.fileId)
@@ -99,6 +106,8 @@ class QuarkDriveActivity : AppCompatActivity() {
     private var busy = false
     private var hasMore = false
     private var loginDialog: AlertDialog? = null
+    private var loginOnly = false
+    private var autoLoginShown = false
     private lateinit var root: LinearLayout
     private lateinit var heading: TextView
     private lateinit var status: TextView
@@ -123,6 +132,8 @@ class QuarkDriveActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        loginOnly = intent?.getBooleanExtra(EXTRA_LOGIN_ONLY, false) == true
+        autoLoginShown = savedInstanceState?.getBoolean(KEY_AUTO_LOGIN_SHOWN, false) ?: false
         root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -184,11 +195,25 @@ class QuarkDriveActivity : AppCompatActivity() {
         connect()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_AUTO_LOGIN_SHOWN, autoLoginShown)
+    }
+
     override fun onPostResume() {
         super.onPostResume()
         if (openTargetOnResume && session != null) {
             openTargetOnResume = false
             targetFile?.let(::open)
+        }
+        // 未登录且不是「直接打开某个夸克文件」时，进页即弹 H5 登录，省掉
+        // 「点登录 → 点短信验证码登录」两步。放 onPostResume 是等窗口 token 就绪，
+        // 避免 onCreate 阶段 show Dialog 在部分 ROM 上出 BadToken。
+        // 只在首次自动弹一次；不能放进 connect()——setOnDismissListener 会回调 connect()，
+        // 那样会变成关不掉的弹窗。用户主动关掉后停在文件列表，可点顶部「登录」重试。
+        if (session == null && targetFile == null && !autoLoginShown) {
+            autoLoginShown = true
+            showLogin()
         }
     }
 
@@ -498,9 +523,13 @@ class QuarkDriveActivity : AppCompatActivity() {
             h5Mode = true
             exchanged = false
             web.settings.userAgentString = mobileUa
+            // 现在默认页就是 H5，桥的挂载窗口比原先（用户主动点按钮才挂）更长。
+            // 但 onServiceTicket 的 h5Mode + exchanged + 弹窗存活 + 当前域名 quark.cn 系
+            // 四重校验仍有效；切「完整网页」走 openHome() 会 detachBridge()。
             attachBridge()
             startLoading()
-            message.text = "输入手机号并填写短信验证码，成功后自动返回。"
+            message.text = if (loginOnly) "输入手机号并填写短信验证码，成功后自动返回。"
+            else "输入手机号并填写短信验证码，成功后自动读取网盘。"
             web.loadUrl(QUARK_H5_LOGIN_URL)
         }
         /** 兑换页加载后轮询会话 Cookie；命中即关弹窗触发重连。 */
@@ -609,7 +638,8 @@ class QuarkDriveActivity : AppCompatActivity() {
             val height = (resources.configuration.screenHeightDp * 0.65f).toInt().coerceIn(160, 520)
             addView(message)
             addView(retry)
-            addView(button("短信验证码登录（H5）") { startH5Login() }.apply {
+            // 默认已进 H5；这个按钮用于从「完整网页」切回，或 H5 页卡住时重载登录页。
+            addView(button("返回短信登录") { startH5Login() }.apply {
                 textSize = 12f
             })
             addView(web, LinearLayout.LayoutParams(-1, dp(height)))
@@ -626,6 +656,18 @@ class QuarkDriveActivity : AppCompatActivity() {
             container.removeView(web)
             web.destroy()
             loginDialog = null
+            // 登录入口进来的：会话真的可用就立刻回主界面，让 quarkLoginLauncher 的
+            // refresh() / markQuarkEverLogged() / manageQuarkSources() 自动跑起来。
+            // 判据用 openSession()（与 connect() 同判据、同 drive-pc 域），避免自动 dismiss
+            // 与手动「完成」两条路径因取 Cookie 的 URL 不同而判定不一致。
+            // 用户按返回取消（无会话）时仍留在夸克页，且 autoLoginShown 已置位，不会反复弹。
+            if (loginOnly && !isFinishing && QuarkPersonalDrive.openSession() != null) {
+                CookieManager.getInstance().flush()
+                // 不带 data：MainActivity 的 selectedFile(result.data) 返回 null，不会误开文件。
+                setResult(RESULT_OK)
+                finish()
+                return@setOnDismissListener
+            }
             if (!isFinishing && !isDestroyed && !worker.isShutdown) {
                 CookieManager.getInstance().flush()
                 folders.clear()
@@ -661,7 +703,9 @@ class QuarkDriveActivity : AppCompatActivity() {
             toggleView.text = if (focusLogin) "完整网页" else "只看登录"
             openHome()
         }
-        openHome()
+        // 进弹窗直接落在 H5 短信登录页，省掉一次点击。「完整网页」/「重试」仍走 openHome()
+        // 并 detachBridge()；想从 PC 页切回 H5，点上面的「返回短信登录」。
+        startH5Login()
     }
 
     /** 风控滑块 / 短信验证码在 WebView 里不稳定时，可直接粘贴桌面浏览器的登录 Cookie。 */

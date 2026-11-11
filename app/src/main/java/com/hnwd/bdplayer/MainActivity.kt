@@ -183,18 +183,21 @@ class MainActivity : AppCompatActivity() {
     }
     internal val quarkLoginLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         refresh()
-        if (result.resultCode == RESULT_OK) {
-            QuarkDriveActivity.selectedFile(result.data)?.let { file ->
-                val entry = quarkEntry(file, DISK_SOURCE_ID, EntryOrigin.DISK)
-                native.post { openEntry(entry, listOf(entry)) }
-            }
+        // 选文件返回带 file_id；登录成功返回是 RESULT_OK 且不带 data，两者不能混。
+        val pickedFile = if (result.resultCode == RESULT_OK) {
+            QuarkDriveActivity.selectedFile(result.data)
+        } else null
+        pickedFile?.let { file ->
+            val entry = quarkEntry(file, DISK_SOURCE_ID, EntryOrigin.DISK)
+            native.post { openEntry(entry, listOf(entry)) }
         }
         if (quarkLoggedIn()) {
             markQuarkEverLogged()
-            if (pendingAddProvider == SourceProvider.QUARK) {
-                pendingAddProvider = null
-                manageQuarkSources()
-            }
+            pendingAddProvider = null
+            // 登录成功回主界面后不能只 refresh：夸克内容靠「监控目录」才有，光有 Cookie
+            // 首页依旧是空的。这里直接把目录勾选 sheet 推出来，省掉用户自己找入口。
+            // 只认「登录成功返回」；选文件返回、按返回取消登录都不弹，避免打断播放。
+            if (pickedFile == null && result.resultCode == RESULT_OK) manageQuarkSources()
         } else if (pendingAddProvider == SourceProvider.QUARK) {
             pendingAddProvider = null
         }
@@ -1100,7 +1103,7 @@ class MainActivity : AppCompatActivity() {
                 showLoginDialog(SourceProvider.BAIDU)
             } else {
                 pendingAddProvider = SourceProvider.QUARK
-                quarkLoginLauncher.launch(Intent(this@MainActivity, QuarkDriveActivity::class.java))
+                quarkLoginLauncher.launch(QuarkDriveActivity.loginIntent(this@MainActivity))
             }
         }
 
