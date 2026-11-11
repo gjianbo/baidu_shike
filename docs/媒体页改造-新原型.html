@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>媒体页改造原型 · 符合我们实际能力的版本</title>
+<style>
+:root{
+  --bg:#0E0F13; --panel:#16181F; --panel2:#1C1F28; --line:#2A2E3A;
+  --text:#E8E9EE; --text2:#A4A8B6; --text3:#6E727E;
+  --accent:#BFC6FF; --accentDim:rgba(191,198,255,.18); --star:#FFC857;
+  --scrim:linear-gradient(180deg,rgba(0,0,0,.62),rgba(0,0,0,0));
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased}
+.wrap{max-width:1240px;margin:0 auto;padding:48px 26px 90px}
+h1{font-size:27px;font-weight:650;margin:0 0 10px;letter-spacing:.3px}
+.lead{color:var(--text2);font-size:14px;margin:0 0 8px;max-width:860px;line-height:1.7}
+.lead b{color:var(--accent);font-weight:600}
+.tip{font-size:12px;color:var(--text3);margin:0 0 34px}
+.tip kbd{background:var(--panel2);border:1px solid var(--line);border-radius:5px;
+  padding:1px 6px;color:var(--text2);font-family:inherit;font-size:11px}
+h2.sec{font-size:18px;margin:48px 0 6px;font-weight:650}
+.sub{font-size:12.5px;color:var(--text3);margin:0 0 20px}
+.row{display:flex;gap:26px;flex-wrap:wrap;align-items:flex-start}
+.unit{width:330px}
+.cap{font-size:12px;color:var(--text2);margin:11px 0 0;text-align:center;line-height:1.6}
+.cap b{color:var(--text);font-weight:600}
+
+/* ---------- 手机外壳 ---------- */
+.phone{width:330px;height:716px;border-radius:34px;background:#000;
+  border:1px solid #333743;position:relative;overflow:hidden;
+  box-shadow:0 18px 46px rgba(0,0,0,.5)}
+.phone.land{width:700px;height:320px;border-radius:22px}
+.screen{position:absolute;inset:0;overflow:hidden}
+.status{position:absolute;top:9px;left:16px;right:16px;display:flex;
+  justify-content:space-between;font-size:9.5px;color:rgba(255,255,255,.72);z-index:30;
+  pointer-events:none;letter-spacing:.3px}
+
+/* ---------- 通用顶栏 ---------- */
+.topbar{position:absolute;top:0;left:0;right:0;height:56px;z-index:20;
+  display:flex;align-items:center;gap:8px;padding:20px 12px 0;
+  background:var(--scrim)}
+.topbar .t-left,.topbar .t-right{display:flex;align-items:center;gap:2px}
+.topbar .t-mid{flex:1;min-width:0;text-align:center;line-height:1.25}
+.topbar .t1{font-size:12.5px;color:#fff;font-weight:600;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.topbar .t2{font-size:9.5px;color:rgba(255,255,255,.6);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.ic{width:32px;height:32px;display:grid;place-items:center;border-radius:50%;
+  color:#fff;cursor:pointer;flex:none}
+.ic:hover{background:rgba(255,255,255,.12)}
+.ic svg{width:19px;height:19px}
+.ic.on{color:var(--accent)}
+
+/* ---------- 视频 ---------- */
+.v-frame{position:absolute;top:0;left:0;right:0;height:186px;
+  background:radial-gradient(120% 130% at 30% 25%,#3A4A6B 0%,#1A2438 45%,#080B12 100%);
+  overflow:hidden}
+.v-frame::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(0,0,0,.45) 0%,transparent 26%,transparent 66%,rgba(0,0,0,.72) 100%)}
+.v-stars{position:absolute;inset:0;opacity:.55;
+  background-image:radial-gradient(1.4px 1.4px at 12% 22%,#fff,transparent),
+    radial-gradient(1.2px 1.2px at 28% 62%,#fff,transparent),
+    radial-gradient(1.6px 1.6px at 44% 18%,#fff,transparent),
+    radial-gradient(1.1px 1.1px at 62% 48%,#fff,transparent),
+    radial-gradient(1.5px 1.5px at 78% 28%,#fff,transparent),
+    radial-gradient(1.2px 1.2px at 88% 68%,#fff,transparent),
+    radial-gradient(1px 1px at 53% 78%,#fff,transparent)}
+.v-label{position:absolute;left:14px;bottom:52px;font-size:9px;letter-spacing:1.4px;
+  color:rgba(255,255,255,.4);z-index:3;text-transform:uppercase}
+.v-hit{position:absolute;inset:0;z-index:5;cursor:pointer}
+/* 单行控制条 */
+.v-controls{position:absolute;left:0;right:0;bottom:0;height:42px;z-index:12;
+  display:flex;align-items:center;gap:8px;padding:0 12px 6px;
+  opacity:0;transform:translateY(8px);transition:.22s ease;pointer-events:none}
+.controls-on .v-controls{opacity:1;transform:none;pointer-events:auto}
+.v-controls .tm{font-size:9.5px;color:rgba(255,255,255,.9);font-variant-numeric:tabular-nums;flex:none}
+.bar{height:3px;flex:1;border-radius:3px;background:rgba(255,255,255,.28);position:relative}
+.bar i{position:absolute;left:0;top:0;bottom:0;width:26%;border-radius:3px;background:var(--accent)}
+.bar em{position:absolute;left:26%;top:50%;width:8px;height:8px;border-radius:50%;
+  background:var(--accent);transform:translate(-50%,-50%)}
+.chip{font-size:9.5px;color:#fff;background:rgba(255,255,255,.16);
+  border-radius:8px;padding:3px 7px;flex:none;cursor:pointer;white-space:nowrap}
+.chip:hover{background:var(--accentDim);color:var(--accent)}
+/* 课程列表 */
+.course{position:absolute;left:0;right:0;top:186px;bottom:0;background:var(--bg);
+  padding:14px 14px 0;z-index:8}
+.course h4{font-size:12px;margin:0 0 10px;color:var(--text);font-weight:600}
+.crow{display:flex;gap:10px;align-items:center;padding:8px 8px;border-radius:10px;
+  margin-bottom:4px;background:var(--panel);border:1px solid transparent}
+.crow.on{background:var(--accentDim);border-color:rgba(191,198,255,.32)}
+.crow .th{width:56px;height:36px;border-radius:6px;flex:none;
+  background:linear-gradient(135deg,#3C4A6A,#1C2436);position:relative;overflow:hidden}
+.crow .th::after{content:"";position:absolute;inset:0;
+  background:radial-gradient(circle at 40% 40%,rgba(255,255,255,.25),transparent 60%)}
+.crow .tx{flex:1;min-width:0}
+.crow .n{font-size:10.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow.on .n{color:var(--accent)}
+.crow .m{font-size:9px;color:var(--text3);margin-top:3px;display:flex;gap:6px}
+.badge{font-size:8px;color:var(--accent);background:var(--accentDim);
+  border-radius:4px;padding:1px 4px}
+/* 菜单 */
+.menu{position:absolute;z-index:40;background:#22252F;border:1px solid #3A3E4C;
+  border-radius:12px;padding:6px;min-width:126px;display:none;
+  box-shadow:0 14px 36px rgba(0,0,0,.6)}
+.menu.show{display:block}
+.menu div{font-size:11px;color:var(--text2);padding:8px 11px;border-radius:7px;cursor:pointer;
+  display:flex;align-items:center;gap:9px}
+.menu div:hover{background:var(--accentDim);color:var(--accent)}
+.menu div.sel{color:var(--accent);background:var(--accentDim)}
+.menu svg{width:14px;height:14px}
+.more-menu{top:52px;right:12px}
+.speed-menu{bottom:46px;right:52px;min-width:96px}
+/* 音频态 */
+.audio-mode{position:absolute;inset:0 0 106px;z-index:14;display:none;
+  flex-direction:column;align-items:center;justify-content:center;gap:10px;
+  background:#0B0D12}
+.audio-mode.on{display:flex}
+.audio-mode .disc{width:104px;height:104px;border-radius:50%;
+  background:radial-gradient(circle,rgba(191,198,255,.28),rgba(191,198,255,.06) 70%);
+  border:1px solid rgba(191,198,255,.35);display:grid;place-items:center}
+.audio-mode .t1{font-size:12.5px;color:var(--text)}
+.audio-mode .t2{font-size:10px;color:var(--text3)}
+
+/* ---------- 横屏 ---------- */
+.l-frame{position:absolute;inset:0;
+  background:radial-gradient(100% 130% at 35% 30%,#3A4A6B 0%,#1A2438 48%,#070A11 100%)}
+.l-frame::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(0,0,0,.5),transparent 24%,transparent 62%,rgba(0,0,0,.78))}
+.l-topbar{background:var(--scrim);height:48px;padding-top:12px}
+.l-controls{bottom:0;height:46px;padding:0 18px 8px}
+.l-controls .tm{font-size:10.5px}
+.land .ic svg{width:21px;height:21px}
+.l-side{position:absolute;left:16px;top:50%;transform:translateY(-50%);z-index:12;
+  width:34px;height:34px;border-radius:50%;background:rgba(0,0,0,.42);
+  display:grid;place-items:center;color:#fff;opacity:0;transition:.22s}
+.controls-on .l-side{opacity:1}
+
+/* ---------- 音频 ---------- */
+.a-screen{position:absolute;inset:0;background:
+  radial-gradient(90% 55% at 50% 26%,rgba(59,76,203,.16),transparent 70%),var(--bg)}
+.a-body{position:absolute;left:0;right:0;top:56px;bottom:178px;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 22px}
+.a-cover{width:196px;height:196px;border-radius:50%;flex:none;
+  background:radial-gradient(circle at 38% 32%,#2E3860,#151A2A 72%);
+  border:1px solid rgba(191,198,255,.22);display:grid;place-items:center;
+  box-shadow:0 20px 50px rgba(0,0,0,.45)}
+.a-cover svg{width:58px;height:58px;color:var(--accent);opacity:.85}
+.a-title{font-size:15px;font-weight:600;margin-top:22px;text-align:center;
+  max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.a-actions{position:absolute;left:0;right:0;bottom:118px;height:60px;
+  display:flex;align-items:center;padding:0 6px}
+.act{flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;
+  color:var(--text3);cursor:pointer;border-radius:10px;padding:5px 0}
+.act:hover{color:var(--text2);background:rgba(255,255,255,.04)}
+.act svg{width:20px;height:20px}
+.act .lb{font-size:9.5px;white-space:nowrap}
+.act.on{color:var(--accent)}
+.act.star.on{color:var(--star)}
+.a-progress{position:absolute;left:0;right:0;bottom:76px;height:26px;
+  display:flex;align-items:center;gap:9px;padding:0 16px}
+.a-progress .tm{font-size:9.5px;color:var(--text3);font-variant-numeric:tabular-nums}
+.a-progress .bar{background:rgba(255,255,255,.16)}
+.a-transport{position:absolute;left:0;right:0;bottom:0;height:76px;
+  display:flex;align-items:center;justify-content:center;gap:24px}
+.a-transport .side{width:34px;height:34px;display:grid;place-items:center;
+  color:var(--text2);cursor:pointer}
+.a-transport .side svg{width:22px;height:22px}
+.a-transport .play{width:60px;height:60px;border-radius:50%;
+  background:var(--accent);color:#14161F;display:grid;place-items:center;cursor:pointer;
+  box-shadow:0 8px 24px rgba(191,198,255,.24)}
+.a-transport .play svg{width:26px;height:26px}
+/* 抽屉 */
+.sheet-mask{position:absolute;inset:0;background:rgba(0,0,0,.55);z-index:44;display:none}
+.sheet-mask.show{display:block}
+.sheet{position:absolute;left:0;right:0;bottom:0;height:320px;z-index:45;
+  background:var(--panel2);border-radius:18px 18px 0 0;
+  border-top:1px solid var(--line);transform:translateY(100%);transition:.28s ease;
+  padding:10px 14px 14px}
+.sheet.show{transform:none}
+.sheet .handle{width:34px;height:4px;border-radius:3px;background:#4A4E5C;margin:0 auto 12px}
+.sheet h4{font-size:12px;margin:0 0 12px;color:var(--text)}
+
+/* ---------- 图片 ---------- */
+.i-frame{position:absolute;inset:0;background:#08090D}
+.i-pic{position:absolute;left:0;right:0;top:150px;height:330px;
+  background:linear-gradient(160deg,#5A6E8C 0%,#8B9AA8 38%,#C8B9A2 70%,#6E7A72 100%);
+  box-shadow:inset 0 0 60px rgba(0,0,0,.2)}
+.i-pic::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(180deg,rgba(0,0,0,.15),transparent 30%,rgba(0,0,0,.28))}
+.i-size{position:absolute;left:50%;transform:translateX(-50%);bottom:92px;
+  font-size:9.5px;color:rgba(255,255,255,.86);background:rgba(0,0,0,.48);
+  border:1px solid rgba(255,255,255,.16);border-radius:20px;padding:5px 12px;z-index:12}
+.i-actions{position:absolute;left:0;right:0;bottom:0;height:76px;z-index:12;
+  display:flex;align-items:center;padding:0 4px 8px;
+  background:linear-gradient(180deg,transparent,rgba(0,0,0,.72) 42%)}
+.i-actions .act{color:var(--text2)}
+.i-actions .act:hover{color:#fff}
+.i-actions .act.on{color:var(--accent)}
+
+/* ---------- 说明 ---------- */
+.rules{margin-top:52px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.rule{background:var(--panel);border:1px solid var(--line);border-radius:13px;padding:17px}
+.rule .n{font-size:10px;color:var(--accent);letter-spacing:1.2px;font-weight:700}
+.rule h3{font-size:13.5px;margin:7px 0 8px;font-weight:650}
+.rule p{font-size:11.5px;color:var(--text2);margin:0;line-height:1.65}
+table{width:100%;border-collapse:collapse;margin-top:18px;font-size:12.5px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+th,td{padding:9px 13px;text-align:left;border-bottom:1px solid var(--line)}
+th{background:var(--panel2);font-size:11px;color:var(--text2);font-weight:600}
+td:first-child{color:var(--text3);width:22%}
+tr:last-child td{border-bottom:none}
+.no{color:#FF8A8A}.yes{color:#7FD8A4}
+.foot{margin-top:34px;padding-top:18px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--text3);line-height:1.7}
+@media(max-width:760px){.rules{grid-template-columns:1fr}.row{gap:18px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>媒体页改造原型 · 我们准备改成什么样子</h1>
+<p class="lead">按《媒体页改造方案-基于实际能力》绘制：只保留我们真有的功能，<b>不出现 AI 总结 / 文稿 / 字幕 / 投屏 / 清晰度切换</b>。
+三页只取夸克三条布局原则——一屏一个主体、控制尽量一行且沉底、顶栏轻并把低频动作收进 <b>···</b>。</p>
+<p class="tip">可交互：<kbd>点视频画面</kbd> 切换控制层　<kbd>点 1.0x</kbd> 倍速档位　<kbd>点 ···</kbd> 动作菜单　<kbd>点转音频</kbd> 音频态　<kbd>点音频 ☰列表</kbd> 抽屉　<kbd>点收藏</kbd> 高亮　<kbd>点图片翻页</kbd> 换索引</p>
+
+<h2 class="sec">一、视频 · 竖屏</h2>
+<p class="sub">控制层默认隐藏；单击唤出单行控制条，3 秒收起。课程列表仍在下方，但收起时上移填补（已实现）。</p>
+<div class="row">
+
+  <div class="unit">
+    <div class="phone"><div class="screen" id="v1">
+      <div class="status"><span>10:41</span><span>●●● ▮</span></div>
+      <div class="v-frame">
+        <div class="v-stars"></div>
+        <div class="v-label">16 : 9 · 零 chrome</div>
+        <div class="v-hit" data-vtoggle="v1"></div>
+      </div>
+      <div class="topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></div></div>
+        <div class="t-mid"><div class="t1">宇宙空间360度VR全景视频.mp4</div><div class="t2">我的网盘 / 中小学视频 · 3 / 31</div></div>
+        <div class="t-right">
+          <div class="ic" data-menu="more1"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div>
+        </div>
+      </div>
+      <div class="v-controls">
+        <div class="ic" style="width:26px;height:26px"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></div>
+        <span class="tm">00:21</span>
+        <div class="bar"><i></i><em></em></div>
+        <span class="tm">44:06</span>
+        <span class="chip" data-menu="speed1">1.0x</span>
+        <div class="ic" style="width:26px;height:26px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4"/></svg></div>
+      </div>
+      <div class="course">
+        <h4>选集 · 31 节</h4>
+        <div class="crow on"><div class="th"></div><div class="tx"><div class="n">03. 太阳系与行星运动</div><div class="m"><span class="badge">已观看 21%</span><span>43:22</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">04. 恒星的一生</div><div class="m"><span>未观看</span><span>38:10</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">05. 星系与宇宙尺度</div><div class="m"><span>未观看</span><span>51:04</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">06. 引力与时空</div><div class="m"><span>未观看</span><span>40:36</span></div></div></div>
+      </div>
+      <div class="audio-mode" id="am1">
+        <div class="disc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 13.5v-1.5a8 8 0 0 1 16 0v1.5"/><rect x="2.6" y="12.6" width="4.2" height="6.6" rx="1.9"/><rect x="17.2" y="12.6" width="4.2" height="6.6" rx="1.9"/></svg></div>
+        <div class="t1">正在以音频模式播放</div><div class="t2">画面已收起 · 可锁屏或切到后台继续听</div>
+      </div>
+      <div class="menu more-menu" id="more1">
+        <div data-menu-close>选集（31 节）</div>
+        <div data-fav>收藏</div>
+        <div data-menu-close>睡眠定时</div>
+        <div data-audio="v1">转音频</div>
+        <div data-menu-close>文件信息</div>
+      </div>
+      <div class="menu speed-menu" id="speed1">
+        <div>0.75x</div><div>1.0x</div><div class="sel">1.25x</div><div>1.5x</div><div>2.0x</div><div>3.0x</div>
+      </div>
+    </div></div>
+    <p class="cap"><b>默认态</b>画面零控件，顶栏只留返回 + 两行标题 + ···</p>
+  </div>
+
+  <div class="unit">
+    <div class="phone"><div class="screen controls-on" id="v2">
+      <div class="status"><span>10:41</span><span>●●● ▮</span></div>
+      <div class="v-frame">
+        <div class="v-stars"></div>
+        <div class="v-label">16 : 9 · 单击唤出</div>
+        <div class="v-hit" data-vtoggle="v2"></div>
+      </div>
+      <div class="topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></div></div>
+        <div class="t-mid"><div class="t1">宇宙空间360度VR全景视频.mp4</div><div class="t2">我的网盘 / 中小学视频 · 3 / 31</div></div>
+        <div class="t-right"><div class="ic" data-menu="more2"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div></div>
+      </div>
+      <div class="v-controls">
+        <div class="ic" style="width:26px;height:26px"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg></div>
+        <span class="tm">00:21</span>
+        <div class="bar"><i></i><em></em></div>
+        <span class="tm">44:06</span>
+        <span class="chip" data-menu="speed2">1.0x</span>
+        <div class="ic" style="width:26px;height:26px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4"/></svg></div>
+      </div>
+      <div class="course">
+        <h4>选集 · 31 节</h4>
+        <div class="crow on"><div class="th"></div><div class="tx"><div class="n">03. 太阳系与行星运动</div><div class="m"><span class="badge">已观看 21%</span><span>43:22</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">04. 恒星的一生</div><div class="m"><span>未观看</span><span>38:10</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">05. 星系与宇宙尺度</div><div class="m"><span>未观看</span><span>51:04</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">06. 引力与时空</div><div class="m"><span>未观看</span><span>40:36</span></div></div></div>
+      </div>
+      <div class="audio-mode" id="am2">
+        <div class="disc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 13.5v-1.5a8 8 0 0 1 16 0v1.5"/><rect x="2.6" y="12.6" width="4.2" height="6.6" rx="1.9"/><rect x="17.2" y="12.6" width="4.2" height="6.6" rx="1.9"/></svg></div>
+        <div class="t1">正在以音频模式播放</div><div class="t2">画面已收起 · 可锁屏或切到后台继续听</div>
+      </div>
+      <div class="menu more-menu" id="more2">
+        <div data-menu-close>选集（31 节）</div>
+        <div data-fav>收藏</div>
+        <div data-menu-close>睡眠定时</div>
+        <div data-audio="v2">转音频</div>
+        <div data-menu-close>文件信息</div>
+      </div>
+      <div class="menu speed-menu" id="speed2">
+        <div>0.75x</div><div class="sel">1.0x</div><div>1.25x</div><div>1.5x</div><div>2.0x</div><div>3.0x</div>
+      </div>
+    </div></div>
+    <p class="cap"><b>控制层显示</b>只有一行：播放 · 时间 · 轨道 · 时长 · 倍速 · 全屏</p>
+  </div>
+
+  <div class="unit">
+    <div class="phone"><div class="screen" id="v3">
+      <div class="status"><span>10:41</span><span>●●● ▮</span></div>
+      <div class="v-frame"><div class="v-stars"></div></div>
+      <div class="topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></div></div>
+        <div class="t-mid"><div class="t1">宇宙空间360度VR全景视频.mp4</div><div class="t2">我的网盘 / 中小学视频 · 3 / 31</div></div>
+        <div class="t-right"><div class="ic on" data-menu="more3"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div></div>
+      </div>
+      <div class="course">
+        <h4>选集 · 31 节</h4>
+        <div class="crow on"><div class="th"></div><div class="tx"><div class="n">03. 太阳系与行星运动</div><div class="m"><span class="badge">已观看 21%</span><span>43:22</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">04. 恒星的一生</div><div class="m"><span>未观看</span><span>38:10</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">05. 星系与宇宙尺度</div><div class="m"><span>未观看</span><span>51:04</span></div></div></div>
+      </div>
+      <div class="audio-mode" id="am3">
+        <div class="disc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M4 13.5v-1.5a8 8 0 0 1 16 0v1.5"/><rect x="2.6" y="12.6" width="4.2" height="6.6" rx="1.9"/><rect x="17.2" y="12.6" width="4.2" height="6.6" rx="1.9"/></svg></div>
+        <div class="t1">正在以音频模式播放</div><div class="t2">画面已收起 · 可锁屏或切到后台继续听</div>
+      </div>
+      <div class="menu more-menu show" id="more3">
+        <div data-menu-close>选集（31 节）</div>
+        <div data-fav>收藏</div>
+        <div data-menu-close>睡眠定时</div>
+        <div data-audio="v3">转音频</div>
+        <div data-menu-close>文件信息</div>
+      </div>
+    </div></div>
+    <p class="cap"><b>··· 弹层</b>只放我们真有的：选集 / 收藏 / 定时 / 转音频 / 文件信息</p>
+  </div>
+</div>
+
+<h2 class="sec">二、视频 · 横屏</h2>
+<p class="sub">四槽全部叠加在画面上，控制条仍是同一行；横屏不设「转音频」（语义与看满屏互斥）。</p>
+<div class="row">
+  <div class="unit" style="width:700px">
+    <div class="phone land"><div class="screen controls-on" id="l1">
+      <div class="l-frame"><div class="v-stars"></div><div class="v-hit" data-vtoggle="l1" style="z-index:5"></div></div>
+      <div class="topbar l-topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></div></div>
+        <div class="t-mid" style="text-align:left;padding-left:6px"><div class="t1">宇宙空间360度VR全景视频.mp4</div></div>
+        <div class="t-right"><div class="ic" data-menu="lmore"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div></div>
+      </div>
+      <div class="l-side"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div>
+      <div class="v-controls l-controls">
+        <div class="ic" style="width:28px;height:28px"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg></div>
+        <span class="tm">00:21</span>
+        <div class="bar"><i></i><em></em></div>
+        <span class="tm">44:06</span>
+        <span class="chip" data-menu="lspeed">1.0x</span>
+        <span class="chip">选集</span>
+        <div class="ic" style="width:28px;height:28px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 3H4v4M16 3h4v4M8 21H4v-4M16 21h4v-4"/></svg></div>
+      </div>
+      <div class="menu more-menu" style="top:48px" id="lmore">
+        <div data-menu-close>收藏</div><div data-menu-close>睡眠定时</div><div data-menu-close>文件信息</div>
+      </div>
+      <div class="menu speed-menu" style="bottom:50px" id="lspeed">
+        <div>0.75x</div><div class="sel">1.0x</div><div>1.25x</div><div>1.5x</div><div>2.0x</div><div>3.0x</div>
+      </div>
+    </div></div>
+    <p class="cap"><b>控制层显示</b>画面 100% 铺满；锁屏键在左侧；无转音频、无清晰度、无投屏</p>
+  </div>
+</div>
+
+<h2 class="sec">三、音频 · 纯播放页</h2>
+<p class="sub">去掉常驻课程列表和来源/状态两行，中间大留白；列表用 Material BottomSheet 上滑（项目已具备 Material3 主题与依赖）。</p>
+<div class="row">
+  <div class="unit">
+    <div class="phone"><div class="screen a-screen" id="a1">
+      <div class="status"><span>10:41</span><span>●●● ▮</span></div>
+      <div class="topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div></div>
+        <div class="t-mid"></div>
+        <div class="t-right"><div class="ic" data-menu="amore"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div></div>
+      </div>
+      <div class="a-body">
+        <div class="a-cover"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg></div>
+        <div class="a-title">01. 志愿者的人.m4a</div>
+      </div>
+      <div class="a-actions">
+        <div class="act" data-menu="aspeed"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l4.5-3.5"/></svg><span class="lb">1.0x</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg><span class="lb">定时</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L4 12l7 7M20 5l-7 7 7 7"/></svg><span class="lb">−30</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 5l7 7-7 7M4 5l7 7-7 7"/></svg><span class="lb">+30</span></div>
+        <div class="act star" data-fav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-2.9-5.5 2.9 1-6.2L3 9.6l6.2-.9z"/></svg><span class="lb">收藏</span></div>
+        <div class="act" data-menu="amore2"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg><span class="lb">更多</span></div>
+      </div>
+      <div class="a-progress"><span class="tm">00:28</span><div class="bar"><i style="width:15%"></i><em style="left:15%"></em></div><span class="tm">03:13</span></div>
+      <div class="a-transport">
+        <div class="side"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zm10 0l9 7-9 7z" transform="translate(-2 0) scale(.92)"/></svg></div>
+        <div class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg></div>
+        <div class="side"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM6 5l9 7-9 7z"/></svg></div>
+        <div class="side" data-sheet="s1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></div>
+      </div>
+      <div class="menu more-menu" id="amore">
+        <div data-menu-close>文件信息</div><div data-menu-close>停止播放</div><div data-menu-close>下载（待接入）</div>
+      </div>
+      <div class="menu more-menu" style="top:auto;bottom:186px;right:12px" id="amore2">
+        <div data-menu-close>文件信息</div><div data-menu-close>停止播放</div><div data-menu-close>下载（待接入）</div>
+      </div>
+      <div class="menu speed-menu" style="bottom:186px;right:60px" id="aspeed">
+        <div>0.75x</div><div class="sel">1.0x</div><div>1.25x</div><div>1.5x</div><div>2.0x</div><div>3.0x</div>
+      </div>
+      <div class="sheet-mask" data-sheet-close="s1"></div>
+      <div class="sheet" id="s1">
+        <div class="handle"></div>
+        <h4>播放列表 · 199 节</h4>
+        <div class="crow on"><div class="th"></div><div class="tx"><div class="n">01. 志愿者的人.m4a</div><div class="m"><span class="badge">正在播放</span><span>03:13</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">02. 关于时间的对话.m4a</div><div class="m"><span>未观看</span><span>04:02</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">03. 城市与记忆.m4a</div><div class="m"><span>未观看</span><span>05:17</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">04. 山河故人.m4a</div><div class="m"><span>未观看</span><span>03:48</span></div></div></div>
+      </div>
+    </div></div>
+    <p class="cap"><b>播放态</b>圆形封面 + 一行标题 + 留白；动作栏在进度条上方</p>
+  </div>
+
+  <div class="unit">
+    <div class="phone"><div class="screen a-screen" id="a2">
+      <div class="status"><span>10:41</span><span>●●● ▮</span></div>
+      <div class="topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div></div>
+        <div class="t-mid"></div>
+        <div class="t-right"><div class="ic"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div></div>
+      </div>
+      <div class="a-body">
+        <div class="a-cover" style="width:150px;height:150px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/></svg></div>
+        <div class="a-title" style="font-size:13px">01. 志愿者的人.m4a</div>
+      </div>
+      <div class="a-actions">
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M12 20a8 8 0 1 1 8-8"/><path d="M12 12l4.5-3.5"/></svg><span class="lb">1.0x</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2M9 2h6"/></svg><span class="lb">定时</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L4 12l7 7M20 5l-7 7 7 7"/></svg><span class="lb">−30</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 5l7 7-7 7M4 5l7 7-7 7"/></svg><span class="lb">+30</span></div>
+        <div class="act star"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-2.9-5.5 2.9 1-6.2L3 9.6l6.2-.9z"/></svg><span class="lb">收藏</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg><span class="lb">更多</span></div>
+      </div>
+      <div class="a-progress"><span class="tm">00:28</span><div class="bar"><i style="width:15%"></i><em style="left:15%"></em></div><span class="tm">03:13</span></div>
+      <div class="a-transport">
+        <div class="side"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zm10 0l9 7-9 7z" transform="translate(-2 0) scale(.92)"/></svg></div>
+        <div class="play"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg></div>
+        <div class="side"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM6 5l9 7-9 7z"/></svg></div>
+        <div class="side" data-sheet="s2"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg></div>
+      </div>
+      <div class="sheet-mask show" data-sheet-close="s2"></div>
+      <div class="sheet show" id="s2">
+        <div class="handle"></div>
+        <h4>播放列表 · 199 节</h4>
+        <div class="crow on"><div class="th"></div><div class="tx"><div class="n">01. 志愿者的人.m4a</div><div class="m"><span class="badge">正在播放</span><span>03:13</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">02. 关于时间的对话.m4a</div><div class="m"><span>未观看</span><span>04:02</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">03. 城市与记忆.m4a</div><div class="m"><span>未观看</span><span>05:17</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">04. 山河故人.m4a</div><div class="m"><span>未观看</span><span>03:48</span></div></div></div>
+        <div class="crow"><div class="th"></div><div class="tx"><div class="n">05. 山的那一边.m4a</div><div class="m"><span>未观看</span><span>04:31</span></div></div></div>
+      </div>
+    </div></div>
+    <p class="cap"><b>列表抽屉</b>点底部 ☰ 上滑；主布局完全不变，不产生空白</p>
+  </div>
+</div>
+
+<h2 class="sec">四、图片浏览</h2>
+<p class="sub">顶栏两行标题 + 尺寸胶囊 + 6 格动作栏。分享复用现有 FileProvider，保存只需补 MediaStore 写入。</p>
+<div class="row">
+  <div class="unit">
+    <div class="phone"><div class="screen i-frame" id="i1">
+      <div class="status"><span>10:41</span><span>●●● ▮</span></div>
+      <div class="i-pic"></div>
+      <div class="topbar">
+        <div class="t-left"><div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></div></div>
+        <div class="t-mid"><div class="t1">IMG_20261108_114832.jpg</div><div class="t2" id="iDate">2026.11.08 11:48 · 3 / 9</div></div>
+        <div class="t-right"><div class="ic"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg></div></div>
+      </div>
+      <div class="i-size">原图 941KB · 4032 × 3024</div>
+      <div class="i-actions">
+        <div class="act" data-page="-1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg><span class="lb">上一张</span></div>
+        <div class="act" data-page="1"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg><span class="lb">下一张</span></div>
+        <div class="act star" data-fav><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2-5.5-2.9-5.5 2.9 1-6.2L3 9.6l6.2-.9z"/></svg><span class="lb">收藏</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/></svg><span class="lb">分享</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg><span class="lb">保存</span></div>
+        <div class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 3v3M16 3v3"/></svg><span class="lb">更多</span></div>
+      </div>
+    </div></div>
+    <p class="cap"><b>图片浏览</b>单击可收起顶栏与动作栏；没有修图 / AI / 地点</p>
+  </div>
+</div>
+
+<h2 class="sec">五、这套原型遵循的规则</h2>
+<div class="rules">
+  <div class="rule"><div class="n">P1</div><h3>一屏一个主体</h3><p>视频是画面、音频是圆形封面、图片是原图。课程列表、来源/状态、多余文字全部收走。</p></div>
+  <div class="rule"><div class="n">P2</div><h3>控制一行、沉到底部</h3><p>视频三行控制层压成一行；音频动作栏 + 进度 + 传输组集中在底部一坨，中间大留白。</p></div>
+  <div class="rule"><div class="n">P3</div><h3>顶栏轻、动作收进 ···</h3><p>透明 scrim + 两行标题；选集/收藏/定时/转音频/文件信息进弹层，低频动作不常驻。</p></div>
+</div>
+<table>
+  <tr><th>夸克有，我们</th><th>判定</th><th>原因</th></tr>
+  <tr><td>AI 总结 / 文稿 / 转文字</td><td class="no">不做</td><td>无能力、无接口，全库无相关代码</td></tr>
+  <tr><td>字幕 / 投屏 TV</td><td class="no">不做</td><td>无字幕数据、无 Cast 依赖</td></tr>
+  <tr><td>1080p / 超清切换</td><td class="no">不做</td><td>服务端只给单档 M3U8_AUTO_480</td></tr>
+  <tr><td>修图 / 拍摄地点</td><td class="no">不做</td><td>无图像编辑、无 EXIF 地点</td></tr>
+  <tr><td>视频 Tab / 文件详情页</td><td class="no">不做</td><td>我们是 Dialog/覆盖式 View，无页面栈与底部导航</td></tr>
+  <tr><td>转音频</td><td class="yes">保留</td><td>我们独有（夸克没有），只收进竖屏 ···</td></tr>
+  <tr><td>选集缩略图 / 已观看%</td><td class="yes">可做</td><td>复用首页 loadRecentThumbnail + 本地进度</td></tr>
+</table>
+
+<p class="foot">原型为交互示意，尺寸按真机 1224×2700 等比缩放。对应方案文档：<b>docs/媒体页改造方案-基于实际能力.md</b>；竞品实拍对照：<b>docs/夸克真机对比诊断.html</b>。本页不改动任何业务代码。</p>
+</div>
+
+<script>
+(function(){
+  function closeMenus(){ document.querySelectorAll('.menu.show').forEach(function(m){m.classList.remove('show')}) }
+  document.addEventListener('click', function(e){
+    var t = e.target.closest('[data-menu],[data-vtoggle],[data-fav],[data-audio],[data-sheet],[data-sheet-close],[data-page],[data-menu-close]');
+    if(!t){ closeMenus(); return }
+
+    if(t.hasAttribute('data-vtoggle')){
+      closeMenus();
+      document.getElementById(t.getAttribute('data-vtoggle')).classList.toggle('controls-on');
+      return;
+    }
+    if(t.hasAttribute('data-menu')){
+      e.stopPropagation();
+      var id=t.getAttribute('data-menu'), m=document.getElementById(id);
+      var was=m.classList.contains('show'); closeMenus();
+      if(!was) m.classList.add('show');
+      return;
+    }
+    if(t.hasAttribute('data-menu-close')){ closeMenus(); return }
+    if(t.hasAttribute('data-fav')){
+      e.stopPropagation(); t.classList.toggle('on');
+      var lb=t.querySelector('.lb'); if(lb) lb.textContent=t.classList.contains('on')?'已收藏':'收藏';
+      t.querySelector('svg').setAttribute('fill',t.classList.contains('on')?'currentColor':'none');
+      closeMenus(); return;
+    }
+    if(t.hasAttribute('data-audio')){
+      e.stopPropagation();
+      var stage=document.getElementById('am'+t.getAttribute('data-audio').replace('v',''));
+      if(stage){ stage.classList.toggle('on'); t.textContent=stage.classList.contains('on')?'恢复画面':'转音频' }
+      closeMenus(); return;
+    }
+    if(t.hasAttribute('data-sheet')){
+      e.stopPropagation();
+      var s=document.getElementById(t.getAttribute('data-sheet'));
+      var mask=s.previousElementSibling;
+      s.classList.add('show'); mask.classList.add('show'); return;
+    }
+    if(t.hasAttribute('data-sheet-close')){
+      var s2=document.getElementById(t.getAttribute('data-sheet-close'));
+      s2.classList.remove('show');
+      var m2=s2.previousElementSibling; if(m2) m2.classList.remove('show');
+      return;
+    }
+    if(t.hasAttribute('data-page')){
+      e.stopPropagation();
+      var d=+t.getAttribute('data-page');
+      var el=document.getElementById('iDate');
+      var n=(parseInt((el.textContent.match(/(\d+) \/ 9/)||[0,'3'])[1],10)+d+9)%10;
+      n=n<1?1:n;
+      el.textContent='2026.11.08 11:48 · '+n+' / 9';
+      return;
+    }
+  });
+  // 倍速菜单选项：只切高亮，不真的改播放速度（原型示意）
+  document.querySelectorAll('.speed-menu div').forEach(function(d){
+    d.addEventListener('click',function(e){
+      e.stopPropagation();
+      d.parentNode.querySelectorAll('div').forEach(function(x){x.classList.remove('sel')});
+      d.classList.add('sel');
+      d.parentNode.classList.remove('show');
+    });
+  });
+})();
+</script>
+</body>
+</html>
