@@ -90,8 +90,9 @@ internal class VideoPlaybackPage(
         .apply { setPlaybackParameters(PlaybackParameters(PlaybackSpeed.video(activity))) }
     private val video = (activity.layoutInflater.inflate(R.layout.view_video_player, null) as PlayerView).apply {
         this.player = this@VideoPlaybackPage.player
-        controllerShowTimeoutMs = 0
-        controllerHideOnTouch = false
+        // 控制层默认不常驻：单击画面显示、3 秒无操作自动收起（竖屏与横屏一致）
+        controllerShowTimeoutMs = 3_000
+        controllerHideOnTouch = true
     }
     private val progress = activity.getSharedPreferences("video_progress", Activity.MODE_PRIVATE)
     private val progressKey = AccountScope.key(
@@ -105,6 +106,13 @@ internal class VideoPlaybackPage(
     private var backgroundSession = false
     private var audioControllerFuture: ListenableFuture<MediaController>? = null
     private lateinit var updateFullscreen: (Boolean) -> Unit
+
+    private val actionLabelColor = Color.parseColor("#8E909C")
+    private val actionActiveColor = Color.parseColor("#BFC6FF")
+    private val starColor = Color.rgb(255, 200, 87)
+
+    /** D 槽的一格：图标 24 + 标签 10sp，整格可点 */
+    private class ActionCell(val root: LinearLayout, val icon: ImageView, val label: TextView)
 
     private fun handleBack() {
         if (immersive) updateFullscreen(false) else close()
@@ -162,43 +170,103 @@ internal class VideoPlaybackPage(
             ellipsize = android.text.TextUtils.TruncateAt.END
             setPadding(dp(6), 0, dp(6), 0)
         }
-        val audioStateIcon = ImageView(activity).apply {
-            setImageResource(R.drawable.ic_headset)
-            setColorFilter(Color.WHITE)
-            alpha = 0.75f
-            scaleType = ImageView.ScaleType.CENTER_INSIDE
-            setPadding(dp(10), dp(10), dp(10), dp(10))
+        // 转音频后的画面区：大圆形耳机 + 两行文案，替代原来的小图标提示
+        val audioStage = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
             visibility = if (listening) View.VISIBLE else View.GONE
+            addView(
+                FrameLayout(activity).apply {
+                    setBackgroundResource(R.drawable.bg_audio_stage)
+                    addView(
+                        ImageView(activity).apply {
+                            setImageResource(R.drawable.ic_headset)
+                            setColorFilter(Color.WHITE)
+                            scaleType = ImageView.ScaleType.CENTER_INSIDE
+                            setPadding(dp(32), dp(32), dp(32), dp(32))
+                        },
+                        FrameLayout.LayoutParams(-1, -1),
+                    )
+                },
+                LinearLayout.LayoutParams(dp(104), dp(104)),
+            )
+            addView(
+                TextView(activity).apply {
+                    text = "正在以音频模式播放"
+                    textSize = 13f
+                    setTextColor(0xFFC5C5D0.toInt())
+                    gravity = Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(12) },
+            )
+            addView(
+                TextView(activity).apply {
+                    text = "画面已收起 · 可锁屏或切到后台继续听"
+                    textSize = 10.5f
+                    setTextColor(0xFF8E909C.toInt())
+                    gravity = Gravity.CENTER
+                },
+                LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(8) },
+            )
         }
-        val audioOnly = iconButton(R.drawable.ic_headset, if (listening) "恢复画面" else "只听声音", padding = 10) {}.apply {
-            isEnabled = false
-            alpha = 0.35f
+        fun actionCell(iconRes: Int, caption: String, description: String, action: () -> Unit): ActionCell {
+            val icon = ImageView(activity).apply {
+                setImageResource(iconRes)
+                setColorFilter(Color.WHITE)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+            }
+            val label = TextView(activity).apply {
+                text = caption
+                textSize = 10f
+                setTextColor(actionLabelColor)
+                gravity = Gravity.CENTER
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            val root = LinearLayout(activity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundResource(R.drawable.bg_video_icon_ripple)
+                isClickable = true
+                contentDescription = description
+                addView(icon, LinearLayout.LayoutParams(dp(24), dp(24)))
+                addView(label, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
+                setOnClickListener { action() }
+            }
+            return ActionCell(root, icon, label)
+        }
+        val audioOnly = actionCell(R.drawable.ic_headset, "转音频", "转音频播放") {}
+        fun paintListening() {
+            audioOnly.label.text = if (listening) "音频中" else "转音频"
+            audioOnly.icon.setColorFilter(if (listening) actionActiveColor else Color.WHITE)
+            audioOnly.label.setTextColor(if (listening) actionActiveColor else actionLabelColor)
+            audioOnly.root.contentDescription =
+                if (listening) "退出音频模式，恢复画面" else "转音频播放"
         }
         fun setListening(enabled: Boolean) {
             listening = enabled
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, listening).build()
-            audioOnly.contentDescription = if (listening) "恢复画面" else "只听声音"
-            audioOnly.setBackgroundResource(if (listening) R.drawable.bg_play_accent else R.drawable.bg_video_icon_ripple)
-            audioOnly.setColorFilter(if (listening) ContextCompat.getColor(activity, R.color.onAccent) else Color.WHITE)
-            audioStateIcon.visibility = if (listening) View.VISIBLE else View.GONE
-            message.text = if (listening) "正在听声音" else "正在恢复画面…"
-            message.visibility = View.VISIBLE
+            audioStage.visibility = if (listening) View.VISIBLE else View.GONE
+            paintListening()
+            message.text = if (listening) "" else "正在恢复画面…"
+            message.visibility = if (listening) View.GONE else View.VISIBLE
             if (enabled) ensureAudioSession() else stopAudioSession()
         }
-        audioOnly.setOnClickListener { setListening(!listening) }
+        audioOnly.root.setOnClickListener { setListening(!listening) }
+        audioOnly.root.isEnabled = false
+        audioOnly.root.alpha = 0.35f
+        paintListening()
         if (listening) setListening(true)
-        val favorite = iconButton(
-            if (isFavorite) R.drawable.ic_star_filled else R.drawable.ic_star,
-            if (isFavorite) "取消收藏" else "收藏",
-            padding = 14,
-        ) {}
+        val favorite = actionCell(R.drawable.ic_star, "收藏", "收藏") {}
         fun paintFavorite(starred: Boolean) {
-            favorite.setImageResource(if (starred) R.drawable.ic_star_filled else R.drawable.ic_star)
-            favorite.setColorFilter(if (starred) Color.rgb(255, 200, 87) else Color.WHITE)
-            favorite.contentDescription = if (starred) "取消收藏" else "收藏"
+            favorite.icon.setImageResource(if (starred) R.drawable.ic_star_filled else R.drawable.ic_star)
+            favorite.icon.setColorFilter(if (starred) starColor else Color.WHITE)
+            favorite.label.setTextColor(if (starred) starColor else actionLabelColor)
+            favorite.label.text = if (starred) "已收藏" else "收藏"
+            favorite.root.contentDescription = if (starred) "取消收藏" else "收藏"
         }
-        favorite.setOnClickListener { paintFavorite(onFavorite()) }
+        favorite.root.setOnClickListener { paintFavorite(onFavorite()) }
         paintFavorite(isFavorite)
         val previous = iconButton(R.drawable.ic_skip_prev, "上一节", padding = 14) {
             onSwitch(-1, snapshot())
@@ -209,15 +277,15 @@ internal class VideoPlaybackPage(
         fun shouldRotateForFullscreen() = !activity.isInMultiWindowMode && !activity.hasWideWindow &&
             activity.resources.configuration.smallestScreenWidthDp < WIDE_WINDOW_DP
         val fullscreen = iconButton(R.drawable.ic_fullscreen, "全屏") { updateFullscreen(!immersive) }
-        val speed = button("") {}
+        val speed = actionCell(R.drawable.ic_speed, "1.0x", "播放倍速") {}
         fun paintSpeed() {
             val value = player.playbackParameters.speed
-            speed.text = PlaybackSpeed.label(value)
-            speed.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(value)}"
+            speed.label.text = PlaybackSpeed.label(value)
+            speed.root.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(value)}"
         }
         paintSpeed()
-        speed.setOnClickListener {
-            val menu = PopupMenu(dialog.context, speed, Gravity.END)
+        speed.root.setOnClickListener {
+            val menu = PopupMenu(dialog.context, speed.root, Gravity.END)
             PlaybackSpeed.values.forEachIndexed { index, value ->
                 menu.menu.add(0, index, index, PlaybackSpeed.spoken(value))
                     .setChecked(value == player.playbackParameters.speed)
@@ -231,10 +299,10 @@ internal class VideoPlaybackPage(
                 true
             }
             video.controllerShowTimeoutMs = 0
-            menu.setOnDismissListener { video.controllerShowTimeoutMs = if (immersive) 3_000 else 0 }
+            menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
             menu.show()
         }
-        val playPause = iconButton(R.drawable.ic_play, "播放") {
+        val playPause = iconButton(R.drawable.ic_play, "播放", padding = 16) {
             if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) player.pause()
             else {
                 if (player.playbackState == Player.STATE_ENDED) player.seekToDefaultPosition()
@@ -248,26 +316,37 @@ internal class VideoPlaybackPage(
             playPause.setColorFilter(ContextCompat.getColor(activity, R.color.onAccent))
         }
         paintPlayPause()
-        val actions = LinearLayout(activity).apply {
-            gravity = Gravity.CENTER_VERTICAL
-            fun transport(button: View) {
-                addView(button, LinearLayout.LayoutParams(0, dp(48), 1f))
-            }
-            transport(previous)
-            transport(iconButton(R.drawable.ic_replay10, "后退 10 秒") { player.seekBack() })
-            addView(playPause, LinearLayout.LayoutParams(dp(44), dp(44)))
-            transport(iconButton(R.drawable.ic_forward10, "前进 10 秒") { player.seekForward() })
-            transport(next)
-            addView(speed, LinearLayout.LayoutParams(dp(56), dp(44)))
-            addView(fullscreen, LinearLayout.LayoutParams(dp(44), dp(44)))
+        // 传输组固定三件：上一 / 播放 / 下一。竖屏浮在画面底部居中，横屏并入进度行左端。
+        // ±10 秒改用长按上一/下一，避免传输组再扩成五项破坏对称。
+        previous.setOnLongClickListener {
+            player.seekBack()
+            true
         }
-        val actionsContainer = video.findViewById<FrameLayout>(R.id.videoActions)
-        actionsContainer.addView(actions, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
-        actionsContainer.addOnLayoutChangeListener { _, left, _, right, _, _, _, _, _ ->
-            val width = minOf(right - left, dp(if (activity.hasWideWindow) 720 else 480))
-            if (width > 0 && actions.layoutParams.width != width) {
-                actions.layoutParams = actions.layoutParams.apply { this.width = width }
+        next.setOnLongClickListener {
+            player.seekForward()
+            true
+        }
+        val transport = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            addView(previous)
+            addView(playPause)
+            addView(next)
+        }
+        fun styleTransport(compact: Boolean) {
+            val side = if (compact) dp(32) else dp(44)
+            val sidePad = if (compact) dp(7) else dp(11)
+            listOf(previous, next).forEach {
+                it.layoutParams = LinearLayout.LayoutParams(side, side)
+                it.setPadding(sidePad, sidePad, sidePad, sidePad)
             }
+            val inset = if (compact) dp(9) else dp(16)
+            val play = if (compact) dp(36) else dp(56)
+            playPause.layoutParams = LinearLayout.LayoutParams(play, play).apply {
+                marginStart = if (compact) dp(8) else dp(26)
+                marginEnd = marginStart
+            }
+            playPause.setPadding(inset, inset, inset, inset)
         }
         var courseDialog: AlertDialog? = null
         var listedCourses = courses
@@ -383,7 +462,7 @@ internal class VideoPlaybackPage(
         }
         paintCourseList()
         if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
-        val courseButton = iconButton(R.drawable.ic_layers, "课程列表") {
+        val courseButton = actionCell(R.drawable.ic_layers, "选集", "选集") {
             val holder = FrameLayout(activity)
             embeddedCourses.removeView(coursePanel)
             val rows = listedCourses.size.coerceIn(1, 6)
@@ -402,19 +481,20 @@ internal class VideoPlaybackPage(
                 courseDialog = null
                 holder.removeView(coursePanel)
                 embeddedCourses.addView(coursePanel, FrameLayout.LayoutParams(-1, -1))
-                video.controllerShowTimeoutMs = if (immersive) 3_000 else 0
+                video.controllerShowTimeoutMs = 3_000
             }
             sheet.show()
             sheet.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(0xFFBFC6FF.toInt())
             if (selectedCourse >= 0) courseRows.setSelection((selectedCourse - 1).coerceAtLeast(0))
-        }.apply { visibility = View.GONE }
+        }.also { it.root.visibility = View.GONE }
         val sleepHandler = Handler(Looper.getMainLooper())
-        val timer = iconButton(R.drawable.ic_timer, "睡眠定时", padding = 10) {}
+        val timer = actionCell(R.drawable.ic_timer, "定时", "睡眠定时") {}
         fun paintTimer() {
             val armed = SleepTimer.isArmed()
-            timer.setColorFilter(if (armed) ContextCompat.getColor(activity, R.color.accent) else Color.WHITE)
+            timer.icon.setColorFilter(if (armed) actionActiveColor else Color.WHITE)
+            timer.label.setTextColor(if (armed) actionActiveColor else actionLabelColor)
             val remaining = SleepTimer.remainingMs()
-            timer.contentDescription = if (armed) {
+            timer.root.contentDescription = if (armed) {
                 "睡眠定时，剩余 ${formatAudioTime((remaining / 1000).toInt())}"
             } else {
                 "睡眠定时"
@@ -435,7 +515,7 @@ internal class VideoPlaybackPage(
                 }
             }
         }
-        timer.setOnClickListener { anchor ->
+        timer.root.setOnClickListener { anchor ->
             val menu = PopupMenu(activity, anchor, Gravity.END)
             menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed()
             listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
@@ -456,9 +536,21 @@ internal class VideoPlaybackPage(
                 paintTimer()
                 true
             }
+            menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
+            video.controllerShowTimeoutMs = 0
             menu.show()
         }
         paintTimer()
+        // D 槽：选集 · 倍速 · 转音频 · 收藏 · 定时，等分铺满；音频页的转音频不在此列（音频页另有实现）
+        val actionBar = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            listOf(courseButton, speed, audioOnly, favorite, timer).forEach { cell ->
+                addView(cell.root, LinearLayout.LayoutParams(0, -1, 1f))
+            }
+        }
+        val actionsContainer = video.findViewById<FrameLayout>(R.id.videoActions)
+        actionsContainer.addView(actionBar, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER))
         val topBar = LinearLayout(activity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -469,21 +561,22 @@ internal class VideoPlaybackPage(
                 LinearLayout.LayoutParams(dp(44), dp(44)),
             )
             addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(timer, LinearLayout.LayoutParams(dp(44), dp(44)))
-            addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
-            addView(audioOnly, LinearLayout.LayoutParams(dp(44), dp(44)))
-            addView(courseButton, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(fullscreen, LinearLayout.LayoutParams(dp(44), dp(44)))
         }
         val playbackStatus = LinearLayout(activity).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            addView(audioStateIcon, LinearLayout.LayoutParams(dp(52), dp(52)))
             addView(message, LinearLayout.LayoutParams(-2, -2))
             addView(retry, LinearLayout.LayoutParams(-2, -2))
         }
+        // 只覆盖画面区域（不含底部进度+动作栏）的浮层容器，音频态与缓冲提示都居中在这里
+        val stageOverlay = FrameLayout(activity).apply {
+            addView(audioStage, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+            addView(playbackStatus, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        }
         val content = FrameLayout(activity).apply {
             addView(video, FrameLayout.LayoutParams(-1, -1))
-            addView(playbackStatus, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+            addView(stageOverlay, FrameLayout.LayoutParams(-1, -1))
         }
         val root = FrameLayout(activity).apply {
             setBackgroundColor(Color.BLACK)
@@ -500,9 +593,30 @@ internal class VideoPlaybackPage(
         }
         // 兜底到 PlayerView 自身：万一以后换布局少了 content_frame，也不至于整个播放器崩掉
         val videoFrame = video.findViewById<ViewGroup>(androidx.media3.ui.R.id.exo_content_frame) ?: video
+        // 进度行 36 + D 槽 66 + 上下内边距 18 = 120dp，与 view_video_controls.xml 对齐；
+        // 画面按 16:9 排版时正好用满剩余高度
+        val controlsHeight = dp(120)
+        var controllerVisible = true
+        val progressRow = video.findViewById<LinearLayout>(R.id.videoProgressRow)
+        var transportInline = false
+        fun mountTransport(inRow: Boolean) {
+            if (transportInline == inRow && transport.parent != null) return
+            (transport.parent as? ViewGroup)?.removeView(transport)
+            if (inRow) {
+                progressRow.addView(transport, 0, LinearLayout.LayoutParams(-2, dp(36)))
+            } else {
+                content.addView(
+                    transport,
+                    FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL)
+                        .apply { bottomMargin = controlsHeight },
+                )
+            }
+            styleTransport(inRow)
+            transportInline = inRow
+            transport.visibility = if (controllerVisible) View.VISIBLE else View.GONE
+        }
         fun arrangePlayer() {
             val top = if (immersive) 0 else dp(52)
-            val controlsHeight = dp(98)
             val availableWidth = root.width - root.paddingLeft - root.paddingRight
             val availableHeight = root.height - root.paddingTop - root.paddingBottom - top
             val landscape = immersive || availableWidth > availableHeight + top
@@ -526,6 +640,14 @@ internal class VideoPlaybackPage(
                 frame.bottomMargin = margin
                 videoFrame.layoutParams = frame
             }
+            // 浮层容器跟着画面让位，并额外让出传输组的高度，避免提示文案压在播放键下面
+            val overlayMargin = margin + dp(56)
+            val overlay = stageOverlay.layoutParams as FrameLayout.LayoutParams
+            if (overlay.bottomMargin != overlayMargin) {
+                overlay.bottomMargin = overlayMargin
+                stageOverlay.layoutParams = overlay
+            }
+
             val list = embeddedCourses.layoutParams as FrameLayout.LayoutParams
             val showInline = inlineCourses && stageHeight > 0
             val listTop = if (showInline) top + stageHeight else top
@@ -539,7 +661,8 @@ internal class VideoPlaybackPage(
             val showEmbeddedCourses = showInline || sideCourses
             if (showEmbeddedCourses && courseDialog?.isShowing == true) courseDialog?.dismiss()
             embeddedCourses.visibility = if (showEmbeddedCourses) View.VISIBLE else View.GONE
-            courseButton.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
+            courseButton.root.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
+            mountTransport(landscape)
             fullscreen.contentDescription = when {
                 immersive -> "退出全屏"
                 shouldRotateForFullscreen() -> "横屏全屏"
@@ -584,7 +707,6 @@ internal class VideoPlaybackPage(
         var gestureSide = 0        // 1=左半屏亮度 2=右半屏音量
         var speedBase = 1f
         var speedHeld = false
-        var controllerVisible = true
         val gestureDetector = GestureDetector(activity, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(e: MotionEvent) = true
 
@@ -688,17 +810,19 @@ internal class VideoPlaybackPage(
         videoFrame.addView(gestureLayer, FrameLayout.LayoutParams(-1, -1))
         video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
             controllerVisible = visibility == View.VISIBLE
+            // 竖屏保留顶栏（Dialog 没有系统返回入口，全隐就没法退出），只收进度条与动作栏；
+            // 横屏才是完全沉浸。
             topBar.visibility = if (immersive) visibility else View.VISIBLE
+            transport.visibility = visibility
         })
         var orientationRequested = startFullscreen && activity.requestedOrientation != orientationBeforeFullscreen
         updateFullscreen = { enabled ->
             immersive = enabled
             arrangePlayer()
             fullscreen.setImageResource(if (enabled) R.drawable.ic_fullscreen_exit else R.drawable.ic_fullscreen)
-            video.controllerHideOnTouch = false
             gestureLayer.visibility = if (enabled) View.VISIBLE else View.GONE
             if (!enabled) hint.visibility = View.GONE
-            video.controllerShowTimeoutMs = if (enabled) 3_000 else 0
+            video.controllerShowTimeoutMs = 3_000
             if (enabled && shouldRotateForFullscreen()) {
                 activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
                 orientationRequested = true
@@ -750,9 +874,9 @@ internal class VideoPlaybackPage(
             }
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
-                audioOnly.isEnabled = tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)
-                audioOnly.alpha = if (audioOnly.isEnabled) 1f else 0.35f
-                if (!tracks.isEmpty && listening && !audioOnly.isEnabled) setListening(false)
+                audioOnly.root.isEnabled = tracks.isTypeSupported(C.TRACK_TYPE_AUDIO)
+                audioOnly.root.alpha = if (audioOnly.root.isEnabled) 1f else 0.35f
+                if (!tracks.isEmpty && listening && !audioOnly.root.isEnabled) setListening(false)
             }
 
             override fun onRenderedFirstFrame() {
@@ -777,7 +901,7 @@ internal class VideoPlaybackPage(
                     }
                 }
                 if (player.playerError != null) return
-                message.visibility = if (listening || !rendered || playbackState == Player.STATE_BUFFERING) {
+                message.visibility = if (!listening && (!rendered || playbackState == Player.STATE_BUFFERING)) {
                     View.VISIBLE
                 } else View.GONE
             }
