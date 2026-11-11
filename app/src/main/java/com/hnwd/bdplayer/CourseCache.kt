@@ -11,6 +11,8 @@ import org.json.JSONObject
 private const val PREVIEW_TTL_MS = 2 * 60 * 60 * 1000L
 
 internal class CourseCache(private val preferences: SharedPreferences) {
+    private val throttle = PruneThrottle()
+
     fun readPage(key: String, page: Int): CachedPage? = runCatching {
         val raw = preferences.getString(pageKey(key, page), null) ?: return null
         val data = JSONObject(raw)
@@ -97,6 +99,27 @@ internal class CourseCache(private val preferences: SharedPreferences) {
             JSONObject().put("syncedAt", System.currentTimeMillis()).put("entries", data)
                 .put("nextCursor", nextCursor).put("latestEmpty", latestEmpty).toString(),
         ).apply()
+        maybePrune()
+    }
+
+    private fun maybePrune() {
+        if (throttle.onWrite(System.currentTimeMillis())) prune()
+    }
+
+    /**
+     * 按目录组淘汰：只清当前账号前缀，7 天未同步的组直接删，其余保留最近
+     * [MAX_CACHED_GROUPS] 组。整组删除，避免留下 readAll 读不到的孤儿页。
+     * 由 [maybePrune] 节流触发，也可由调用方显式触发；返回删掉的组数便于排查。
+     */
+    @Synchronized
+    fun prune(now: Long = System.currentTimeMillis()): Int {
+        val groups = collectCacheGroups(preferences.all, AccountScope.prefix())
+        val evict = groupsToEvict(groups.syncedAt, now)
+        if (evict.isEmpty()) return 0
+        val editor = preferences.edit()
+        evict.forEach { group -> groups.keys[group]?.forEach { editor.remove(it) } }
+        editor.apply()
+        return evict.size
     }
 
     /** 签名看图地址每次请求都会重新签发，不能参与「目录内容是否变化」的判断。 */
