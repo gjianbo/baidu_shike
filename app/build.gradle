@@ -24,8 +24,9 @@ android {
         targetSdk 35
         versionCode 24
         // CI 不带 -P，直接用这个默认值构建，并要求 Git tag 等于 v<versionName>；
-        // 本地发版走 build-release.sh --version。发新版本时这里和 versionCode 要一起改，
-        // 否则会产出比线上更旧的版本号（v1.0.1 的包已经发过）。
+        // 本地发版走 build-release.sh --version。发新版本时这里和 versionCode 要一起改：
+        // .github/scripts/check-version-code.sh 在 CI 与本地发版前以已发布的 v* tag
+        // 为基线做严格递增校验，会拦住「versionName 变了但 versionCode 没涨」。
         versionName providers.gradleProperty('bdplayerVersionName').getOrElse('1.0.1')
     }
 

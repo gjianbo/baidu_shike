@@ -38,3 +38,19 @@ gradle :app:testDebugUnitTest      # 单元测试（首次需要联网拉 junit 
 单测只覆盖不碰 Android 框架的纯逻辑：条目的编解码与排序、网盘响应解析、备份文件校验。
 以 `android.net.Uri` 为出入参的解析（媒体取址、验证码、文档直链）需要 Robolectric
 或设备上的 instrumented test，目前没有覆盖，改动这部分要真机验证。
+
+### 版本号门禁
+
+`app/build.gradle` 的 `versionCode` 每次发版都必须严格递增。CI（推送 `main` 或 `v*` tag）
+和本地 `build-release.sh` 在构建前都会执行 `.github/scripts/check-version-code.sh`，
+它以已发布的 `v*` tag 里的 `versionCode` 为基线检查：版本回退、或改了 `versionName`
+却没涨 `versionCode` 都会直接失败。`workflow_dispatch` 重发已有 tag 时改为校验
+`versionCode` 与该 tag 一致。手动执行：
+
+```
+bash .github/scripts/check-version-code.sh           # 校验当前工作区
+bash .github/scripts/check-version-code.sh --release-tag v1.0.2   # 模拟发新 tag
+bash .github/scripts/test-check-version-code.sh     # 门禁自身的场景自测
+```
+
+脚本依赖完整的 tag 历史，CI 的 `actions/checkout` 因此使用 `fetch-depth: 0`。
