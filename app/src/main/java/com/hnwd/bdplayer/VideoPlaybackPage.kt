@@ -624,8 +624,11 @@ internal class VideoPlaybackPage(
             val inlineCourses = !landscape && hasCourses
             val sideCourses = !immersive && landscape && availableWidth >= dp(EXPANDED_WINDOW_DP) && hasCourses
             val sideWidth = if (sideCourses) dp(320) else 0
+            // 控制层收起后不再为它预留 120dp：让课程列表上移把这块填满，
+            // 画面本身仍是标准 16:9（stageHeight 与 videoFrame 底距同步减少），不会跳动或变形。
+            val reserve = if (controllerVisible) controlsHeight else 0
             val stageHeight = if (inlineCourses && availableWidth > 0 && availableHeight > 0) {
-                minOf(availableWidth * 9 / 16 + controlsHeight, (availableHeight * 0.58f).toInt())
+                minOf(availableWidth * 9 / 16 + reserve, (availableHeight * 0.58f).toInt())
             } else -1
             val stage = content.layoutParams as FrameLayout.LayoutParams
             if (stage.height != stageHeight || stage.topMargin != top || stage.rightMargin != sideWidth) {
@@ -635,13 +638,13 @@ internal class VideoPlaybackPage(
                 content.layoutParams = stage
             }
             val frame = videoFrame.layoutParams as FrameLayout.LayoutParams
-            val margin = if (inlineCourses) controlsHeight else 0
+            val margin = if (inlineCourses) reserve else 0
             if (frame.bottomMargin != margin) {
                 frame.bottomMargin = margin
                 videoFrame.layoutParams = frame
             }
             // 浮层容器跟着画面让位，并额外让出传输组的高度，避免提示文案压在播放键下面
-            val overlayMargin = margin + dp(56)
+            val overlayMargin = if (controllerVisible) margin + dp(56) else margin
             val overlay = stageOverlay.layoutParams as FrameLayout.LayoutParams
             if (overlay.bottomMargin != overlayMargin) {
                 overlay.bottomMargin = overlayMargin
@@ -809,7 +812,12 @@ internal class VideoPlaybackPage(
         }
         videoFrame.addView(gestureLayer, FrameLayout.LayoutParams(-1, -1))
         video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
-            controllerVisible = visibility == View.VISIBLE
+            val shown = visibility == View.VISIBLE
+            if (controllerVisible != shown) {
+                controllerVisible = shown
+                // 显隐变化时重排：收起则把预留的 120dp 还给内容区，避免留下空白黑条
+                arrangePlayer()
+            }
             // 竖屏保留顶栏（Dialog 没有系统返回入口，全隐就没法退出），只收进度条与动作栏；
             // 横屏才是完全沉浸。
             topBar.visibility = if (immersive) visibility else View.VISIBLE
