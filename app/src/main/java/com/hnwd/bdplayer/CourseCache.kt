@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -12,6 +13,7 @@ private const val PREVIEW_TTL_MS = 2 * 60 * 60 * 1000L
 
 internal class CourseCache(private val preferences: SharedPreferences) {
     private val throttle = PruneThrottle()
+    private val pruneInFlight = AtomicBoolean(false)
 
     fun readPage(key: String, page: Int): CachedPage? = runCatching {
         val raw = preferences.getString(pageKey(key, page), null) ?: return null
@@ -103,23 +105,38 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     }
 
     private fun maybePrune() {
-        if (throttle.onWrite(System.currentTimeMillis())) prune()
+        val now = System.currentTimeMillis()
+        if (!throttle.onWrite(now)) return
+        // preferences.all 会把整表键拷贝一份，历史欠账大时在主线程做会卡掉一帧。
+        // 淘汰只是维护动作，返回值没有调用方消费，所以移到后台；单飞标志防止
+        // 连续写入堆出多个并发扫描。读缓存仍走同步路径，不受淘汰时序影响
+        // （readPage 自带 TTL 判断，最坏只是多留一会儿过期页）。
+        // prefix 必须在主线程快照：后台再读 AccountScope.current 可能已切账号。
+        if (!pruneInFlight.compareAndSet(false, true)) return
+        val prefix = AccountScope.prefix()
+        AppIo.execute {
+            try {
+                prune(now, prefix)
+            } finally {
+                pruneInFlight.set(false)
+            }
+        }
     }
 
     /**
      * 按目录组淘汰：只清当前账号前缀，7 天未同步的组直接删，其余保留最近
      * [MAX_CACHED_GROUPS] 组。整组删除，避免留下 readAll 读不到的孤儿页。
      * 由 [maybePrune] 节流触发，也可由调用方显式触发；返回删掉的组数便于排查。
+     * [prefix] 由调用方传入，便于后台执行时锁定触发那一刻的账号。
      */
     @Synchronized
-    fun prune(now: Long = System.currentTimeMillis()): Int {
-        val groups = collectCacheGroups(preferences.all, AccountScope.prefix())
-        val evict = groupsToEvict(groups.syncedAt, now)
-        if (evict.isEmpty()) return 0
+    fun prune(now: Long = System.currentTimeMillis(), prefix: String = AccountScope.prefix()): Int {
+        val plan = planCachePrune(preferences.all, prefix, now)
+        if (plan.keys.isEmpty()) return 0
         val editor = preferences.edit()
-        evict.forEach { group -> groups.keys[group]?.forEach { editor.remove(it) } }
+        plan.keys.forEach { editor.remove(it) }
         editor.apply()
-        return evict.size
+        return plan.groups
     }
 
     /** 签名看图地址每次请求都会重新签发，不能参与「目录内容是否变化」的判断。 */

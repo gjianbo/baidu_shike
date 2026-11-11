@@ -85,6 +85,27 @@ internal fun groupsToEvict(
     return evict
 }
 
+/** [CourseCache.prune] 的执行计划：要删的存储键，以及删掉的目录组数（返回值语义由调用方保留）。 */
+internal data class PrunePlan(val keys: Set<String>, val groups: Int)
+
+/**
+ * 把「扫整表 → 按目录分组 → 选淘汰组 → 展开成要删的键」合成纯函数。
+ * [CourseCache] 因此只需在后台线程负责落盘，淘汰判定本身可被 JVM 单测完整覆盖。
+ */
+internal fun planCachePrune(
+    all: Map<String, Any?>,
+    prefix: String,
+    now: Long,
+    maxGroups: Int = MAX_CACHED_GROUPS,
+    keepMs: Long = CACHE_KEEP_MS,
+): PrunePlan {
+    val groups = collectCacheGroups(all, prefix)
+    val evict = groupsToEvict(groups.syncedAt, now, maxGroups, keepMs)
+    val keys = LinkedHashSet<String>()
+    evict.forEach { group -> groups.keys[group]?.let(keys::addAll) }
+    return PrunePlan(keys, evict.size)
+}
+
 /** write() 后的淘汰节流：避免每次写都扫一遍 preferences.all（那正是卡顿来源）。 */
 internal class PruneThrottle {
     private var writes = 0

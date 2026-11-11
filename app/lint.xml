@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+      单语言（简体中文）应用，不提供多语言资源。把 71 条布局文案和 29 条
+      「共 N 项」式的数字拼接抽成 strings.xml / String.format 不产生用户可见收益，
+      只会把文案从布局搬到另一个文件。将来真要做国际化，删掉这两条即可恢复检查。
+    -->
+    <issue id="HardcodedText" severity="ignore" />
+    <issue id="SetTextI18n" severity="ignore" />
+
+    <!--
+      纯风格建议（SharedPreferences.edit {}、String.toUri 等），共 82 处跨十几个文件。
+      MainActivityBrowse / MainActivityCourse 正被并行窗口修改，媒体页 S0 相关文件
+      刚合入，此刻批量改会制造冲突。等并行窗口收口后单独排一轮机械替换，并移除此条。
+      注意：这是「暂缓」而不是「规则不适用」，不要把它当成已修复的技术债。
+    -->
+    <issue id="UseKtx" severity="ignore" />
+</lint>

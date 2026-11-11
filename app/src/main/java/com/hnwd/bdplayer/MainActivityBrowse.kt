@@ -874,5 +874,5 @@ internal fun MainActivity.display(entries: List<PanEntry>) {
         screen == Screen.HOME -> "群组"
         else -> "文件"
     }
-    addFilteredCourseRows(entries, sortable = screen == Screen.GROUPS)
+    addFilteredCourseRows(entries, sortable = listSortable())
 }

@@ -22,7 +22,7 @@ android {
         applicationId 'com.hnwd.bdplayer'
         minSdk 29
         targetSdk 35
-        versionCode 24
+        versionCode 25
         // CI 不带 -P，直接用这个默认值构建，并要求 Git tag 等于 v<versionName>；
         // 本地发版走 build-release.sh --version。发新版本时这里和 versionCode 要一起改：
         // .github/scripts/check-version-code.sh 在 CI 与本地发版前以已发布的 v* tag

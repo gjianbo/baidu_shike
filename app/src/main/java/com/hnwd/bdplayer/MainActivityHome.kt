@@ -203,7 +203,7 @@ internal fun MainActivity.startQuarkHomeCheck(
     checkToken: Int,
 ) {
     val sourceId = gid
-    Thread {
+    AppIo.execute {
         val result = runCatching {
             val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
             val page = session.execute(session.list(rawSourceId(sourceId), 1, 50))
@@ -226,7 +226,7 @@ internal fun MainActivity.startQuarkHomeCheck(
                 applyHomeRecentEntries(entries, cacheKey, homeRootKey, force, checkToken)
             }
         }
-    }.start()
+    }
 }
 
 
@@ -553,7 +553,7 @@ internal fun MainActivity.renderAccountAvatar(target: ImageView) {
         target.setImageResource(R.drawable.ic_cloud)
         target.scaleType = ImageView.ScaleType.FIT_CENTER
         target.setPaddingRelative(dp(14), dp(14), dp(14), dp(14))
-        Thread {
+        AppIo.execute {
             val bitmap = runCatching {
                 val conn = java.net.URL(url).openConnection()
                 conn.connectTimeout = 5000
@@ -567,7 +567,7 @@ internal fun MainActivity.renderAccountAvatar(target: ImageView) {
                 target.scaleType = ImageView.ScaleType.CENTER_CROP
                 target.setImageBitmap(bitmap)
             }
-        }.start()
+        }
         return
     }
     if (!hasVerifiedAccount()) {
@@ -609,15 +609,22 @@ internal fun MainActivity.confirmClearHistory() {
         .setMessage("将清除当前账号在本机的播放记录和音视频续播点。网盘文件会保留。")
         .setNegativeButton("取消", null)
         .setPositiveButton("清除") { _, _ ->
-            audioHistory.clear()
-            videoHistory.clear()
-            val progress = getSharedPreferences("video_progress", android.content.Context.MODE_PRIVATE)
-            val editor = progress.edit()
-            val prefix = AccountScope.prefix()
-            progress.all.keys.filter { it.startsWith(prefix) }.forEach { editor.remove(it) }
-            editor.apply()
-            toast("播放记录已清除")
-            refresh()
+            // 清记录要遍历整表 preferences.all，放后台避免主线程拷贝大 Map；
+            // toast / refresh 必须等清理落盘后再回主线程，否则会读到旧记录。
+            AppIo.execute {
+                audioHistory.clear()
+                videoHistory.clear()
+                val progress = getSharedPreferences("video_progress", android.content.Context.MODE_PRIVATE)
+                val editor = progress.edit()
+                val prefix = AccountScope.prefix()
+                progress.all.keys.filter { it.startsWith(prefix) }.forEach { editor.remove(it) }
+                editor.apply()
+                runOnUiThread {
+                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    toast("播放记录已清除")
+                    refresh()
+                }
+            }
         }
         .show()
 }

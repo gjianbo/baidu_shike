@@ -167,7 +167,7 @@ internal fun MainActivity.manageQuarkSources() {
         return
     }
     toast("正在读取夸克网盘目录…")
-    Thread {
+    AppIo.execute {
         val result = runCatching {
             session.execute(session.list(QuarkPersonalDrive.ROOT, 1, 200))
         }
@@ -215,7 +215,7 @@ internal fun MainActivity.manageQuarkSources() {
                 )
             }
         }
-    }.start()
+    }
 }
 
 

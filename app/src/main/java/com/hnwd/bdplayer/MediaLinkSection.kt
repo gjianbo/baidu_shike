@@ -13,7 +13,6 @@ import androidx.appcompat.app.AlertDialog
 import java.net.HttpURLConnection
 import java.net.URL
 import org.json.JSONObject
-import org.json.JSONTokener
 
 /**
  * 媒体取址层需要的最小宿主能力。
@@ -79,7 +78,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
         val fail = { if (isCurrent()) onFailure() }
         fun stop(message: String) {
             if (!isCurrent()) return
-            if (lane == RequestLane.AUDIO) {
+            if (linkErrorTarget(lane) == LinkErrorTarget.AUDIO) {
                 host.failAudio(message)
             } else {
                 onFailure()
@@ -89,26 +88,14 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
         host.fetchJson(PanApi.diskDownloadSession(), lane = lane, onCancelled = fail, onFailure = fail) { json ->
             if (!isCurrent()) return@fetchJson
             val session = json.getJSONObject("result")
-            val sign1 = JSONObject.quote(session.getString("sign1"))
-            val sign2 = JSONObject.quote(session.getString("sign2"))
-            val sign3 = JSONObject.quote(session.getString("sign3"))
             val timestamp = session.getString("timestamp")
             val vip = session.getString("is_vip")
-            val script = """
-                (() => {
-                    if (location.origin !== 'https://pan.baidu.com') return '';
-                    try {
-                        const sign = new Function('return ' + $sign2)();
-                        return btoa(sign($sign3, $sign1));
-                    } catch (_) {
-                        return '';
-                    }
-                })()
-            """.trimIndent()
+            val script = diskSignScript(
+                session.getString("sign1"), session.getString("sign2"), session.getString("sign3"),
+            )
             host.evaluateJavascript(script) { raw ->
                 if (!isCurrent()) return@evaluateJavascript
-                val sign = runCatching { JSONTokener(raw.orEmpty()).nextValue() as? String }.getOrNull()
-                if (sign.isNullOrEmpty()) {
+                val sign = parseSignResult(raw) ?: run {
                     stop("无法生成下载签名，请重新登录后重试。")
                     return@evaluateJavascript
                 }
@@ -120,8 +107,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                             if (!host.isVisible()) {
                                 stop("需要输入网盘验证码，请返回应用后重试。")
                             } else {
-                                val message = if (verification.isEmpty()) "请输入图片中的验证码"
-                                else "验证码错误或已失效，请重新输入"
+                                val message = captchaPrompt(verification.isNotEmpty())
                                 val captcha = PanApi.parseMediaCaptcha(captchaJson)
                                 if (captcha == null) {
                                     stop("网盘要求输入验证码，请在网页版网盘打开一次后重试。")
@@ -143,7 +129,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                         val cookies = CookieManager.getInstance()
                         val cookie = cookies.getCookie(link.toString()) ?: cookies.getCookie("https://pan.baidu.com")
                         val userAgent = host.userAgent()
-                        Thread {
+                        AppIo.execute {
                             val cdn = runCatching {
                                 val connection = URL(link.toString()).openConnection() as HttpURLConnection
                                 try {
@@ -163,7 +149,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                                 if (!isCurrent()) return@runOnUiThread
                                 if (cdn == null) fail() else onReady(cdn)
                             }
-                        }.start()
+                        }
                     }
                 }
                 submit()
@@ -180,9 +166,9 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
     ) {
         val form = PanApi.mediaLinkBody(entry, viewer)
         fun stop(message: String) {
-            when (lane) {
-                RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK -> host.setStatus(message)
-                RequestLane.AUDIO -> host.failAudio(message)
+            when (linkErrorTarget(lane)) {
+                LinkErrorTarget.STATUS -> host.setStatus(message)
+                LinkErrorTarget.AUDIO -> host.failAudio(message)
             }
             onFailure()
         }
@@ -195,8 +181,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                     if (!host.isVisible()) {
                         stop("需要输入网盘验证码，请返回应用后重试。")
                     } else {
-                        val message = if (verification.isEmpty()) "请输入图片中的验证码"
-                        else "验证码错误或已失效，请重新输入"
+                        val message = captchaPrompt(verification.isNotEmpty())
                         fun show(captcha: PanApi.MediaCaptcha, current: () -> Boolean) {
                             showCaptcha(lane, captcha, message, current, ::stop) { answer ->
                                 submit("&" + PanApi.mediaCaptchaForm(captcha, answer))
@@ -233,7 +218,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
         onCancelled: (String) -> Unit,
         onAnswer: (String) -> Unit,
     ) {
-        if (!host.isVisible() || captchaDialog != null) {
+        if (captchaBlocked({ host.isVisible() }, { captchaDialog != null })) {
             onCancelled("需要输入网盘验证码，请稍后重试。")
             return
         }
@@ -273,8 +258,9 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                 return@setOnClickListener
             }
             val value = answer.text.toString().trim()
-            if (value.isEmpty()) {
-                answer.error = "请输入验证码"
+            val answerError = captchaAnswerError(value)
+            if (answerError != null) {
+                answer.error = answerError
                 return@setOnClickListener
             }
             submitted = true
@@ -286,7 +272,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
         val url = captcha.image.toString()
         val cookie = CookieManager.getInstance().getCookie(url)
         val userAgent = host.userAgent()
-        Thread {
+        AppIo.execute {
             val bitmap = runCatching {
                 val connection = URL(url).openConnection() as HttpURLConnection
                 try {
@@ -314,11 +300,11 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                     submit.isEnabled = true
                 }
             }
-        }.start()
+        }
     }
 
     fun dismissCaptcha(lane: RequestLane) {
-        val dialog = captchaDialog?.takeIf { it.first == lane }?.second ?: return
+        val dialog = captchaDialog?.takeIf { shouldDismissCaptcha(it.first, lane) }?.second ?: return
         captchaDialog = null
         dialog.dismiss()
     }

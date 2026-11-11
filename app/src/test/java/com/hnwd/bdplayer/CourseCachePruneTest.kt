@@ -236,4 +236,71 @@ class CourseCachePruneTest {
         val raw = """{"syncedAt":1700000000000,"entries":[{"name":"a"}],"nextCursor":null}"""
         assertEquals(JSONObject(raw).optLong("syncedAt"), readSyncedAt(raw))
     }
+
+    private fun page(at: Long) = """{"syncedAt":$at,"entries":[]}"""
+
+    @Test
+    fun `planCachePrune 空表返回空计划`() {
+        val plan = planCachePrune(emptyMap(), "acct_a__", now)
+        assertTrue(plan.keys.isEmpty())
+        assertEquals(0, plan.groups)
+    }
+
+    @Test
+    fun `planCachePrune 整组展开所有页`() {
+        val all = linkedMapOf<String, Any?>(
+            "acct_a__dir:old:1" to page(1L),
+            "acct_a__dir:old:2" to page(2L),
+            "acct_a__dir:fresh:1" to page(now),
+        )
+        val plan = planCachePrune(all, "acct_a__", now, maxGroups = 1)
+        assertEquals(setOf("acct_a__dir:old:1", "acct_a__dir:old:2"), plan.keys)
+        assertEquals(1, plan.groups)
+    }
+
+    @Test
+    fun `planCachePrune 不碰其它账号前缀`() {
+        val all = mapOf<String, Any?>(
+            "acct_b__dir:old:1" to page(1L),
+            "acct_a__dir:keep:1" to page(now),
+        )
+        val plan = planCachePrune(all, "acct_a__", now, maxGroups = 1)
+        assertTrue(plan.keys.isEmpty())
+        assertEquals(0, plan.groups)
+    }
+
+    @Test
+    fun `planCachePrune 7 天未同步的组直接淘汰`() {
+        val stale = now - CACHE_KEEP_MS - 1
+        val all = mapOf<String, Any?>(
+            "acct_a__dir:stale:1" to page(stale),
+            "acct_a__dir:stale:2" to page(stale),
+            "acct_a__dir:fresh:1" to page(now),
+        )
+        val plan = planCachePrune(all, "acct_a__", now)
+        assertEquals(setOf("acct_a__dir:stale:1", "acct_a__dir:stale:2"), plan.keys)
+        assertEquals(1, plan.groups)
+    }
+
+    @Test
+    fun `planCachePrune 忽略非数字页码键`() {
+        val all = mapOf<String, Any?>(
+            "acct_a__dir:old:meta" to page(1L),
+            "acct_a__dir:old:1" to page(now),
+        )
+        assertTrue(planCachePrune(all, "acct_a__", now).keys.isEmpty())
+    }
+
+    @Test
+    fun `planCachePrune 脏数据只在超限时淘汰`() {
+        val all = mapOf<String, Any?>(
+            "acct_a__dir:broken:1" to "not-json",
+            "acct_a__dir:ok:1" to page(now),
+        )
+        assertTrue(planCachePrune(all, "acct_a__", now, maxGroups = 2).keys.isEmpty())
+        assertEquals(
+            setOf("acct_a__dir:broken:1"),
+            planCachePrune(all, "acct_a__", now, maxGroups = 1).keys,
+        )
+    }
 }

@@ -18,8 +18,21 @@ internal fun MainActivity.renderCourse() {
     status.text = if (courseEntries.isEmpty()) "没有条目" else cacheNote
     sectionTitle.text = "文件"
     content.removeAllViews()
-    addFilteredCourseRows(courseEntries.toList(), sortable = screen != Screen.HOME)
+    addFilteredCourseRows(courseEntries.toList(), sortable = listSortable())
 }
+
+
+/** 目录列表是否支持排序：网盘/群组的目录可以，首页最近列表、收藏、设置不参与。 */
+internal fun MainActivity.listSortable(): Boolean = screen == Screen.DISK || screen == Screen.GROUPS
+
+
+/**
+ * 批量选择入口是否露出。
+ *
+ * 网盘页的「选择」与批量操作条布局待重做，先隐藏入口；
+ * 排序不受影响，网盘页只留排序一个按钮。
+ */
+internal fun MainActivity.listSelectable(): Boolean = listSortable() && screen != Screen.DISK
 
 
 internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
@@ -37,7 +50,6 @@ internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortabl
         kinds.size >= 2 || transferredCount > 0
     }
     filterBar.visibility = if (showFilters) View.VISIBLE else View.GONE
-    sortButton.text = courseOrder.label
     showAvailableMediaFilters(kinds)
     if (mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
         mediaFilter = MediaFilter.ALL
@@ -49,11 +61,14 @@ internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortabl
                 (!transferredOnly || matchesTransferred(it, transferred))
         }
         updateFilterChips()
-        val ordered = if (sortable) orderCourses(matching, courseOrder) else matching
+        val order = if (sortable) listOrder() else courseOrder
+        val ordered = if (sortable) orderCourses(matching, order) else matching
         filterCount.text = "共 ${ordered.size} 项"
         lastRenderedEntries = ordered
+        sortButton.text = order.label
+        sortButton.contentDescription = "排序，当前 ${order.label}"
         sortButton.visibility = if (sortable && entries.isNotEmpty() && !selectionMode) View.VISIBLE else View.GONE
-        btnSelect.visibility = if (!selectionMode && sortable && ordered.isNotEmpty()) View.VISIBLE else View.GONE
+        btnSelect.visibility = if (!selectionMode && listSelectable() && ordered.isNotEmpty()) View.VISIBLE else View.GONE
         rows.removeAllViews()
         extendPlaybackQueue(ordered)
         if (ordered.isEmpty() && entries.isNotEmpty()) rows.addView(label("当前已加载的内容中没有匹配项", 12f))
@@ -66,15 +81,45 @@ internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortabl
 }
 
 
+/** 当前目录的身份键，与课程缓存的目录键同构；收藏/设置/首页根目录不参与排序，返回 null。 */
+internal fun MainActivity.currentDirectoryKey(): String? {
+    val parent = folders.lastOrNull()
+    return when {
+        parent != null && parent.isDisk -> "disk:dir:${parent.fileId}"
+        parent != null -> "dir:${parent.gid}:${parent.messageId}:${parent.fileId}"
+        screen == Screen.DISK -> "disk:roots"
+        screen == Screen.GROUPS -> "roots:$gid"
+        else -> null
+    }
+}
+
+
+internal fun MainActivity.directorySortKey(): String? =
+    currentDirectoryKey()?.let { AccountScope.key(it) }
+
+
+/** 目录列表的排序：按目录记忆，没记过就跟随全局默认。 */
+internal fun MainActivity.listOrder(): CourseOrder =
+    directorySortKey()?.let { SortStore.list(this, it) } ?: courseOrder
+
+
 internal fun MainActivity.showCourseSort() {
-    val options = CourseOrder.entries
+    val key = directorySortKey()
+    val current = listOrder()
     showChoiceSheet(
         title = "排序",
-        choices = options.map { SheetChoice(it.label, checked = it == courseOrder, tag = it) },
+        subtitle = if (key == null) null else "只对当前目录生效",
+        choices = CourseOrder.entries.map { SheetChoice(it.label, checked = it == current, tag = it) },
         onSelect = { choice ->
-            courseOrder = choice.tag as CourseOrder
-            ThemeStore.setCourseOrder(this, courseOrder.name)
-            sortButton.text = courseOrder.label
+            val order = choice.tag as CourseOrder
+            SortStore.setList(this, key, order)
+            if (key != null) {
+                // 顺手更新全局默认：没单独设过的目录跟随最近一次选择，而不是退回旧值。
+                courseOrder = order
+                ThemeStore.setCourseOrder(this, order.name)
+            }
+            sortButton.text = order.label
+            sortButton.contentDescription = "排序，当前 ${order.label}"
             redrawFilteredRows?.invoke()
         },
     )
@@ -82,7 +127,7 @@ internal fun MainActivity.showCourseSort() {
 
 
 internal fun MainActivity.playbackOrderKey(entry: PanEntry, listKey: String?): String? {
-    if (entry.isDisk) return playbackPathOrderKey(entry)
+    // 磁盘条目也优先用目录键，才能和列表页的排序对上；拿不到目录再退回路径。
     val directory = directoryCacheKey(entry, listKey) ?: courseCache.directoryContaining(entry)
     return directory?.let { AccountScope.key(it) } ?: playbackPathOrderKey(entry)
 }
@@ -96,26 +141,29 @@ internal fun MainActivity.playbackPathOrderKey(entry: PanEntry): String? {
 
 
 internal fun MainActivity.playbackOrder(entry: PanEntry, listKey: String?): CourseOrder {
-    val preferences = getSharedPreferences("playback_order", android.content.Context.MODE_PRIVATE)
-    val saved = playbackOrderKey(entry, listKey)?.let {
-        preferences.getString(it, null)
-    } ?: playbackPathOrderKey(entry)?.let { preferences.getString(it, null) }
-    return when (saved) {
-        CourseOrder.DESCENDING.name -> CourseOrder.DESCENDING
-        CourseOrder.ASCENDING.name -> CourseOrder.ASCENDING
-        else -> if (courseOrder == CourseOrder.DESCENDING) CourseOrder.DESCENDING else CourseOrder.ASCENDING
-    }
+    val key = playbackOrderKey(entry, listKey)
+    val pathKey = playbackPathOrderKey(entry)
+    // 播放页自己的排序优先；没单独设过就继承这个目录的列表排序；
+    // 再退到老版本按路径存的偏好；都没有才用全局默认。
+    return key?.let { SortStore.playback(this, it) }
+        ?: key?.let { SortStore.list(this, it) }
+        ?: pathKey?.takeIf { it != key }?.let { SortStore.playback(this, it) }
+        ?: courseOrder
 }
 
 
 internal fun MainActivity.playbackSortLabel(entry: PanEntry, listKey: String?): String =
-    if (playbackOrder(entry, listKey) == CourseOrder.DESCENDING) "降序 ▾" else "升序 ▾"
+    when (playbackOrder(entry, listKey)) {
+        CourseOrder.ASCENDING -> "升序 ▾"
+        CourseOrder.DESCENDING -> "降序 ▾"
+        CourseOrder.NETWORK -> "原序 ▾"
+    }
 
 
 internal fun MainActivity.showPlaybackSort(anchor: View, entry: PanEntry, listKey: String?, onSorted: (List<PanEntry>) -> Unit) {
     val key = playbackOrderKey(entry, listKey) ?: return
     val account = verifiedAccount
-    val options = listOf(CourseOrder.ASCENDING, CourseOrder.DESCENDING)
+    val options = CourseOrder.entries
     PopupMenu(anchor.context, anchor).apply {
         val selected = playbackOrder(entry, listKey)
         options.forEachIndexed { index, order ->
@@ -124,12 +172,15 @@ internal fun MainActivity.showPlaybackSort(anchor: View, entry: PanEntry, listKe
         menu.setGroupCheckable(0, true, true)
         menu.findItem(options.indexOf(selected)).isChecked = true
         setOnMenuItemClickListener { item ->
-            if (account == verifiedAccount && hasVerifiedAccount() &&
+            val order = options[item.itemId]
+            // 先落盘：即使此刻播放队列已经变了，用户的选择也不该被吞掉。
+            SortStore.setPlayback(this@showPlaybackSort, key, order)
+            val stillCurrent = account == verifiedAccount && hasVerifiedAccount() &&
                 PlaybackQueueState.listKey == listKey &&
                 PlaybackQueueState.anchor?.let { sameEntry(it, entry) } == true
-            ) {
-                val order = options[item.itemId]
-                getSharedPreferences("playback_order", android.content.Context.MODE_PRIVATE).edit().putString(key, order.name).apply()
+            if (!stillCurrent) {
+                toast("排序已保存，下次进入该目录生效")
+            } else {
                 val courses = orderCourses(PlaybackQueueState.entries, order)
                 PlaybackQueueState.entries = courses
                 pendingQueue = pendingQueue?.let { pending ->

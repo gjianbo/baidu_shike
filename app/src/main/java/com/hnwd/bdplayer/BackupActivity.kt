@@ -222,7 +222,7 @@ class BackupActivity : AppCompatActivity() {
 
     private fun saveBackup(button: View) {
         button.isEnabled = false
-        Thread {
+        AppIo.execute {
             val result = runCatching { BackupStore.saveToDownloads(this, BackupStore.build(this)) }
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
@@ -235,7 +235,7 @@ class BackupActivity : AppCompatActivity() {
                         .show()
                 }.onFailure { toast("备份失败，请检查手机存储空间后重试") }
             }
-        }.start()
+        }
     }
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
