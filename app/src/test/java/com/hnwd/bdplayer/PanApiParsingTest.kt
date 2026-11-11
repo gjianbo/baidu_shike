@@ -36,6 +36,17 @@ class PanApiParsingTest {
         path = path, size = "", directory = directory, origin = origin,
     )
 
+    /** 联系人根目录 fixture：每条消息里放一份同名 fs_id=1 的文件。 */
+    private fun contactMessage(msgId: String, name: String, owner: String = "777") =
+        """{"msg_id":"$msgId","from_uk":"$owner","filelist":{"list":[
+            {"fs_id":"1","server_filename":"$name","path":"/$name","isdir":"0"}]}}"""
+
+    private fun contactRoots(vararg messages: String) =
+        PanApi.parseRoots(
+            json("""{"records":{"list":[${messages.joinToString(",")}]}}"""),
+            gid = "contact-777",
+        )
+
     // ===================== 我的网盘：/api/list =====================
 
     @Test
@@ -222,11 +233,62 @@ class PanApiParsingTest {
 
         val entries = PanApi.parseRoots(payload, gid = "contact-777")
 
-        // 同一份文件出现在多条消息里只保留第一次（m1 的那条），
-        // 否则列表会出现两行同一个文件；msg_id / from_uk 为空的消息整体丢弃
+        // 同一份文件出现在多条消息里只保留一行；这几条 msg_id 不是数字，
+        // 按保护规则退化为「保留第一条」（m1），msg_id / from_uk 为空的消息整体丢弃
         assertEquals(listOf("1", "2", "3"), entries.map { it.fileId })
         assertEquals(listOf("m1", "m2", "m3"), entries.map { it.messageId })
         assertTrue(entries.all { it.gid == "contact-777" })
+    }
+
+    @Test
+    fun `联系人重复文件挑 msg_id 最大的消息且与接口顺序无关`() {
+        val older = contactMessage("5155717895249185290", "旧.mp3")
+        val newest = contactMessage("5155717895249185299", "新.mp3")
+        val middle = contactMessage("5155717895249185295", "中.mp3")
+
+        // sessioninfo 没有 desc 参数，顺序无法从项目内证据确认；两种顺序必须给同一条引用
+        val asc = contactRoots(older, newest, middle)
+        val desc = contactRoots(newest, middle, older)
+
+        assertEquals(1, asc.size)
+        assertEquals("5155717895249185299", asc.single().messageId)
+        assertEquals("新.mp3", asc.single().name)
+        assertEquals(asc.single().messageId, desc.single().messageId)
+        assertEquals(asc.single().name, desc.single().name)
+    }
+
+    @Test
+    fun `msg_id 按数值比较且不受 Long 溢出影响`() {
+        // 20 位超过 Long.MAX：不能用 toLongOrNull，也不能按字符串字典序（"9" > "10..."）
+        val shortOld = contactMessage("9", "短旧.mp3")
+        val hugeNew = contactMessage("99999999999999999999", "超长新.mp3")
+
+        val hit = contactRoots(shortOld, hugeNew).single()
+
+        assertEquals("99999999999999999999", hit.messageId)
+        assertEquals("超长新.mp3", hit.name)
+    }
+
+    @Test
+    fun `重复组混入非数字 msg_id 时退回保留第一条`() {
+        val first = contactMessage("m-old", "第一条.mp3")
+        val biggerNumber = contactMessage("5155717895249185299", "数字更大.mp3")
+
+        val hit = contactRoots(first, biggerNumber).single()
+
+        assertEquals("m-old", hit.messageId)
+        assertEquals("第一条.mp3", hit.name)
+    }
+
+    @Test
+    fun `数字 msg_id 下不同发送者仍然不合并`() {
+        val a = contactMessage("5155717895249185291", "a.mp3", owner = "777")
+        val b = contactMessage("5155717895249185292", "b.mp3", owner = "888")
+
+        val entries = contactRoots(a, b)
+
+        assertEquals(2, entries.size)
+        assertEquals(listOf("777", "888"), entries.map { it.owner })
     }
 
     @Test

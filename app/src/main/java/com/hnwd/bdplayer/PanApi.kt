@@ -664,6 +664,26 @@ internal object PanApi {
         }
     }
 
+    /**
+     * 联系人根目录去重：同一个 (owner, fs_id) 可能出现在多条消息里。
+     *
+     * 不去赌 `/mbox/msg/sessioninfo` 的返回顺序 —— 该接口没有 `desc` 参数，项目内
+     * 也没有它的响应样本可用来确认「新在前还是旧在前」。百度 `msg_id` 是 19 位时序
+     * 数字（见 `tools/download222.devtools` 里 shareinfo 请求的 msg_id），数值越大越新，
+     * 于是显式挑最大的那条消息引用：接口顺序怎么变，结果都一致，也不会拿到旧消息
+     * 的过期引用去下钻。
+     *
+     * 保护：只要组里出现非数字 msg_id（老数据 / 接口改版），就不做排序假设，
+     * 退回「保留第一条」的原行为，避免把不可比的 id 乱排。
+     */
+    private fun newestContactEntry(group: List<PanEntry>): PanEntry {
+        val ranks = group.mapNotNull { it.messageId.toBigIntegerOrNull() }
+        if (ranks.size != group.size) return group.first()
+        var best = 0
+        for (index in 1 until ranks.size) if (ranks[index] > ranks[best]) best = index
+        return group[best]
+    }
+
     fun parseRoots(json: JSONObject, gid: String): List<PanEntry> {
         val records = json.getJSONObject("records")
         if (isContactSource(gid)) {
@@ -683,7 +703,10 @@ internal object PanApi {
                 ).flatMap { it.objects() }
                     .distinctBy { it.getString("fs_id") }
                     .map { file -> entry(file, gid, messageId, owner) }
-            }.distinctBy { it.owner to it.fileId }
+            }
+                .groupBy { it.owner to it.fileId }
+                .values
+                .map { newestContactEntry(it) }
         }
         return records.getJSONArray("msg_list").objects().flatMap { message ->
             message.getJSONArray("file_list").objects().map { file ->
