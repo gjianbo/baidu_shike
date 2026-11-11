@@ -73,7 +73,8 @@ h2.sec{font-size:18px;margin:48px 0 6px;font-weight:650}
   color:rgba(255,255,255,.4);z-index:3;text-transform:uppercase}
 .v-hit{position:absolute;inset:0;z-index:5;cursor:pointer}
 /* 单行控制条 */
-.v-controls{position:absolute;left:0;right:0;bottom:0;height:42px;z-index:12;
+/* 单行控制条叠在 16:9 画面内底部：不占布局高度，课程列表位置恒定 */
+.v-controls{position:absolute;left:0;right:0;top:144px;bottom:auto;height:42px;z-index:12;
   display:flex;align-items:center;gap:8px;padding:0 12px 6px;
   opacity:0;transform:translateY(8px);transition:.22s ease;pointer-events:none}
 .controls-on .v-controls{opacity:1;transform:none;pointer-events:auto}
@@ -131,7 +132,7 @@ h2.sec{font-size:18px;margin:48px 0 6px;font-weight:650}
 .l-frame::after{content:"";position:absolute;inset:0;
   background:linear-gradient(180deg,rgba(0,0,0,.5),transparent 24%,transparent 62%,rgba(0,0,0,.78))}
 .l-topbar{background:var(--scrim);height:48px;padding-top:12px}
-.l-controls{bottom:0;height:46px;padding:0 18px 8px}
+.l-controls{top:auto;bottom:0;height:46px;padding:0 18px 8px}
 .l-controls .tm{font-size:10.5px}
 .land .ic svg{width:21px;height:21px}
 .l-side{position:absolute;left:16px;top:50%;transform:translateY(-50%);z-index:12;
@@ -227,7 +228,7 @@ tr:last-child td{border-bottom:none}
 <p class="tip">可交互：<kbd>点视频画面</kbd> 切换控制层　<kbd>点 1.0x</kbd> 倍速档位　<kbd>点 ···</kbd> 动作菜单　<kbd>点转音频</kbd> 音频态　<kbd>点音频 ☰列表</kbd> 抽屉　<kbd>点收藏</kbd> 高亮　<kbd>点图片翻页</kbd> 换索引</p>
 
 <h2 class="sec">一、视频 · 竖屏</h2>
-<p class="sub">控制层默认隐藏；单击唤出单行控制条，3 秒收起。课程列表仍在下方，但收起时上移填补（已实现）。</p>
+<p class="sub">控制层默认隐藏；单击唤出<b>叠在 16:9 画面内底部</b>的单行控制条，3 秒收起。控制条不占布局高度，课程列表始终从画面下沿开始，显隐都不产生空白。</p>
 <div class="row">
 
   <div class="unit">
@@ -321,7 +322,7 @@ tr:last-child td{border-bottom:none}
         <div>0.75x</div><div class="sel">1.0x</div><div>1.25x</div><div>1.5x</div><div>2.0x</div><div>3.0x</div>
       </div>
     </div></div>
-    <p class="cap"><b>控制层显示</b>只有一行：播放 · 时间 · 轨道 · 时长 · 倍速 · 全屏</p>
+    <p class="cap"><b>控制层显示</b>单行叠在画面上：播放 · 时间 · 轨道 · 时长 · 倍速 · 全屏（不占位）</p>
   </div>
 
   <div class="unit">
@@ -356,7 +357,7 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <h2 class="sec">二、视频 · 横屏</h2>
-<p class="sub">四槽全部叠加在画面上，控制条仍是同一行；横屏不设「转音频」（语义与看满屏互斥）。</p>
+<p class="sub">四槽全部叠加在画面上，控制条仍是同一行、叠在画面底部；横屏不设「转音频」（语义与看满屏互斥）。</p>
 <div class="row">
   <div class="unit" style="width:700px">
     <div class="phone land"><div class="screen controls-on" id="l1">
@@ -510,7 +511,7 @@ tr:last-child td{border-bottom:none}
 <h2 class="sec">五、这套原型遵循的规则</h2>
 <div class="rules">
   <div class="rule"><div class="n">P1</div><h3>一屏一个主体</h3><p>视频是画面、音频是圆形封面、图片是原图。课程列表、来源/状态、多余文字全部收走。</p></div>
-  <div class="rule"><div class="n">P2</div><h3>控制一行、沉到底部</h3><p>视频三行控制层压成一行；音频动作栏 + 进度 + 传输组集中在底部一坨，中间大留白。</p></div>
+  <div class="rule"><div class="n">P2</div><h3>控制一行、沉到底部</h3><p>视频三行控制层压成一行并<b>叠在画面内底部</b>，不再占位；音频动作栏 + 进度 + 传输组集中在底部一坨，中间大留白。</p></div>
   <div class="rule"><div class="n">P3</div><h3>顶栏轻、动作收进 ···</h3><p>透明 scrim + 两行标题；选集/收藏/定时/转音频/文件信息进弹层，低频动作不常驻。</p></div>
 </div>
 <table>
