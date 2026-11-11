@@ -4333,12 +4333,6 @@ class MainActivity : AppCompatActivity() {
             textSize = 10.5f
             setTextColor(color(R.color.ink3))
         }
-        val times = row().apply {
-            gravity = Gravity.CENTER_VERTICAL
-            addView(currentTime)
-            addView(View(this@MainActivity), LinearLayout.LayoutParams(0, 1, 1f))
-            addView(totalTime)
-        }
         fun icon(res: Int): ImageView = ImageView(this).apply {
             setImageResource(res)
             setPadding(dp(13), dp(13), dp(13), dp(13))
@@ -4346,43 +4340,29 @@ class MainActivity : AppCompatActivity() {
         }
         val previous = icon(R.drawable.ic_skip_prev)
         previous.contentDescription = "上一节"
-        val back10 = icon(R.drawable.ic_replay30).apply { contentDescription = "后退 30 秒" }
         val play = ImageView(this).apply {
             setBackgroundResource(R.drawable.bg_play_accent)
             setPadding(dp(13), dp(13), dp(13), dp(13))
             setImageResource(R.drawable.ic_play)
             setColorFilter(color(R.color.onAccent))
         }
-        val forward10 = icon(R.drawable.ic_forward30).apply { contentDescription = "前进 30 秒" }
         val next = icon(R.drawable.ic_skip_next).apply { contentDescription = "下一节" }
-        val speed = headAction("") {}.apply {
-            setPadding(dp(4), 0, dp(4), 0)
+        // D 槽「倍速」的标签；update() 里仍通过 speed.text 更新当前档位
+        val speed = TextView(this).apply {
+            textSize = 10f
+            setTextColor(color(R.color.ink3))
+            gravity = Gravity.CENTER
             maxLines = 1
         }
-        speed.setOnClickListener {
-            PopupMenu(this, speed, Gravity.END).apply {
-                PlaybackSpeed.values.forEachIndexed { index, value ->
-                    menu.add(0, index, index, PlaybackSpeed.spoken(value))
-                        .setChecked(value == player.playbackParameters.speed)
-                }
-                menu.setGroupCheckable(0, true, true)
-                setOnMenuItemClickListener {
-                    val value = PlaybackSpeed.values[it.itemId]
-                    player.setPlaybackParameters(PlaybackParameters(value))
-                    PlaybackSpeed.setAudio(this@MainActivity, value)
-                    true
-                }
-                show()
-            }
-        }
-        val controls = row().apply {
+        // 传输组固定三件、严格对称：上一 · 播放 · 下一，播放键恒在中线
+        val transport = row().apply {
             gravity = Gravity.CENTER
-            listOf(previous, back10, play, forward10, next).forEachIndexed { index, view ->
-                val params = if (index == 2) LinearLayout.LayoutParams(dp(48), dp(48))
-                else LinearLayout.LayoutParams(0, dp(46), 1f)
-                addView(view, params)
-            }
-            addView(speed, LinearLayout.LayoutParams(dp(48), dp(44)))
+            addView(previous, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(play, LinearLayout.LayoutParams(dp(56), dp(56)).apply {
+                marginStart = dp(26)
+                marginEnd = dp(26)
+            })
+            addView(next, LinearLayout.LayoutParams(dp(44), dp(44)))
         }
         val favorite = audioIconButton(R.drawable.ic_star, "收藏", color(R.color.ink3)) {}
         fun paintFavorite(starred: Boolean) {
@@ -4400,7 +4380,7 @@ class MainActivity : AppCompatActivity() {
                 else -> "睡眠定时"
             }
         }
-        timer.setOnClickListener { anchor ->
+        fun showTimerMenu(anchor: View) {
             val menu = PopupMenu(this, anchor, Gravity.END)
             menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed() && !SleepTimer.stopAfterCurrent
             listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
@@ -4440,11 +4420,7 @@ class MainActivity : AppCompatActivity() {
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
                 setTextColor(color(R.color.ink))
             }, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-            addView(row().apply {
-                addView(timer, LinearLayout.LayoutParams(dp(44), dp(44)))
-                addView(favorite, LinearLayout.LayoutParams(dp(44), dp(44)))
-                addView(stop, LinearLayout.LayoutParams(dp(44), dp(44)))
-            }, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL))
+            addView(stop, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL))
         }
         var loadingCourses = false
         var checkedPagination: Pair<PanEntry, String?>? = null
@@ -4464,34 +4440,150 @@ class MainActivity : AppCompatActivity() {
                 }
             },
         )
-        val header = column().apply {
-            setPadding(dp(20), dp(14), dp(20), dp(18))
-            addView(titleView)
-            addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(4) })
-            addView(message)
-            addView(cover, LinearLayout.LayoutParams(dp(68), dp(68)).apply {
+        // ---- 四槽骨架：A 顶栏 / B 内容 / C 进度 / D 动作 ----
+        // B 槽：大封面 + 标题 + 来源 + 状态整体居中，传输组浮在内容底部
+        val stageColumn = column().apply {
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            addView(cover, LinearLayout.LayoutParams(dp(200), dp(200)).apply {
                 gravity = Gravity.CENTER_HORIZONTAL
-                topMargin = dp(16)
+            })
+            addView(titleView, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) })
+            addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            addView(message, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            // 传输组跟在文案后面作为一个整体居中；不浮在槽底，避免列表收起后容器拉伸把两者拉开
+            addView(transport, LinearLayout.LayoutParams(-2, -2).apply {
+                gravity = Gravity.CENTER_HORIZONTAL
+                topMargin = dp(20)
             })
         }
-        val playbackControls = column().apply {
-            addView(header)
-            addView(column().apply {
-                setBackgroundResource(R.drawable.bg_audio_controls)
-                setPadding(dp(12), dp(6), dp(12), dp(8))
-                addView(seek, LinearLayout.LayoutParams(-1, -2))
-                addView(times)
-                addView(controls)
-            }, LinearLayout.LayoutParams(-1, -2).apply {
-                setMargins(dp(12), 0, dp(12), dp(12))
-            })
+        val stage = FrameLayout(this).apply {
+            addView(stageColumn, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
         }
-        val controlsScroll = ScrollView(this).apply {
-            addView(playbackControls, FrameLayout.LayoutParams(-1, -2))
+        // C 槽：时间 — 轨道 — 时间，同一行
+        val progressRow = row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), 0, dp(16), 0)
+            addView(currentTime)
+            addView(seek, LinearLayout.LayoutParams(0, -2, 1f).apply {
+                marginStart = dp(10)
+                marginEnd = dp(10)
+            })
+            addView(totalTime)
+        }
+        fun seekBy(deltaMs: Long) {
+            val duration = player.duration
+            val target = player.currentPosition + deltaMs
+            player.seekTo(if (duration > 0) target.coerceIn(0, duration) else target.coerceAtLeast(0L))
+        }
+        /** D 槽一格：图标 24 + 标签 10sp，整格可点，与视频页视觉一致 */
+        fun actionCell(iconView: ImageView, labelView: TextView, desc: String): LinearLayout {
+            iconView.apply {
+                isClickable = false
+                setBackgroundResource(android.R.color.transparent)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+                setPadding(dp(2), dp(2), dp(2), dp(2))
+                layoutParams = LinearLayout.LayoutParams(dp(24), dp(24))
+            }
+            labelView.apply {
+                textSize = 10f
+                setTextColor(color(R.color.ink3))
+                gravity = Gravity.CENTER
+                maxLines = 1
+            }
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundResource(R.drawable.bg_icon_ripple)
+                isClickable = true
+                contentDescription = desc
+                addView(iconView)
+                addView(labelView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
+            }
+        }
+        // D 槽：选集 · 倍速 · 收藏 · 定时 · 更多（5 等分，顺序与视频页共有项一致）
+        val speedIcon = audioIconButton(R.drawable.ic_speed, "播放倍速", color(R.color.ink3)) {}
+        val speedCell = actionCell(speedIcon, speed, "播放倍速")
+        speedCell.setOnClickListener { anchor ->
+            PopupMenu(this, anchor, Gravity.END).apply {
+                PlaybackSpeed.values.forEachIndexed { index, value ->
+                    menu.add(0, index, index, PlaybackSpeed.spoken(value))
+                        .setChecked(value == player.playbackParameters.speed)
+                }
+                menu.setGroupCheckable(0, true, true)
+                setOnMenuItemClickListener {
+                    val value = PlaybackSpeed.values[it.itemId]
+                    player.setPlaybackParameters(PlaybackParameters(value))
+                    PlaybackSpeed.setAudio(this@MainActivity, value)
+                    true
+                }
+                show()
+            }
+        }
+        val favoriteCell = actionCell(favorite, TextView(this).apply { text = "收藏" }, "收藏")
+        val timerCell = actionCell(timer, TextView(this).apply { text = "定时" }, "睡眠定时")
+        timerCell.setOnClickListener { showTimerMenu(it) }
+        val courseCell = actionCell(
+            audioIconButton(R.drawable.ic_layers, "选集", color(R.color.ink3)) {},
+            TextView(this).apply { text = "选集" }, "选集",
+        )
+        val moreCell = actionCell(
+            audioIconButton(R.drawable.ic_settings, "更多", color(R.color.ink3)) {},
+            TextView(this).apply { text = "更多" }, "更多",
+        )
+        moreCell.setOnClickListener { anchor ->
+            PopupMenu(this, anchor, Gravity.END).apply {
+                menu.add(0, 0, 0, "后退 30 秒")
+                menu.add(0, 1, 1, "前进 30 秒")
+                menu.add(0, 2, 2, "停止播放")
+                setOnMenuItemClickListener {
+                    when (it.itemId) {
+                        0 -> seekBy(-30_000L)
+                        1 -> seekBy(30_000L)
+                        else -> { stopBackgroundAudio(); closeAudioPage() }
+                    }
+                    true
+                }
+                show()
+            }
+        }
+        val actionBar = row().apply {
+            gravity = Gravity.CENTER
+            listOf(courseCell, speedCell, favoriteCell, timerCell, moreCell).forEach { cell ->
+                addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
+            }
+        }
+        val playerPanel = column().apply {
+            addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(progressRow, LinearLayout.LayoutParams(-1, dp(40)))
+            addView(actionBar, LinearLayout.LayoutParams(-1, dp(66)))
         }
         val playbackBody = column().apply {
-            addView(controlsScroll, LinearLayout.LayoutParams(-1, -2))
+            // 播放面板占 2 份：封面 + 标题 + 浮底传输组需要约 400dp，列表 1 份即可
+            addView(playerPanel, LinearLayout.LayoutParams(-1, 0, 2f))
             addView(courseList.view, LinearLayout.LayoutParams(-1, 0, 1f))
+        }
+        // 「选集」用弹层看大列表，与视频页横屏的选集行为一致。
+        // 主布局里的列表始终常驻，不在显隐之间改变占位，因此不会出现空白块。
+        val listHolder = FrameLayout(this)
+        courseCell.setOnClickListener {
+            val parent = courseList.view.parent as? ViewGroup ?: return@setOnClickListener
+            parent.removeView(courseList.view)
+            val rows = minOf(6, PlaybackQueueState.entries.size.coerceAtLeast(1))
+            val height = minOf(dp(52) + dp(52) * rows + dp(24), (resources.displayMetrics.heightPixels * 0.72f).toInt())
+            listHolder.addView(courseList.view, FrameLayout.LayoutParams(-1, height))
+            val sheet = android.app.AlertDialog.Builder(this)
+                .setView(listHolder)
+                .setNegativeButton("关闭", null)
+                .create()
+            sheet.setOnDismissListener {
+                listHolder.removeView(courseList.view)
+                if (courseList.view.parent == null) {
+                    playbackBody.addView(courseList.view, LinearLayout.LayoutParams(-1, 0, 1f))
+                }
+            }
+            sheet.show()
+            sheet.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setTextColor(color(R.color.accent))
         }
         val playbackContent = column().apply {
             isClickable = true
@@ -4513,8 +4605,8 @@ class MainActivity : AppCompatActivity() {
             val orientation = if (split) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
             if (playbackBody.orientation != orientation) {
                 playbackBody.orientation = orientation
-                controlsScroll.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
-                else LinearLayout.LayoutParams(-1, -2)
+                playerPanel.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
+                else LinearLayout.LayoutParams(-1, 0, 2f)
                 courseList.view.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
                 else LinearLayout.LayoutParams(-1, 0, 1f)
             }
@@ -4522,7 +4614,7 @@ class MainActivity : AppCompatActivity() {
             if (compact != compactHeader) {
                 compactHeader = compact
                 cover.visibility = if (compact) View.GONE else View.VISIBLE
-                header.setPadding(dp(20), dp(if (compact) 6 else 14), dp(20), dp(if (compact) 6 else 18))
+                stageColumn.setPadding(dp(20), dp(if (compact) 6 else 12), dp(20), dp(if (compact) 6 else 12))
                 titleView.maxLines = if (compact) 1 else 2
             }
         }
@@ -4562,7 +4654,7 @@ class MainActivity : AppCompatActivity() {
             else courseList.update(listOfNotNull(entry), if (entry == null) -1 else 0, false, false)
             val rate = player.playbackParameters.speed
             speed.text = PlaybackSpeed.label(rate)
-            speed.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(rate)}"
+            speedCell.contentDescription = "播放倍速，当前 ${PlaybackSpeed.spoken(rate)}"
             play.contentDescription = if (player.isPlaying) "暂停" else "播放"
             previous.isEnabled = entry?.let { siblingOf(it, -1) != null } == true
             next.isEnabled = entry?.let { siblingOf(it, 1) != null } == true
@@ -4605,16 +4697,10 @@ class MainActivity : AppCompatActivity() {
         }
         previous.setOnClickListener { currentAudioEntry(player)?.let { playSibling(it, -1) } }
         next.setOnClickListener { currentAudioEntry(player)?.let { playSibling(it, 1) } }
-        // 显式 30 秒：和通知栏 / 耳机线控的 30 秒保持一致，不依赖播放器增量
-        back10.setOnClickListener {
-            player.seekTo((player.currentPosition - 30_000L).coerceAtLeast(0L))
-        }
-        forward10.setOnClickListener {
-            val target = player.currentPosition + 30_000L
-            val duration = player.duration
-            player.seekTo(if (duration > 0) target.coerceAtMost(duration) else target)
-        }
-        favorite.setOnClickListener {
+        // 显式 30 秒：长按上一/下一；同步收进「更多」菜单，和通知栏/线控保持一致
+        previous.setOnLongClickListener { seekBy(-30_000L); true }
+        next.setOnLongClickListener { seekBy(30_000L); true }
+        favoriteCell.setOnClickListener {
             currentAudioEntry(player)?.let { toggleFavorite(it) }
             update()
         }
