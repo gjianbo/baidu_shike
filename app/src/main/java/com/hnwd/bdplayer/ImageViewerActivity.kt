@@ -1,6 +1,7 @@
 package com.hnwd.bdplayer
 
 import android.content.ActivityNotFoundException
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.graphics.Color
@@ -11,7 +12,9 @@ import android.graphics.drawable.AnimatedImageDrawable
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
 import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
@@ -26,6 +29,7 @@ import android.webkit.WebSettings
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -90,10 +94,13 @@ class ImageViewerActivity : AppCompatActivity() {
     private lateinit var image: ZoomImageView
     private lateinit var hint: TextView
     private var titleView: TextView? = null
-    private var prevButton: TextView? = null
-    private var nextButton: TextView? = null
-    private var counter: TextView? = null
-    private var externalButton: TextView? = null
+    private var subtitle: TextView? = null
+    private var sizeChip: TextView? = null
+    private var prevButton: View? = null
+    private var nextButton: View? = null
+    private var imageWidth = 0
+    private var imageHeight = 0
+    private var imageBytes = 0L
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
     @Suppress("DEPRECATION")
@@ -156,13 +163,23 @@ class ImageViewerActivity : AppCompatActivity() {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER,
         ))
         root.addView(topBar(), FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, dp(48), Gravity.TOP,
+            ViewGroup.LayoutParams.MATCH_PARENT, dp(64), Gravity.TOP,
         ))
-        if (count > 1) {
-            root.addView(bottomBar(), FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM,
-            ))
+        sizeChip = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            gravity = Gravity.CENTER
+            setBackgroundResource(R.drawable.bg_video_chip)
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            visibility = View.GONE
         }
+        root.addView(sizeChip, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+        ).apply { bottomMargin = dp(84) })
+        root.addView(actionBar(), FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM,
+        ))
         setContentView(root)
         updateChrome()
         if (previewMode) showAt(index) else localFile?.let(::decodeLocal)
@@ -172,8 +189,8 @@ class ImageViewerActivity : AppCompatActivity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = ColorDrawable(Color.argb(190, 0, 0, 0))
-            setPadding(dp(6), 0, dp(8), 0)
+            setBackgroundResource(R.drawable.bg_video_scrim_top)
+            setPadding(dp(6), dp(6), dp(8), dp(6))
         }
         val back = ImageView(this).apply {
             setImageResource(R.drawable.ic_arrow_back)
@@ -188,54 +205,175 @@ class ImageViewerActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             textSize = 14f
             maxLines = 1
+            gravity = Gravity.CENTER
             ellipsize = TextUtils.TruncateAt.MIDDLE
         }
+        val sub = TextView(this).apply {
+            setTextColor(Color.argb(180, 255, 255, 255))
+            textSize = 10.5f
+            maxLines = 1
+            gravity = Gravity.CENTER
+        }
         titleView = label
+        subtitle = sub
+        val titles = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            addView(label, LinearLayout.LayoutParams(-1, -2))
+            addView(sub, LinearLayout.LayoutParams(-1, -2))
+        }
+        val more = ImageView(this).apply {
+            setImageResource(R.drawable.ic_more_horiz)
+            setColorFilter(Color.WHITE)
+            scaleType = ImageView.ScaleType.CENTER_INSIDE
+            setPadding(dp(11), dp(11), dp(11), dp(11))
+            setBackgroundResource(R.drawable.bg_icon_ripple)
+            contentDescription = "更多"
+            setOnClickListener { anchor ->
+                PopupMenu(this@ImageViewerActivity, anchor, Gravity.END).apply {
+                    menu.add(0, 0, 0, "用其他应用打开")
+                    menu.add(0, 1, 1, "文件信息")
+                    setOnMenuItemClickListener {
+                        when (it.itemId) {
+                            0 -> openExternally()
+                            else -> showInfo()
+                        }
+                        true
+                    }
+                    show()
+                }
+            }
+        }
         bar.addView(back, LinearLayout.LayoutParams(dp(44), dp(44)))
-        bar.addView(label, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        externalButton = textButton("用其他应用打开") { openExternally() }.also { bar.addView(it) }
+        bar.addView(titles, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        bar.addView(more, LinearLayout.LayoutParams(dp(44), dp(44)))
         return bar
     }
 
-    private fun bottomBar(): View {
+    /** 底部 6 格动作栏：图标 22 + 标签 10sp，整格可点。 */
+    private fun actionBar(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             background = ColorDrawable(Color.argb(190, 0, 0, 0))
-            setPadding(dp(8), dp(2), dp(8), dp(2))
+            setPadding(dp(4), dp(8), dp(4), dp(10))
         }
-        val prev = textButton("上一张") { switchTo(index - 1) }
-        val next = textButton("下一张") { switchTo(index + 1) }
-        val label = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 13f
-            gravity = Gravity.CENTER
+        fun cell(iconRes: Int, label: String, desc: String, onClick: () -> Unit): LinearLayout {
+            val icon = ImageView(this).apply {
+                setImageResource(iconRes)
+                setColorFilter(Color.WHITE)
+                scaleType = ImageView.ScaleType.CENTER_INSIDE
+            }
+            val text = TextView(this).apply {
+                text = label
+                setTextColor(Color.argb(205, 255, 255, 255))
+                textSize = 10f
+                gravity = Gravity.CENTER
+                maxLines = 1
+            }
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER
+                setBackgroundResource(R.drawable.bg_icon_ripple)
+                isClickable = true
+                contentDescription = desc
+                addView(icon, LinearLayout.LayoutParams(dp(22), dp(22)))
+                addView(text, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
+                setOnClickListener { onClick() }
+            }
         }
+        val prev = cell(R.drawable.ic_chevron_left, "上一张", "上一张") { switchTo(index - 1) }
+        val next = cell(R.drawable.ic_chevron_right, "下一张", "下一张") { switchTo(index + 1) }
         prevButton = prev
         nextButton = next
-        counter = label
-        bar.addView(prev, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        bar.addView(label, LinearLayout.LayoutParams(dp(88), ViewGroup.LayoutParams.WRAP_CONTENT))
-        bar.addView(next, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        listOf(
+            prev, next,
+            cell(R.drawable.ic_image, "打开", "用其他应用打开") { openExternally() },
+            cell(R.drawable.ic_share, "分享", "分享图片") { shareImage() },
+            cell(R.drawable.ic_download, "保存", "保存到相册") { saveToGallery() },
+            cell(R.drawable.ic_info, "信息", "文件信息") { showInfo() },
+        ).forEach { item -> bar.addView(item, LinearLayout.LayoutParams(0, -2, 1f)) }
         return bar
     }
 
-    private fun textButton(label: String, onClick: () -> Unit) = TextView(this).apply {
-        text = label
-        setTextColor(Color.WHITE)
-        textSize = 13f
-        gravity = Gravity.CENTER
-        setPadding(dp(10), dp(9), dp(10), dp(9))
-        setBackgroundResource(R.drawable.bg_icon_ripple)
-        isFocusable = true
-        setOnClickListener { onClick() }
+    private fun sizeLabel(): String {
+        val size = when {
+            imageBytes >= 1024L * 1024 -> String.format("%.1f MB", imageBytes / 1024f / 1024f)
+            imageBytes >= 1024L -> String.format("%.0f KB", imageBytes / 1024f)
+            imageBytes > 0 -> "$imageBytes B"
+            else -> ""
+        }
+        val dim = if (imageWidth > 0 && imageHeight > 0) "$imageWidth × $imageHeight" else ""
+        val parts = listOf(size, dim).filter { it.isNotEmpty() }
+        return if (parts.isEmpty()) "" else (listOf("原图") + parts).joinToString(" · ")
+    }
+
+    private fun showInfo() {
+        android.app.AlertDialog.Builder(this)
+            .setTitle(titleView?.text ?: "图片")
+            .setMessage(listOf(sizeLabel(), "第 ${index + 1} 张 / 共 $count 张")
+                .filter { part -> part.isNotEmpty() }.joinToString("\n"))
+            .setPositiveButton("关闭", null)
+            .show()
+    }
+
+    /** 分享：有本地原图走 FileProvider 的 content://，否则退化为分享图片地址。 */
+    private fun shareImage() {
+        val target = localFile
+        val send = Intent(Intent.ACTION_SEND)
+        if (target != null) {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", target)
+            send.type = mime
+            send.putExtra(Intent.EXTRA_STREAM, uri)
+            send.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        } else if (currentUrl.isNotEmpty()) {
+            send.type = "text/plain"
+            send.putExtra(Intent.EXTRA_TEXT, currentUrl)
+        } else return
+        try {
+            startActivity(Intent.createChooser(send, "分享图片"))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "没有可用的分享应用", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    /** 保存到系统相册：minSdk 29 起用 MediaStore + IS_PENDING，不需要写权限。 */
+    private fun saveToGallery() {
+        val source = localFile
+        if (source == null || !source.exists()) {
+            Toast.makeText(this, "原图尚未加载完成，请稍后再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, items.getOrNull(index)?.title ?: "image_${System.currentTimeMillis()}")
+            put(MediaStore.Images.Media.MIME_TYPE, mime)
+            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: run {
+            Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            contentResolver.openOutputStream(uri)?.use { out -> source.inputStream().use { it.copyTo(out) } }
+            if (Build.VERSION.SDK_INT >= 29) {
+                values.clear()
+                values.put(MediaStore.Images.Media.IS_PENDING, 0)
+                contentResolver.update(uri, values, null, null)
+            }
+            Toast.makeText(this, "已保存到相册", Toast.LENGTH_SHORT).show()
+        } catch (_: Exception) {
+            contentResolver.delete(uri, null, null)
+            Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun updateChrome() {
         titleView?.text = if (previewMode) items[index].title
         else intent.getStringExtra(EXTRA_TITLE).orEmpty()
-        externalButton?.isEnabled = localFile != null || currentUrl.isNotEmpty()
-        counter?.text = "${index + 1} / $count"
+        subtitle?.text = "第 ${index + 1} 张 · 共 $count 张"
+        val label = sizeLabel()
+        sizeChip?.text = label
+        sizeChip?.visibility = if (label.isEmpty()) View.GONE else View.VISIBLE
         prevButton?.let { button ->
             button.isEnabled = index > 0
             button.alpha = if (button.isEnabled) 1f else 0.4f
@@ -268,6 +406,7 @@ class ImageViewerActivity : AppCompatActivity() {
             return
         }
         drawableCache.get(item.key)?.let { (drawable, url) ->
+            imageBytes = 0L
             currentUrl = url
             showDrawable(drawable)
             prefetchNeighbours()
@@ -276,6 +415,7 @@ class ImageViewerActivity : AppCompatActivity() {
         ImagePreviewLoader.load(item, provider, userAgent = metadataUserAgent) { result ->
             if (!isCurrent(request)) return@load
             result.onSuccess { preview ->
+                imageBytes = preview.bytes.size.toLong()
                 decodeInBackground(
                     onSuccess = { drawable ->
                         currentUrl = preview.url
@@ -317,6 +457,7 @@ class ImageViewerActivity : AppCompatActivity() {
         mime = ImageTypes.mime(ext)
         fun showFile(file: File) {
             check(ImageCache.retain(file)) { "图片缓存已失效，请重试" }
+            imageBytes = file.length()
             localFile = file
             updateChrome()
             decodeLocal(file)
@@ -378,7 +519,9 @@ class ImageViewerActivity : AppCompatActivity() {
         }
     }
 
-    private fun decodeLocal(target: File) = decodeInBackground(
+    private fun decodeLocal(target: File) {
+        imageBytes = target.length()
+        decodeInBackground(
         onSuccess = { drawable ->
             showDrawable(drawable)
             if (previewMode) prefetchNeighbours()
@@ -387,6 +530,7 @@ class ImageViewerActivity : AppCompatActivity() {
     ) {
         ImageDecoder.decodeDrawable(ImageDecoder.createSource(target)) { decoder, info, _ ->
             configureDecoder(decoder, info)
+        }
         }
     }
 
@@ -409,6 +553,8 @@ class ImageViewerActivity : AppCompatActivity() {
         val maxH = (metrics.heightPixels * 2).coerceAtMost(MAX_DECODE_EDGE)
         val width = info.size.width
         val height = info.size.height
+        imageWidth = width
+        imageHeight = height
         if (width > maxW || height > maxH) {
             val ratio = maxOf(width.toFloat() / maxW, height.toFloat() / maxH)
             decoder.setTargetSize(

@@ -649,8 +649,8 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         textSize = 17f
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         setTextColor(color(R.color.ink))
-        gravity = Gravity.START
-        maxLines = 2
+        gravity = Gravity.CENTER
+        maxLines = 1
         setLineSpacing(0f, 1.08f)
         ellipsize = android.text.TextUtils.TruncateAt.END
         isAccessibilityHeading = true
@@ -670,7 +670,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     val cover = ImageView(this).apply {
         setImageResource(R.drawable.ic_audio_wave)
         setColorFilter(color(R.color.accent))
-        setBackgroundResource(R.drawable.bg_fmt_audio)
+        setBackgroundResource(R.drawable.bg_audio_disc)
         scaleType = ImageView.ScaleType.CENTER_INSIDE
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }
@@ -697,7 +697,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     val previous = icon(R.drawable.ic_skip_prev)
     previous.contentDescription = "上一节"
     val play = ImageView(this).apply {
-        setBackgroundResource(R.drawable.bg_play_accent)
+        setBackgroundResource(R.drawable.bg_play_circle)
         setPadding(dp(13), dp(13), dp(13), dp(13))
         setImageResource(R.drawable.ic_play)
         setColorFilter(color(R.color.onAccent))
@@ -710,15 +710,17 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         gravity = Gravity.CENTER
         maxLines = 1
     }
-    // 传输组固定三件、严格对称：上一 · 播放 · 下一，播放键恒在中线
+    // 底部传输组：上一 · 大圆播放 · 下一 · 列表（列表改 BottomSheet，不常驻）
+    val listButton = icon(R.drawable.ic_layers).apply { contentDescription = "播放列表" }
     val transport = row().apply {
         gravity = Gravity.CENTER
         addView(previous, LinearLayout.LayoutParams(dp(44), dp(44)))
-        addView(play, LinearLayout.LayoutParams(dp(56), dp(56)).apply {
-            marginStart = dp(26)
-            marginEnd = dp(26)
+        addView(play, LinearLayout.LayoutParams(dp(64), dp(64)).apply {
+            marginStart = dp(24)
+            marginEnd = dp(24)
         })
         addView(next, LinearLayout.LayoutParams(dp(44), dp(44)))
+        addView(listButton, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(12) })
     }
     val favorite = audioIconButton(R.drawable.ic_star, "收藏", color(R.color.ink3)) {}
     fun paintFavorite(starred: Boolean) {
@@ -760,23 +762,35 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         menu.show()
     }
     paintTimer()
-    val stop = audioIconButton(R.drawable.ic_close, "停止播放", color(R.color.ink2)) {
-        stopBackgroundAudio()
+    val back = audioIconButton(R.drawable.ic_chevron_down, "收起播放页", color(R.color.ink2)) {
         closeAudioPage()
     }
-    val back = audioIconButton(R.drawable.ic_arrow_back, "返回", color(R.color.ink2)) {
-        closeAudioPage()
-    }
+    val moreTop = audioIconButton(R.drawable.ic_more_horiz, "更多", color(R.color.ink2)) {}
     val topBar = FrameLayout(this).apply {
         setPadding(dp(6), 0, dp(6), 0)
         addView(back, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.CENTER_VERTICAL))
-        addView(TextView(this@showPlayback).apply {
-            text = "音频播放"
-            textSize = 15f
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            setTextColor(color(R.color.ink))
-        }, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-        addView(stop, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL))
+        addView(moreTop, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL))
+    }
+    moreTop.setOnClickListener { anchor ->
+        PopupMenu(this, anchor, Gravity.END).apply {
+            menu.add(0, 0, 0, "停止播放")
+            menu.add(0, 1, 1, "文件信息")
+            setOnMenuItemClickListener {
+                when (it.itemId) {
+                    0 -> { stopBackgroundAudio(); closeAudioPage() }
+                    else -> {
+                        val entry = currentAudioEntry(player)
+                        android.app.AlertDialog.Builder(this@showPlayback)
+                            .setTitle(entry?.name ?: "音频")
+                            .setMessage(entry?.let { PanApi.readablePath(it.path) }.orEmpty())
+                            .setPositiveButton("关闭", null)
+                            .show()
+                    }
+                }
+                true
+            }
+            show()
+        }
     }
     var loadingCourses = false
     var checkedPagination: Pair<PanEntry, String?>? = null
@@ -801,17 +815,15 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     val stageColumn = column().apply {
         gravity = Gravity.CENTER_HORIZONTAL
         setPadding(dp(20), dp(12), dp(20), dp(12))
-        addView(cover, LinearLayout.LayoutParams(dp(200), dp(200)).apply {
+        addView(cover, LinearLayout.LayoutParams(dp(220), dp(220)).apply {
             gravity = Gravity.CENTER_HORIZONTAL
         })
-        addView(titleView, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(18) })
-        addView(source, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        addView(titleView, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(22) })
+        // 来源与只在异常时出现的提示都不常驻，中间留白给封面
+        source.visibility = View.GONE
+        addView(source, LinearLayout.LayoutParams(-1, -2))
+        message.visibility = View.GONE
         addView(message, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
-        // 传输组跟在文案后面作为一个整体居中；不浮在槽底，避免列表收起后容器拉伸把两者拉开
-        addView(transport, LinearLayout.LayoutParams(-2, -2).apply {
-            gravity = Gravity.CENTER_HORIZONTAL
-            topMargin = dp(20)
-        })
     }
     val stage = FrameLayout(this).apply {
         addView(stageColumn, FrameLayout.LayoutParams(-1, -2, Gravity.CENTER))
@@ -857,7 +869,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
             addView(labelView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
         }
     }
-    // D 槽：选集 · 倍速 · 收藏 · 定时 · 更多（5 等分，顺序与视频页共有项一致）
+    // 动作栏（进度条上方）：倍速 · 定时 · −30 · +30 · 收藏 · 更多
     val speedIcon = audioIconButton(R.drawable.ic_speed, "播放倍速", color(R.color.ink3)) {}
     val speedCell = actionCell(speedIcon, speed, "播放倍速")
     speedCell.setOnClickListener { anchor ->
@@ -879,24 +891,32 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     val favoriteCell = actionCell(favorite, TextView(this).apply { text = "收藏" }, "收藏")
     val timerCell = actionCell(timer, TextView(this).apply { text = "定时" }, "睡眠定时")
     timerCell.setOnClickListener { showTimerMenu(it) }
-    val courseCell = actionCell(
-        audioIconButton(R.drawable.ic_layers, "选集", color(R.color.ink3)) {},
-        TextView(this).apply { text = "选集" }, "选集",
-    )
+    val back30Cell = actionCell(
+        audioIconButton(R.drawable.ic_replay30, "后退 30 秒", color(R.color.ink3)) {},
+        TextView(this).apply { text = "−30" }, "后退 30 秒",
+    ).apply { setOnClickListener { seekBy(-30_000L) } }
+    val forward30Cell = actionCell(
+        audioIconButton(R.drawable.ic_forward30, "前进 30 秒", color(R.color.ink3)) {},
+        TextView(this).apply { text = "+30" }, "前进 30 秒",
+    ).apply { setOnClickListener { seekBy(30_000L) } }
     val moreCell = actionCell(
         audioIconButton(R.drawable.ic_settings, "更多", color(R.color.ink3)) {},
         TextView(this).apply { text = "更多" }, "更多",
     )
     moreCell.setOnClickListener { anchor ->
         PopupMenu(this, anchor, Gravity.END).apply {
-            menu.add(0, 0, 0, "后退 30 秒")
-            menu.add(0, 1, 1, "前进 30 秒")
-            menu.add(0, 2, 2, "停止播放")
+            menu.add(0, 0, 0, "停止播放")
+            menu.add(0, 1, 1, "文件信息")
             setOnMenuItemClickListener {
                 when (it.itemId) {
-                    0 -> seekBy(-30_000L)
-                    1 -> seekBy(30_000L)
-                    else -> { stopBackgroundAudio(); closeAudioPage() }
+                    0 -> { stopBackgroundAudio(); closeAudioPage() }
+                    else -> {
+                        val entry = currentAudioEntry(player)
+                        android.app.AlertDialog.Builder(this@showPlayback)
+                            .setTitle(entry?.name ?: "音频")
+                            .setMessage(entry?.let { PanApi.readablePath(it.path) }.orEmpty())
+                            .setPositiveButton("关闭", null).show()
+                    }
                 }
                 true
             }
@@ -905,42 +925,30 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     }
     val actionBar = row().apply {
         gravity = Gravity.CENTER
-        listOf(courseCell, speedCell, favoriteCell, timerCell, moreCell).forEach { cell ->
+        listOf(speedCell, timerCell, back30Cell, forward30Cell, favoriteCell, moreCell).forEach { cell ->
             addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
         }
     }
     val playerPanel = column().apply {
         addView(stage, LinearLayout.LayoutParams(-1, 0, 1f))
-        addView(progressRow, LinearLayout.LayoutParams(-1, dp(40)))
         addView(actionBar, LinearLayout.LayoutParams(-1, dp(66)))
+        addView(progressRow, LinearLayout.LayoutParams(-1, dp(40)))
+        addView(transport, LinearLayout.LayoutParams(-1, dp(88)))
     }
-    val playbackBody = column().apply {
-        // 播放面板占 2 份：封面 + 标题 + 浮底传输组需要约 400dp，列表 1 份即可
-        addView(playerPanel, LinearLayout.LayoutParams(-1, 0, 2f))
-        addView(courseList.view, LinearLayout.LayoutParams(-1, 0, 1f))
+    // 列表改 Material BottomSheet：主布局不常驻，点底部 ☰ 上滑，布局占位恒定无空白。
+    val playbackBody = FrameLayout(this).apply {
+        addView(playerPanel, FrameLayout.LayoutParams(-1, -1))
     }
-    // 「选集」用弹层看大列表，与视频页横屏的选集行为一致。
-    // 主布局里的列表始终常驻，不在显隐之间改变占位，因此不会出现空白块。
     val listHolder = FrameLayout(this)
-    courseCell.setOnClickListener {
-        val parent = courseList.view.parent as? ViewGroup ?: return@setOnClickListener
-        parent.removeView(courseList.view)
-        val rows = minOf(6, PlaybackQueueState.entries.size.coerceAtLeast(1))
-        val height = minOf(dp(52) + dp(52) * rows + dp(24), (resources.displayMetrics.heightPixels * 0.72f).toInt())
-        listHolder.addView(courseList.view, FrameLayout.LayoutParams(-1, height))
-        val sheet = android.app.AlertDialog.Builder(this)
-            .setView(listHolder)
-            .setNegativeButton("关闭", null)
-            .create()
-        sheet.setOnDismissListener {
-            listHolder.removeView(courseList.view)
-            if (courseList.view.parent == null) {
-                playbackBody.addView(courseList.view, LinearLayout.LayoutParams(-1, 0, 1f))
-            }
-        }
-        sheet.show()
-        sheet.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).setTextColor(color(R.color.accent))
+    fun showPlaylist() {
+        val dialog = com.google.android.material.bottomsheet.BottomSheetDialog(this)
+        (courseList.view.parent as? ViewGroup)?.removeView(courseList.view)
+        listHolder.addView(courseList.view, FrameLayout.LayoutParams(-1, dp(420)))
+        dialog.setContentView(listHolder)
+        dialog.setOnDismissListener { listHolder.removeView(courseList.view) }
+        dialog.show()
     }
+    listButton.setOnClickListener { showPlaylist() }
     val playbackContent = column().apply {
         isClickable = true
         accessibilityPaneTitle = "音频播放"
@@ -954,24 +962,12 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     val page = centeredContent(playbackContent).apply { isClickable = true }
     var compactHeader = false
     page.addOnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
-        val width = right - left
         val height = bottom - top
-        val split = width >= dp(EXPANDED_WINDOW_DP) ||
-            (width >= dp(WIDE_WINDOW_DP) && height < dp(360))
-        val orientation = if (split) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
-        if (playbackBody.orientation != orientation) {
-            playbackBody.orientation = orientation
-            playerPanel.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
-            else LinearLayout.LayoutParams(-1, 0, 2f)
-            courseList.view.layoutParams = if (split) LinearLayout.LayoutParams(0, -1, 1f)
-            else LinearLayout.LayoutParams(-1, 0, 1f)
-        }
         val compact = height < dp(440)
         if (compact != compactHeader) {
             compactHeader = compact
             cover.visibility = if (compact) View.GONE else View.VISIBLE
             stageColumn.setPadding(dp(20), dp(if (compact) 6 else 12), dp(20), dp(if (compact) 6 else 12))
-            titleView.maxLines = if (compact) 1 else 2
         }
     }
     var seeking = false
@@ -1024,6 +1020,9 @@ internal fun MainActivity.showPlayback(player: MediaController) {
             player.isPlaying -> "正在播放"
             else -> "已暂停"
         }
+        message.visibility = if (message.text.isNullOrEmpty() || message.text.toString() == "正在播放") {
+            View.GONE
+        } else View.VISIBLE
         paintTimer()
     }
     updateAudioPage = ::update
