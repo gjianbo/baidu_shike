@@ -6,7 +6,6 @@ import android.net.Uri
 import androidx.appcompat.app.AlertDialog
 import java.io.File
 import org.json.JSONObject
-import org.json.JSONTokener
 
 /**
  * 图片预览需要的宿主能力。取址复用 [MediaLinkSection]，
@@ -86,26 +85,20 @@ internal class ImagePreviewSection(
             host.setStatus("请确认网盘登录后重试。")
             return
         }
-        val siblings = entries.filter { it.provider == entry.provider && PanApi.kindOf(it) == MediaKind.IMAGE }
-            .toMutableList()
-        val key = entryKey(entry)
-        val position = siblings.indexOfFirst { entryKey(it) == key }
-        if (position < 0) siblings.add(0, entry)
-        gallery = siblings
-        if (!quark && entry.isDisk && entry.previewUrl.isEmpty()) {
+        val galleryState = imageGallery(entry, entries)
+        gallery = galleryState.items
+        if (imageNeedsOriginal(quark, entry)) {
             openOriginal(entry)
             return
         }
         close()
         val account = host.playbackAccount(entry)
-        val items = siblings.map { image ->
-            ImagePreviewItem(
-                image.fileId, image.name, mediaCacheKey(account, image), image.previewUrl,
-                shareInfoUrl = if (!quark && !image.isDisk) PanApi.imageShareInfo(image) else "",
-                diskDirectory = if (!quark && image.isDisk) image.path.substringBeforeLast('/').ifEmpty { "/" } else null,
-            )
-        }
-        host.launchViewer(ImageViewerActivity.galleryIntent(activity, items, position.coerceAtLeast(0), entry.provider))
+        val items = imagePreviewItems(
+            galleryState.items, quark,
+            cacheKey = { image -> mediaCacheKey(account, image) },
+            shareInfo = { image -> PanApi.imageShareInfo(image) },
+        )
+        host.launchViewer(ImageViewerActivity.galleryIntent(activity, items, galleryState.position, entry.provider))
         host.setStatus("")
     }
 
@@ -138,14 +131,13 @@ internal class ImagePreviewSection(
             "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
         ) { result ->
             if (!isCurrentImage(id, account)) return@evaluateJavascript
-            val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
-            if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
+            val viewer = parseViewerUk(result)
+            if (viewer != null && isNumericUk(viewer)) {
                 requestImageLink(entry, viewer, id)
             } else {
                 host.fetchJson(PanApi.viewer(), lane = RequestLane.LIST) { json ->
                     if (!isCurrentImage(id, account)) return@fetchJson
-                    val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
-                    check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
+                    val uk = requireViewerUk(viewerUkFromJson(json))
                     requestImageLink(entry, uk, id)
                 }
             }
@@ -221,15 +213,13 @@ internal class ImagePreviewSection(
                     ImageCache.discard(temp)
                 }
             }.onFailure {
-                if (it is InvalidImageLink) {
-                    addresses.clearLink(key)
-                    if (host.isReady() && fromCache) {
-                        requestImageLink(entry, account, id)
-                        return@onFailure
-                    }
+                val plan = imageFailurePlan(it is InvalidImageLink, { host.isReady() }, fromCache)
+                if (plan.clearCachedLink) addresses.clearLink(key)
+                if (plan.retry) {
+                    requestImageLink(entry, account, id)
+                    return@onFailure
                 }
-                val message = it.message ?: "图片打开失败，请重试。"
-                host.setStatus(message)
+                host.setStatus(imageFailureMessage(it))
             }
         }
         fetcher.start(link, ::complete)
@@ -237,9 +227,9 @@ internal class ImagePreviewSection(
 
     private fun startImageViewer(entry: PanEntry, file: File) {
         // 字段与传给查看器的列表必须完全一致：切图回传的是列表下标
-        if (gallery.isEmpty()) gallery = listOf(entry)
-        val images = gallery
-        val index = images.indexOfFirst { entryKey(it) == entryKey(entry) }.coerceAtLeast(0)
+        val images = effectiveImageGallery(gallery, entry)
+        gallery = images
+        val index = imageViewerIndex(images, entry)
         host.launchViewer(Intent(activity, ImageViewerActivity::class.java).apply {
             putExtra(ImageViewerActivity.EXTRA_FILE, file.absolutePath)
             putExtra(ImageViewerActivity.EXTRA_TITLE, entry.name)
@@ -250,8 +240,11 @@ internal class ImagePreviewSection(
         host.setStatus("")
     }
 
-    private fun isCurrentImage(id: Int, account: String) =
-        id == openId && !host.isDestroyed() && host.isVisible() &&
-            account == host.account() && host.accountVerified()
+    private fun isCurrentImage(id: Int, account: String) = previewStillCurrent(
+        id, openId,
+        destroyed = { host.isDestroyed() },
+        visible = { host.isVisible() },
+        accountMatches = { account == host.account() && host.accountVerified() },
+    )
 
 }

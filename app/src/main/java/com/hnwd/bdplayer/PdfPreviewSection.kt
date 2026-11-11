@@ -5,7 +5,6 @@ import android.net.Uri
 import androidx.appcompat.app.AlertDialog
 import java.io.File
 import org.json.JSONObject
-import org.json.JSONTokener
 
 /**
  * 文档预览需要的宿主能力。取址与验证码直接复用 [MediaLinkSection]，
@@ -112,14 +111,13 @@ internal class PdfPreviewSection(
             "location.origin === 'https://pan.baidu.com' ? String(window.yunData?.MYUK || window.yunData?.uk || '') : ''",
         ) { result ->
             if (!isCurrentPdf(id, account)) return@evaluateJavascript
-            val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
-            if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
+            val viewer = parseViewerUk(result)
+            if (viewer != null && isNumericUk(viewer)) {
                 requestPdfLink(entry, viewer, id)
             } else {
                 host.fetchJson(PanApi.viewer(), lane = RequestLane.LIST) { json ->
                     if (!isCurrentPdf(id, account)) return@fetchJson
-                    val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
-                    check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
+                    val uk = requireViewerUk(viewerUkFromJson(json))
                     requestPdfLink(entry, uk, id)
                 }
             }
@@ -127,12 +125,18 @@ internal class PdfPreviewSection(
     }
 
     private fun isCurrentPdf(id: Int, account: String, provider: SourceProvider = SourceProvider.BAIDU) =
-        id == openId && !host.isDestroyed() && host.isVisible() &&
-            if (provider == SourceProvider.QUARK) {
-                account == AccountScope.current && host.sessionReady(provider)
-            } else {
-                account == host.account() && host.accountVerified()
-            }
+        previewStillCurrent(
+            id, openId,
+            destroyed = { host.isDestroyed() },
+            visible = { host.isVisible() },
+            accountMatches = {
+                if (provider == SourceProvider.QUARK) {
+                    account == AccountScope.current && host.sessionReady(provider)
+                } else {
+                    account == host.account() && host.accountVerified()
+                }
+            },
+        )
 
     private fun requestPdfLink(entry: PanEntry, viewer: String, id: Int) {
         if (viewer != host.account()) {
@@ -246,22 +250,26 @@ internal class PdfPreviewSection(
                     PdfCache.discard(temp)
                 }
             }.onFailure {
-                if (!quark && it is InvalidPdfLink) {
-                    addresses.clearLink(key)
-                    if (host.isReady()) {
-                        when {
-                            fromCache -> {
-                                requestPdfLink(entry, account, id)
-                                return@onFailure
-                            }
-                            !fromFallback -> {
-                                requestPdfFallback(entry, account, id)
-                                return@onFailure
-                            }
-                        }
+                val plan = pdfFailurePlan(
+                    quark = quark,
+                    invalidLink = it is InvalidPdfLink,
+                    hostReady = { host.isReady() },
+                    fromCache = fromCache,
+                    fromFallback = fromFallback,
+                )
+                if (plan.clearCachedLink) addresses.clearLink(key)
+                when (plan.action) {
+                    PdfRetry.RETRY_LINK -> {
+                        requestPdfLink(entry, account, id)
+                        return@onFailure
                     }
+                    PdfRetry.RETRY_FALLBACK -> {
+                        requestPdfFallback(entry, account, id)
+                        return@onFailure
+                    }
+                    PdfRetry.SHOW_ERROR -> Unit
                 }
-                val message = it.message ?: "文档打开失败，请重试。"
+                val message = pdfFailureMessage(it)
                 host.setStatus(message)
                 if (quark) host.say(message)
             }

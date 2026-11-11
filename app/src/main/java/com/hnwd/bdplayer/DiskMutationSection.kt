@@ -108,32 +108,34 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         host.fetchJson(
             request.url, post = true, form = request.form, lane = RequestLane.WRITE,
             acceptAnyErrno = true,
-            onCancelled = { finish("${op}结果未确认，请刷新查看") },
-            onFailure = { finish("${op}结果未确认，请刷新查看") },
+            onCancelled = { finish(diskWritePendingText(op)) },
+            onFailure = { finish(diskWritePendingText(op)) },
         ) { json ->
             // 旧回调（锁已被 reset / 换了持有者）不能碰当前锁，更不能把结果写回旧账号的 UI。
             if (!guards.endWrite(lock) || session != host.probeId) return@fetchJson
             val errno = PanApi.writeErrno(json)
-            if (errno == 132) {
-                showSecurityVerify(op)
-            } else if (errno != 0) {
-                val message = PanApi.writeError(op, errno, json)
-                if (json.getInt("errno") == 0) {
-                    afterDiskMutation("部分项目可能已处理，请查看刷新后的列表。$message")
-                } else {
+            when (writeResponse(errno) { json.getInt("errno") }) {
+                WriteResponse.SECURITY_VERIFY -> showSecurityVerify(op)
+                WriteResponse.PARTIAL_SUCCESS -> {
+                    val message = PanApi.writeError(op, errno, json)
+                    afterDiskMutation(partialWriteMessage(message))
+                }
+                WriteResponse.FAILED -> {
+                    val message = PanApi.writeError(op, errno, json)
                     host.showStatus(message)
                     host.say(message)
                 }
-            } else {
-                host.showStatus("")
-                onSuccess(json)
+                WriteResponse.SUCCESS -> {
+                    host.showStatus("")
+                    onSuccess(json)
+                }
             }
         }
     }
 
     /** errno 132：百度对删除等敏感操作强制安全验证，API 无法直接完成，引导去网页验证。 */
     private fun showSecurityVerify(op: String) {
-        host.showStatus("百度网盘要求安全验证，「$op」未执行")
+        host.showStatus(securityVerifyStatus(op))
         AlertDialog.Builder(activity)
             .setTitle("需要百度安全验证")
             .setMessage("百度网盘对部分敏感操作开启了安全验证，本次「$op」未执行。\n\n可打开网盘网页完成一次验证，再回到 App 重试。")
@@ -142,11 +144,6 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                 host.openWeb("https://pan.baidu.com/disk/main#/index?category=all")
             }
             .show()
-    }
-
-    private fun randomSharePwd(): String {
-        val chars = "abcdefghijkmnpqrstuvwxyz23456789"
-        return (1..4).map { chars.random() }.joinToString("")
     }
 
     /** 写操作成功后：清网盘缓存与「已转存」索引，刷新当前页。 */
@@ -175,14 +172,12 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             .show()
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
             val name = input.text.toString().trim()
-            when {
-                name.isEmpty() -> input.error = "请输入名称"
-                name == "." || name == ".." || name.any { it in "/\\:*?\"<>|" || it.isISOControl() } ->
-                    input.error = "名称包含网盘不支持的字符"
-                else -> {
-                    dialog.dismiss()
-                    if (session == host.probeId && name != initial) onSave(name)
-                }
+            val error = diskNameError(name)
+            if (error != null) {
+                input.error = error
+            } else {
+                dialog.dismiss()
+                if (session == host.probeId && name != initial) onSave(name)
             }
         }
     }
@@ -276,19 +271,25 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
     /** 二次确认后提交删除，并检查网盘是否实际移除了原文件。 */
     fun confirmDelete(entries: List<PanEntry>) {
         if (entries.isEmpty()) return
-        val label = if (entries.size == 1) "「${entries[0].name}」" else "${entries.size} 项"
+        val label = deleteLabel(entries)
         val wasSelecting = host.selecting()
         val session = host.probeId
         AlertDialog.Builder(activity)
             .setTitle("删除")
-            .setMessage("确定删除 $label 吗？删除后可在网盘回收站找回。")
+            .setMessage(deleteConfirmMessage(label))
             .setNegativeButton("取消", null)
             .setPositiveButton("删除") { _, _ ->
-                if (session != host.probeId) {
-                    host.say("网盘会话已变更，请重试")
-                } else if (guards.deleteInFlight) {
-                    host.say("正在确认上一笔删除，请稍候")
-                } else if (host.onDiskScreen() && entries.all { it.isDisk && PanApi.parentPath(it.path) == host.diskDir() }) {
+                val guard = deleteGuard(
+                    session,
+                    currentSession = { host.probeId },
+                    deleteInFlight = { guards.deleteInFlight },
+                    onDiskScreen = { host.onDiskScreen() },
+                    entries = entries,
+                    diskDir = { host.diskDir() },
+                )
+                if (guard != DeleteGuard.READY) {
+                    host.say(deleteGuardMessage(guard))
+                } else {
                     val dir = host.diskDir()
                     val cacheKey = host.diskCacheKey()
                     runDiskWrite { token ->
@@ -301,8 +302,6 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                             }
                         }
                     }
-                } else {
-                    host.say("请先刷新当前目录后重试")
                 }
             }
             .show()
@@ -340,10 +339,10 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                     }
                     remaining.remove(path)
                 }
-                when {
-                    remaining.isEmpty() -> finish(true)
-                    files.length() == 0 || page >= 100 || !PanApi.diskHasMore(json, 100) -> finish(false)
-                    else -> scan(page + 1)
+                when (deleteCheckStep(remaining.size, files.length(), page) { PanApi.diskHasMore(json, 100) }) {
+                    DeleteCheckStep.VERIFIED -> finish(true)
+                    DeleteCheckStep.FAILED -> finish(false)
+                    DeleteCheckStep.NEXT_PAGE -> scan(page + 1)
                 }
             }
         }
@@ -380,7 +379,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                 host.invalidateDiskCaches()
             }
             if (host.onDiskScreen() && host.diskCacheKey() == cacheKey) host.reloadPage()
-            host.say(if (confirmed) "已删除 ${ids.size} 项" else "删除尚未确认，请稍后刷新查看")
+            host.say(reconcileMessage(confirmed, ids.size))
         }
 
         fun scan(attempt: Int, page: Int) {
@@ -388,7 +387,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             if (page == 1) seenPages.clear()
             fun retry() {
                 if (!active()) return
-                if (attempt >= 8) finish(false)
+                if (!shouldRetryReconcile(attempt)) finish(false)
                 else host.delay(1_000L) { scan(attempt + 1, 1) }
             }
             host.fetchJson(
@@ -397,12 +396,15 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             ) { json ->
                 val files = json.getJSONArray("list")
                 val pageIds = List(files.length()) { files.getJSONObject(it).getString("fs_id") }
-                when {
-                    pageIds.any { it in ids } -> retry()
-                    !seenPages.add(pageIds) -> finish(false)
-                    !PanApi.diskHasMore(json, 100) -> finish(true)
-                    files.length() == 0 || page >= 100 -> finish(false)
-                    else -> scan(attempt, page + 1)
+                val alreadySeen = pageIds in seenPages
+                val step = reconcileStep(pageIds, ids, alreadySeen, { PanApi.diskHasMore(json, 100) }, page)
+                // 原实现用 !seenPages.add(pageIds) 判重：RETRY 分支不会把本页记进去重集合。
+                if (step != ReconcileStep.RETRY) seenPages.add(pageIds)
+                when (step) {
+                    ReconcileStep.RETRY -> retry()
+                    ReconcileStep.CONFIRMED -> finish(true)
+                    ReconcileStep.FAILED -> finish(false)
+                    ReconcileStep.NEXT_PAGE -> scan(attempt, page + 1)
                 }
             }
         }
@@ -412,11 +414,10 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
     fun promptShare(entries: List<PanEntry>) {
         if (entries.isEmpty()) return
         val session = host.probeId
-        val periods = listOf(0 to "永久有效", 7 to "7 天有效", 1 to "1 天有效")
         host.pickFromSheet(
             title = "创建分享链接",
             subtitle = if (entries.size == 1) entries[0].name else "${entries.size} 项",
-            choices = periods.map { SheetChoice(it.second, tag = it.first) },
+            choices = sharePeriodChoices(),
             onSelect = { choice ->
                 if (session != host.probeId) return@pickFromSheet
                 val period = choice.tag as Int
@@ -432,17 +433,14 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
     }
 
     private fun showShareResult(info: PanApi.ShareInfo, fallbackPwd: String = "") {
-        val pwd = info.pwd.ifEmpty { fallbackPwd }
-        val text = buildString {
-            append("链接：").append(info.link)
-            if (pwd.isNotEmpty()) append("\n提取码：").append(pwd)
-        }
+        val pwd = sharePwd(info.pwd, fallbackPwd)
+        val text = shareResultText(info.link, pwd)
         AlertDialog.Builder(activity)
             .setTitle("分享已创建")
             .setMessage(text)
             .setNegativeButton("关闭", null)
             .setPositiveButton("复制链接") { _, _ ->
-                val clip = if (pwd.isNotEmpty()) "${info.link} 提取码 ${pwd}" else info.link
+                val clip = shareClipText(info.link, pwd)
                 val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("分享链接", clip))
                 host.say("已复制到剪贴板")
@@ -526,17 +524,15 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         var loading = false
         val session = host.probeId
         val dirs = linkedMapOf<String, PanEntry>()
-        fun isBlocked(dir: String) = blocked.any { path ->
-            val base = path.trimEnd('/')
-            base.isNotEmpty() && (dir.trimEnd('/') == base || dir.startsWith("$base/"))
-        }
+        fun isBlocked(dir: String) = isBlockedFolder(dir, blocked)
         fun updateButtons() {
-            up.isEnabled = !loading && current != "/"
-            pick.isEnabled = !loading && page > 0
-            more.visibility = if (hasMore || page == 0) View.VISIBLE else View.GONE
-            more.text = if (page == 0) "重试读取目录" else "加载更多目录"
-            more.isEnabled = !loading
-            list.isEnabled = !loading
+            val ui = folderPickerUi(loading, current, page, hasMore)
+            up.isEnabled = ui.upEnabled
+            pick.isEnabled = ui.pickEnabled
+            more.visibility = if (ui.moreVisible) View.VISIBLE else View.GONE
+            more.text = ui.moreText
+            more.isEnabled = ui.moreEnabled
+            list.isEnabled = ui.listEnabled
         }
         fun loadDir(dir: String, nextPage: Int = 1) {
             if (loading || session != host.probeId || !dialog.isShowing) return
@@ -571,7 +567,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                 loading = false
                 val items = dirs.values.toList()
                 val firstVisible = list.firstVisiblePosition
-                list.adapter = folderAdapter(if (items.isEmpty() && !hasMore) listOf("（无可选子目录）") else items.map { it.name })
+                list.adapter = folderAdapter(folderPickerNames(items.map { it.name }, hasMore))
                 if (nextPage > 1) list.setSelection(firstVisible)
                 list.setOnItemClickListener { _, _, position, _ ->
                     items.getOrNull(position)?.let { loadDir(it.path) }
