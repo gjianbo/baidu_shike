@@ -21,7 +21,7 @@ internal class UploadSection(
     private val dir: String,
     private val onProgress: (percent: Int, label: String) -> Unit,
     private val onResult: (success: Boolean, message: String) -> Unit,
-) {
+) : UploadWorker {
     private val uploader = PanUploader(context.applicationContext)
     private val main = Handler(Looper.getMainLooper())
 
@@ -31,12 +31,12 @@ internal class UploadSection(
 
     @Volatile private var lastPercent = 0
 
-    fun cancel() {
+    override fun cancel() {
         cancelled = true
         uploader.cancel()
     }
 
-    fun start() {
+    override fun start() {
         if (running) {
             onResult(false, "已有上传正在进行")
             return
@@ -98,8 +98,8 @@ internal class UploadSection(
         }
         if (cancelled) throw IOException("已取消")
         progress(99, "正在创建文件…")
-        uploader.create(token, path, size, pre.uploadId, returnedMd5)
-        check(uploader.exists(token, path)) { "已提交但未在目录中回读到文件，请刷新确认" }
+        val fsId = uploader.create(token, path, size, pre.uploadId, returnedMd5)
+        check(uploader.exists(token, path, fsId)) { "已提交但未在目录中回读到文件，请刷新确认" }
         progress(100, "完成")
         return displayName
     }

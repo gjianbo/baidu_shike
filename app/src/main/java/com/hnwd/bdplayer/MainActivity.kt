@@ -998,16 +998,21 @@ class MainActivity : AppCompatActivity() {
         }
         mediaLinks.dismissCaptcha(lane)
         val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
-        fun isCurrent() = !isDestroyed && id == when (lane) {
-            RequestLane.LIST -> requestId
-            RequestLane.SEARCH -> searchRequestId
-            RequestLane.COURSE -> courseRequestId
-            RequestLane.AUDIO -> audioRequestId
-            RequestLane.RENEWAL -> renewalRequestId
-            RequestLane.WRITE -> writeRequestId
-            RequestLane.DELETE_CHECK -> deleteCheckRequestId
-            RequestLane.DOWNLOAD -> downloadRequestId
-        } && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
+        // DOWNLOAD 是用户主动发起的取址，允许并发：只看 Activity 是否存活，不比较 lane
+        // 计数器。否则连续下载两个文件时，后一次 ++ 会把前一次判成过期并取消（前一个
+        // 下载会报「无法获取下载地址」）。其它 lane 仍保持「新请求顶掉旧请求」的语义。
+        fun isCurrent() = !isDestroyed && (
+            lane == RequestLane.DOWNLOAD || id == when (lane) {
+                RequestLane.LIST -> requestId
+                RequestLane.SEARCH -> searchRequestId
+                RequestLane.COURSE -> courseRequestId
+                RequestLane.AUDIO -> audioRequestId
+                RequestLane.RENEWAL -> renewalRequestId
+                RequestLane.WRITE -> writeRequestId
+                RequestLane.DELETE_CHECK -> deleteCheckRequestId
+                RequestLane.DOWNLOAD -> downloadRequestId
+            }
+        ) && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
         fun showError(message: String?) {
             val text = message ?: "网盘请求失败，请重试。"
             when (lane) {
@@ -1470,8 +1475,9 @@ class MainActivity : AppCompatActivity() {
     /** 系统文件选择器可多选；任务交给 UploadCenter 串行队列，本页只给一条可点提示。 */
     internal fun startUpload(sources: List<Uri>) {
         if (sources.isEmpty()) return
+        // provider 与目录 fid 在入队时快照；队列按 provider 分派到百度/夸克上传器。
         showUploadSnackbar(sources.size)
-        UploadCenter.enqueue(this, sources, currentDiskDir())
+        UploadCenter.enqueue(this, sources, currentDiskDir(), currentDiskFolderId(), diskProvider)
         // 前台服务只负责保活与通知；权限弹窗顺带申请，拒绝也不影响上传。
         UploadForegroundService.start(this)
         val needsNotificationPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

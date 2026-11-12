@@ -132,6 +132,10 @@ internal fun MainActivity.batchFavoriteSelected() {
 
 internal fun MainActivity.currentDiskDir(): String = folders.lastOrNull()?.path ?: "/"
 
+/** 夸克上传的 pdir_fid 要目录 fid（不是路径）；根目录用 QuarkPersonalDrive.ROOT。 */
+internal fun MainActivity.currentDiskFolderId(): String =
+    folders.lastOrNull()?.fileId?.takeIf { it.isNotBlank() } ?: QuarkPersonalDrive.ROOT
+
 
 internal fun MainActivity.currentDiskCacheKey(): String =
     folders.lastOrNull()?.let { "disk:dir:${it.fileId}" } ?: "disk:roots"

@@ -9,6 +9,7 @@ import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -69,15 +70,58 @@ class DownloadActivity : AppCompatActivity() {
         tabActive = findViewById(R.id.tabActive)
         tabHistory = findViewById(R.id.tabHistory)
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
-        findViewById<View>(R.id.btnClear).setOnClickListener {
-            DownloadCenter.clearFinished(this)
-            UploadStore.clearFinished(this)
-            refreshNow()
-            toast("已清空已完成记录")
-        }
+        findViewById<View>(R.id.btnClear).setOnClickListener { showClearMenu(it) }
         tabActive.setOnClickListener { switchTab(false) }
         tabHistory.setOnClickListener { switchTab(true) }
         switchTab(false)
+    }
+
+    /**
+     * 右上「清空」的两个选项：清空已完成 / 清理失败的记录（带数量，为 0 时禁用）。
+     * 清失败项时还会删掉下载器里的半成品文件与上传私有缓存残留；成功与进行中记录、
+     * 已完成文件、网盘上的文件一律不动。
+     */
+    private fun showClearMenu(anchor: View) {
+        val counts = TransferFilter.counts(
+            tasks.filter { it.state == DownloadState.SUCCESS || it.state == DownloadState.FAILED }
+                .map { it.state },
+            uploads.filterNot(UploadRecordLogic::isActive).map { it.state },
+        )
+        PopupMenu(this, anchor).apply {
+            menu.add(0, MENU_CLEAR_SUCCESS, 0, TransferCleanup.menuSuccessLabel(counts.success))
+                .isEnabled = counts.success > 0
+            menu.add(0, MENU_CLEAR_FAILED, 1, TransferCleanup.menuFailedLabel(counts.failed))
+                .isEnabled = counts.failed > 0
+            setOnMenuItemClickListener { item ->
+                when (item.itemId) {
+                    MENU_CLEAR_SUCCESS -> {
+                        DownloadCenter.clearFinished(this@DownloadActivity)
+                        UploadStore.clearFinished(this@DownloadActivity)
+                        refreshNow()
+                        toast(TransferCleanup.clearSuccessMessage(counts.success))
+                        true
+                    }
+                    MENU_CLEAR_FAILED -> {
+                        clearFailedRecords()
+                        true
+                    }
+                    else -> false
+                }
+            }
+            show()
+        }
+    }
+
+    private fun clearFailedRecords() {
+        // 先取失败任务的 id（用于清私有缓存），再删记录；活跃任务的缓存由纯逻辑保护。
+        val failedUploadIds = UploadStore.records(this)
+            .filter { it.state == UploadRecordState.FAILED }
+            .map { it.id }.toSet()
+        val downloadCleared = DownloadCenter.clearFailed(this)
+        val uploadCleared = UploadStore.clearFailed(this)
+        val files = UploadCenter.clearFailedArtifacts(this, failedUploadIds)
+        refreshNow()
+        toast(TransferCleanup.clearFailedMessage(downloadCleared + uploadCleared, files))
     }
 
     override fun onResume() {
@@ -127,7 +171,10 @@ class DownloadActivity : AppCompatActivity() {
     }
 
     private fun render(force: Boolean = false) {
-        val key = "$showingHistory|$historyFilter|$tasks|$speeds|$uploads"
+        // speeds 每秒都在变，放进 key 会让视图每秒被 removeAllViews() 重建，
+        // 把「总长未知」的 indeterminate 进度条动画反复重置。只在任务/记录本身变化时重绘；
+        // 速度文本仍从 speeds 读最新值，且 bytesDone 变化时 key 自然会变。
+        val key = "$showingHistory|$historyFilter|$tasks|$uploads"
         if (!force && key == lastRenderKey) return
         lastRenderKey = key
         val activeDownloads = tasks.filter {
@@ -193,7 +240,7 @@ class DownloadActivity : AppCompatActivity() {
             }
         }
         storageHint.text =
-            "下载保存到 下载 / ${DownloadLogic.FOLDER}/ · 上传保存到 百度网盘当前目录\n" +
+            "下载保存到 下载 / ${DownloadLogic.FOLDER}/ · 上传保存到 百度/夸克网盘当前目录\n" +
                 "共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
     }
 
@@ -355,7 +402,7 @@ class DownloadActivity : AppCompatActivity() {
         main.addView(
             meta(
                 listOfNotNull(
-                    UploadRecordLogic.SOURCE_LABEL,
+                    record.source,
                     record.dir.takeIf { it.isNotBlank() },
                     DownloadLogic.formatBytes(record.sizeBytes),
                 ).joinToString(" · "),
@@ -384,7 +431,7 @@ class DownloadActivity : AppCompatActivity() {
         main.addView(
             meta(
                 listOfNotNull(
-                    UploadRecordLogic.SOURCE_LABEL,
+                    record.source,
                     record.dir.takeIf { it.isNotBlank() },
                     DownloadLogic.formatBytes(record.sizeBytes),
                     "等待中",
@@ -411,7 +458,7 @@ class DownloadActivity : AppCompatActivity() {
         main.addView(title(record.name))
         // 成功时 message 是「已上传：文件名」，与标题重复；只有失败原因才值得占这一行。
         val detail = listOfNotNull(
-            UploadRecordLogic.SOURCE_LABEL,
+            record.source,
             DownloadLogic.formatBytes(record.sizeBytes),
             timeLabel(record.finishedAt),
             record.message.takeIf { it.isNotBlank() && record.state == UploadRecordState.FAILED },
@@ -579,4 +626,9 @@ class DownloadActivity : AppCompatActivity() {
 
     private fun timeLabel(time: Long): String =
         if (time <= 0) "" else SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(time))
+
+    private companion object {
+        const val MENU_CLEAR_SUCCESS = 1
+        const val MENU_CLEAR_FAILED = 2
+    }
 }

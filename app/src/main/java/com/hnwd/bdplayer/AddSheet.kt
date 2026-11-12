@@ -26,6 +26,7 @@ internal fun MainActivity.showAddSheet() {
     val target = if (dir.isBlank() || dir == "/" || dir == QuarkPersonalDrive.ROOT) "根目录" else dir
     view.findViewById<TextView>(R.id.addTarget).text =
         "将保存到 ${if (quark) "夸克网盘" else "百度网盘"} · $target"
+    // 百度 / 夸克共用同一个多选入口，UploadCenter 按入队时快照的 provider 分派上传器。
     view.findViewById<View>(R.id.addUpload).setOnClickListener {
         dialog.dismiss()
         uploadLauncher.launch(arrayOf("*/*"))

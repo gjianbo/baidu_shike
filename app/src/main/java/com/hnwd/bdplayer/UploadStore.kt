@@ -25,7 +25,7 @@ internal object UploadStore {
 
     fun records(context: Context): List<UploadRecord> = synchronized(lock) {
         val reconciled = UploadRecordLogic.reconcileInterrupted(
-            readRaw(context), UploadCenter.state.running, System.currentTimeMillis(),
+            readRaw(context), UploadCenter.activeIds(), System.currentTimeMillis(),
         )
         if (reconciled.changed) write(context, reconciled.records)
         reconciled.records
@@ -36,7 +36,8 @@ internal object UploadStore {
     }
 
     fun begin(
-        context: Context, id: Long, name: String, dir: String, size: Long, queued: Boolean = false,
+        context: Context, id: Long, name: String, dir: String, size: Long,
+        source: String = UploadRecordLogic.SOURCE_BAIDU, queued: Boolean = false,
     ): Unit = synchronized(lock) {
         val list = records(context).toMutableList()
         list.add(
@@ -48,6 +49,7 @@ internal object UploadStore {
                 createdAt = System.currentTimeMillis(),
                 state = if (queued) UploadRecordState.QUEUED else UploadRecordState.RUNNING,
                 label = if (queued) "排队中" else "准备中…",
+                source = source,
             ),
         )
         write(context, list)
@@ -94,5 +96,13 @@ internal object UploadStore {
     fun clearFinished(context: Context): Unit = synchronized(lock) {
         val list = records(context).toMutableList()
         if (list.removeAll { it.state == UploadRecordState.SUCCESS }) write(context, list)
+    }
+
+    /** 「清理失败的记录」：只删 FAILED，成功记录与活跃任务不动；返回清掉的条数。 */
+    fun clearFailed(context: Context): Int = synchronized(lock) {
+        val list = records(context).toMutableList()
+        val before = list.size
+        if (list.removeAll { it.state == UploadRecordState.FAILED }) write(context, list)
+        before - list.size
     }
 }

@@ -9,8 +9,9 @@ internal enum class DownloadRoute { BAIDU_GROUP, BAIDU_DISK, QUARK }
 internal enum class DownloadState { QUEUED, RUNNING, SUCCESS, FAILED }
 
 /**
- * 一条下载任务。[url] 是取址时拿到的临时直链（约 8h 有效），只用于页内重试，
- * 不写进备份快照；[downloadId] 为 -1 表示还在排队、尚未交给系统下载器。
+ * 一条下载任务。[url] 是取址时拿到的临时直链（约 8h 有效），用于页内重试；
+ * 它随任务记录一起落在本地 SharedPreferences（不写进备份快照、不打印日志），
+ * 过期后重试会失败并提示回列表重新取址。[downloadId] 为 -1 表示还在排队、尚未交给系统下载器。
  */
 internal data class DownloadTask(
     val id: Long,
@@ -66,7 +67,16 @@ internal object DownloadLogic {
         val safe = cleaned.takeIf { it.isNotEmpty() && it.any { ch -> ch != '_' } } ?: "下载文件"
         return if (safe.length <= 120) safe else {
             val dot = safe.lastIndexOf('.')
-            if (dot > 100) safe.substring(0, 100) + safe.substring(dot) else safe.take(120)
+            val extLen = if (dot > 0) safe.length - dot else 0
+            if (dot > 0 && extLen < 120) {
+                // 按扩展名长度倒推前缀长度，保证结果恒 <= 120；
+                // 旧写法固定 take(100) 会在「扩展名靠后 + 名字很长」时仍超出上限。
+                val keep = 120 - extLen
+                safe.take(keep) + safe.substring(dot)
+            } else {
+                // 扩展名本身已经超长，不可能既保留它又满足上限，直接整串截断。
+                safe.take(120)
+            }
         }
     }
 
@@ -128,6 +138,25 @@ internal object DownloadLogic {
             )
         }
     }
+
+    const val CANCELLED_ERROR = "已取消下载"
+    const val LOST_RECORD_ERROR = "下载记录已丢失，请回到文件列表重新下载"
+
+    /** 取消：保留一条可重试的 FAILED 记录，而不是把任务整条删掉。 */
+    fun cancelledTask(task: DownloadTask, now: Long): DownloadTask = task.copy(
+        state = DownloadState.FAILED,
+        downloadId = -1,
+        finishedAt = now,
+        error = CANCELLED_ERROR,
+    )
+
+    /** 系统下载记录被外部删除：收敛成 FAILED，避免永远卡在 RUNNING 占并发槽与角标。 */
+    fun lostRecordTask(task: DownloadTask, now: Long): DownloadTask = task.copy(
+        state = DownloadState.FAILED,
+        downloadId = -1,
+        finishedAt = now,
+        error = LOST_RECORD_ERROR,
+    )
 
     fun formatBytes(bytes: Long): String {
         if (bytes < 0) return "-"

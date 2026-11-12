@@ -68,18 +68,28 @@ class UploadRecordLogicTest {
     }
 
     @Test
-    fun reconcileInterrupted_onlyMarksOrphansWhenNoTaskRunning() {
+    fun reconcileInterrupted_onlyMarksOrphansOutsideLiveIds() {
         val list = listOf(
             record(1, UploadRecordState.RUNNING),
             record(2, UploadRecordState.QUEUED),
             record(3, UploadRecordState.SUCCESS, 3_000L),
             record(4, UploadRecordState.FAILED, 4_000L),
         )
-        val running = UploadRecordLogic.reconcileInterrupted(list, true, 9_999L)
-        assertFalse(running.changed)
-        assertEquals(list, running.records)
+        // 两个进行中记录都真实存活：一条都不该动。
+        val allLive = UploadRecordLogic.reconcileInterrupted(list, setOf(1L, 2L), 9_999L)
+        assertFalse(allLive.changed)
+        assertEquals(list, allLive.records)
 
-        val idle = UploadRecordLogic.reconcileInterrupted(list, false, 9_999L)
+        // 新批次在跑（只有 id=1 存活），上一次遗留的 id=2 孤儿仍要被收敛。
+        val mixed = UploadRecordLogic.reconcileInterrupted(list, setOf(1L), 9_999L)
+        assertTrue(mixed.changed)
+        assertEquals(UploadRecordState.RUNNING, mixed.records[0].state)
+        assertEquals(UploadRecordState.FAILED, mixed.records[1].state)
+        assertEquals(UploadRecordLogic.INTERRUPTED, mixed.records[1].message)
+        assertEquals(9_999L, mixed.records[1].finishedAt)
+
+        // 完全没有任务：所有进行中记录都收敛。
+        val idle = UploadRecordLogic.reconcileInterrupted(list, emptySet(), 9_999L)
         assertTrue(idle.changed)
         assertEquals(UploadRecordState.FAILED, idle.records[0].state)
         assertEquals(UploadRecordState.FAILED, idle.records[1].state)

@@ -187,8 +187,13 @@ internal class PanUploader(private val context: Context) {
         return execute(request).optLong("fs_id", -1L)
     }
 
-    /** create 的 errno 0 不代表一定落盘，回读目录确认。 */
-    fun exists(token: String, path: String): Boolean {
+    /**
+     * create 的 errno 0 不代表一定落盘，回读目录确认。
+     *
+     * 同名冲突时 rtype=1 会让服务端把文件重命名（path 不再是原来的值），只按 path 找会
+     * 把「已经成功落盘」误判成失败。优先用 create 返回的 fs_id 精确匹配，path 只作兜底。
+     */
+    fun exists(token: String, path: String, fsId: Long): Boolean {
         val dir = PanApi.parentPath(path)
         val request = Request.Builder()
             .url(
@@ -197,7 +202,10 @@ internal class PanUploader(private val context: Context) {
             )
             .get().common().build()
         val list = execute(request).optJSONArray("list") ?: return false
-        return (0 until list.length()).any { list.optJSONObject(it)?.optString("path") == path }
+        return (0 until list.length()).any {
+            val item = list.optJSONObject(it) ?: return@any false
+            (fsId > 0 && item.optLong("fs_id", -1L) == fsId) || item.optString("path") == path
+        }
     }
 
     private companion object {

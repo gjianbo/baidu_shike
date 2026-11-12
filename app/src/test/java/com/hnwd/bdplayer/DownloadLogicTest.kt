@@ -62,6 +62,38 @@ class DownloadLogicTest {
     }
 
     @Test
+    fun safeName_longNameWithLateExtensionNeverExceedsLimit() {
+        // 旧实现固定 take(100)，扩展名靠后时结果仍会超过 120。
+        val long = "x".repeat(115) + "." + "y".repeat(50)
+        val safe = DownloadLogic.safeName(long)
+        assertTrue("len=${safe.length}", safe.length <= 120)
+        assertTrue(safe.endsWith("." + "y".repeat(50)))
+
+        // 扩展名本身就超过上限时也必须截断到 120。
+        val hugeExt = DownloadLogic.safeName("a." + "z".repeat(200))
+        assertEquals(120, hugeExt.length)
+    }
+
+    @Test
+    fun cancelledAndLostRecord_keepRetryableFailedRecords() {
+        val running = DownloadTask(
+            id = 7L, name = "课.mp4", state = DownloadState.RUNNING,
+            downloadId = 42L, url = "https://example.com/dlink",
+        )
+        val cancelled = DownloadLogic.cancelledTask(running, 9_999L)
+        assertEquals(DownloadState.FAILED, cancelled.state)
+        assertEquals(-1L, cancelled.downloadId)
+        assertEquals(9_999L, cancelled.finishedAt)
+        assertEquals(DownloadLogic.CANCELLED_ERROR, cancelled.error)
+        assertEquals(running.url, cancelled.url) // 仍可凭 url 重试
+
+        val lost = DownloadLogic.lostRecordTask(running, 8_888L)
+        assertEquals(DownloadState.FAILED, lost.state)
+        assertEquals(-1L, lost.downloadId)
+        assertEquals(DownloadLogic.LOST_RECORD_ERROR, lost.error)
+    }
+
+    @Test
     fun relativePath_usesAppSubfolder() {
         assertEquals("拾课/20261112-120000_第08课.mp4", DownloadLogic.relativePath("第08课.mp4", "20261112-120000"))
         assertEquals("拾课/stamp_a_b.mp4", DownloadLogic.relativePath("a/b.mp4", "stamp"))

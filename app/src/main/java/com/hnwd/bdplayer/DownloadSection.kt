@@ -23,7 +23,9 @@ internal interface DownloadHost {
  * 长按「下载」的取址分派：复用媒体取址层的 sharedownload / /api/download，
  * 夸克则直接走 file/download。拿到直链后交给 [DownloadCenter] 排队，不自己传字节。
  *
- * 用独立的 [RequestLane.DOWNLOAD]，避免取址时把正在跑的列表请求顶掉。
+ * 用独立的 [RequestLane.DOWNLOAD]，避免取址时把正在跑的列表请求顶掉；
+ * MainActivity.load() 对该 lane 也放开了并发（不比较计数器），因此连续下载多个文件
+ * 不会互相取消。
  */
 internal class DownloadSection(
     private val host: DownloadHost,
@@ -43,6 +45,9 @@ internal class DownloadSection(
 
         fun receive(uri: Uri) {
             if (!host.isCurrent()) return
+            // 取址开始时写过状态栏提示，成功/失败都要收尾，否则「正在获取下载地址…」
+            // 会一直挂在页面上误导用户（项目里其它页面也是用空串清状态栏）。
+            host.setStatus("")
             val task = DownloadTask(
                 id = DownloadCenter.newId(),
                 name = entry.name,
@@ -60,7 +65,9 @@ internal class DownloadSection(
         }
 
         fun fail(message: String) {
-            if (host.isCurrent()) host.say(message)
+            if (!host.isCurrent()) return
+            host.setStatus("")
+            host.say(message)
         }
 
         when (route) {

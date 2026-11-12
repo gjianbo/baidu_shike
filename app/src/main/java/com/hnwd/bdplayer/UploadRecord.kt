@@ -22,13 +22,19 @@ internal data class UploadRecord(
     val percent: Int = 0,
     val label: String = "排队中",
     val message: String = "",
+    /** 上传目标网盘；旧记录没有该字段时按百度兼容。 */
+    val source: String = UploadRecordLogic.SOURCE_BAIDU,
 )
 
 /** 纯逻辑：编解码与列表收敛，可在 JVM 单测里钉死口径。 */
 internal object UploadRecordLogic {
     const val MAX_RECORDS = 100
-    const val SOURCE_LABEL = "百度网盘 · 上传"
+    const val SOURCE_BAIDU = "百度网盘 · 上传"
+    const val SOURCE_QUARK = "夸克网盘 · 上传"
     const val INTERRUPTED = "上传中断（应用已关闭）"
+
+    fun sourceLabel(provider: SourceProvider): String =
+        if (provider == SourceProvider.QUARK) SOURCE_QUARK else SOURCE_BAIDU
 
     fun isActive(record: UploadRecord): Boolean =
         record.state == UploadRecordState.QUEUED || record.state == UploadRecordState.RUNNING
@@ -46,16 +52,16 @@ internal object UploadRecordLogic {
     data class Reconciled(val records: List<UploadRecord>, val changed: Boolean)
 
     /**
-     * 进程被杀后不会有人给 QUEUED / RUNNING 收尾；下次读历史时按「当前是否真有任务在跑」
-     * 把孤儿记录标成失败，否则传输页会永远挂着卡住的任务、角标也消不掉。
+     * 进程被杀后不会有人给 QUEUED / RUNNING 收尾；下次读历史时按 [UploadCenter.activeIds()]
+     * 的**真实存活 id** 把孤儿记录标成失败。用全局 running 判断不够精确：新批次正在跑时，
+     * 上一次遗留的孤儿会一直显示成「排队中」，角标也消不掉。
      */
     fun reconcileInterrupted(
-        records: List<UploadRecord>, taskRunning: Boolean, now: Long,
+        records: List<UploadRecord>, liveIds: Set<Long>, now: Long,
     ): Reconciled {
-        if (taskRunning) return Reconciled(records, false)
         var changed = false
         val out = records.map { record ->
-            if (!isActive(record)) return@map record
+            if (!isActive(record) || record.id in liveIds) return@map record
             changed = true
             record.copy(
                 state = UploadRecordState.FAILED,
@@ -89,6 +95,7 @@ internal object UploadRecordLogic {
         .put("percent", record.percent)
         .put("label", record.label)
         .put("message", record.message)
+        .put("source", record.source)
 
     private fun fromJson(item: JSONObject) = UploadRecord(
         id = item.getLong("id"),
@@ -102,5 +109,6 @@ internal object UploadRecordLogic {
         percent = item.optInt("percent", 0),
         label = item.optString("label").ifBlank { "排队中" },
         message = item.optString("message"),
+        source = item.optString("source").ifBlank { SOURCE_BAIDU },
     )
 }

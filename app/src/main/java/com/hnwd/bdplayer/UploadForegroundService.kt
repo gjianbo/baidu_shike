@@ -56,9 +56,10 @@ internal class UploadForegroundService : Service() {
             ACTION_CANCEL -> UploadCenter.cancelCurrent(this)
             ACTION_START -> {
                 // 队列由 UploadCenter 持有；本服务只是保活壳，不解析文件 Uri。
-                // 极端时序下整批已结束就直接退出，避免挂一个空前台服务。
-                val state = UploadCenter.state
-                if (!state.running && state.finished) {
+                // startUpload 总是先 enqueue（running=true）再 startService，所以
+                // running=false 只可能是整批已结束或 START_STICKY 重建后的空进程 —— 直接退出，
+                // 避免挂一个没有任务的前台服务。
+                if (!UploadCenter.state.running) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }

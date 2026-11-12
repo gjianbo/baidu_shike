@@ -37,8 +37,13 @@ internal object DownloadCenter {
 
     fun tasks(context: Context): List<DownloadTask> = synchronized(lock) { read(context) }
 
+    /**
+     * 顶栏角标/设置页摘要读的是「实时活跃数」：必须先 refresh 把系统下载器已完成的
+     * 任务推进到终态，否则用户一直停在主界面（不打开传输页）时角标永远不会消失。
+     * refresh 内部只在状态真变化时写盘，因此每秒 ticker 调用没有额外写开销。
+     */
     fun activeCount(context: Context): Int = synchronized(lock) {
-        read(context).count { it.state == DownloadState.QUEUED || it.state == DownloadState.RUNNING }
+        refresh(context).count { it.state == DownloadState.QUEUED || it.state == DownloadState.RUNNING }
     }
 
     fun add(context: Context, task: DownloadTask) = synchronized(lock) {
@@ -55,50 +60,70 @@ internal object DownloadCenter {
             it.downloadId >= 0 && (it.state == DownloadState.QUEUED || it.state == DownloadState.RUNNING)
         }
         if (watched.isNotEmpty()) {
+            // null 表示查询本身失败（权限/Cursor 异常），此时不能把任务误判成「记录丢失」。
             val statuses = query(context, watched.map { it.downloadId })
-            val now = System.currentTimeMillis()
-            for (index in list.indices) {
-                val task = list[index]
-                val status = statuses[task.downloadId] ?: continue
-                if (task.state != DownloadState.QUEUED && task.state != DownloadState.RUNNING) continue
-                list[index] = when {
-                    status.code == DownloadManager.STATUS_SUCCESSFUL -> task.copy(
-                        state = DownloadState.SUCCESS,
-                        bytesDone = status.done,
-                        bytesTotal = if (status.total > 0) status.total else task.sizeBytes,
-                        finishedAt = now,
-                        error = "",
-                    )
-                    status.code == DownloadManager.STATUS_FAILED -> task.copy(
-                        state = DownloadState.FAILED,
-                        bytesDone = status.done,
-                        finishedAt = now,
-                        error = DownloadLogic.failureText(
-                            status.reason,
-                            if (task.provider == SourceProvider.QUARK) DownloadRoute.QUARK
-                            else DownloadRoute.BAIDU_GROUP,
-                        ),
-                    )
-                    else -> task.copy(
-                        state = DownloadState.RUNNING,
-                        bytesDone = status.done,
-                        bytesTotal = status.total,
-                    )
+            if (statuses != null) {
+                val now = System.currentTimeMillis()
+                var changed = false
+                for (index in list.indices) {
+                    val task = list[index]
+                    if (task.state != DownloadState.QUEUED && task.state != DownloadState.RUNNING) continue
+                    // 本地排队、还没交给系统下载器的任务没有 id，不参与收敛。
+                    if (task.downloadId < 0) continue
+                    val status = statuses[task.downloadId]
+                    val updated = when {
+                        // 用户在系统下载管理器里删掉了记录：不能让它永远卡在 RUNNING、
+                        // 占着并发槽与顶栏角标，标失败并给出可重试的文案。
+                        status == null -> DownloadLogic.lostRecordTask(task, now)
+                        status.code == DownloadManager.STATUS_SUCCESSFUL -> task.copy(
+                            state = DownloadState.SUCCESS,
+                            bytesDone = status.done,
+                            bytesTotal = if (status.total > 0) status.total else task.sizeBytes,
+                            finishedAt = now,
+                            error = "",
+                        )
+                        status.code == DownloadManager.STATUS_FAILED -> task.copy(
+                            state = DownloadState.FAILED,
+                            bytesDone = status.done,
+                            finishedAt = now,
+                            error = DownloadLogic.failureText(
+                                status.reason,
+                                if (task.provider == SourceProvider.QUARK) DownloadRoute.QUARK
+                                else DownloadRoute.BAIDU_GROUP,
+                            ),
+                        )
+                        else -> task.copy(
+                            state = DownloadState.RUNNING,
+                            bytesDone = status.done,
+                            bytesTotal = status.total,
+                        )
+                    }
+                    if (updated != task) {
+                        list[index] = updated
+                        changed = true
+                    }
                 }
+                if (changed) write(context, list)
+                // pump 自己会判断是否需要写盘（有排队任务入队时）。
+                pump(context, list)
             }
-            write(context, list)
-            pump(context, list)
         }
         list.toList()
     }
 
+    /**
+     * 取消后保留一条 FAILED 记录（与上传侧「已取消上传」一致），这样历史里查得到、
+     * 也能凭 url 重试；直接删记录会让用户以为任务凭空消失。
+     */
     fun cancel(context: Context, id: Long) = synchronized(lock) {
         val list = read(context)
-        val task = list.firstOrNull { it.id == id } ?: return
+        val index = list.indexOfFirst { it.id == id }
+        if (index < 0) return
+        val task = list[index]
         if (task.downloadId >= 0) {
             runCatching { manager(context)?.remove(task.downloadId) }
         }
-        list.removeAll { it.id == id }
+        list[index] = DownloadLogic.cancelledTask(task, System.currentTimeMillis())
         write(context, list)
         pump(context, list)
     }
@@ -128,6 +153,20 @@ internal object DownloadCenter {
     fun clearFinished(context: Context) = synchronized(lock) {
         val list = read(context)
         if (list.removeAll { it.state == DownloadState.SUCCESS }) write(context, list)
+    }
+
+    /**
+     * 「清理失败的记录」：先让系统下载器删掉失败任务（连同它的半成品文件），再删本地记录。
+     * 成功记录、排队/进行中任务、已完成文件一律不动；返回清掉的条数。
+     */
+    fun clearFailed(context: Context): Int = synchronized(lock) {
+        val list = read(context)
+        list.filter { it.state == DownloadState.FAILED && it.downloadId >= 0 }.forEach { task ->
+            runCatching { manager(context)?.remove(task.downloadId) }
+        }
+        val before = list.size
+        if (list.removeAll { it.state == DownloadState.FAILED }) write(context, list)
+        before - list.size
     }
 
     fun open(context: Context, task: DownloadTask): Boolean {
@@ -180,7 +219,10 @@ internal object DownloadCenter {
             if (task.provider == SourceProvider.QUARK) DownloadRoute.QUARK else DownloadRoute.BAIDU_GROUP,
             task.userAgent,
         ).forEach { (key, value) -> request.addRequestHeader(key, value) }
-        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.CHINA).format(Date(task.createdAt))
+        // 同一毫秒内重复下载同名文件会撞名并互相覆盖；id 后缀保证目标路径唯一，
+        // 且重试复用同一个 task.id，不会反复产生新文件名。
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.CHINA).format(Date(task.createdAt)) +
+            "-${task.id % 100_000}"
         request.setDestinationInExternalPublicDir(
             Environment.DIRECTORY_DOWNLOADS,
             DownloadLogic.relativePath(task.name, stamp),
@@ -198,10 +240,14 @@ internal object DownloadCenter {
 
     private data class Status(val code: Int, val reason: Int, val done: Long, val total: Long)
 
-    private fun query(context: Context, ids: List<Long>): Map<Long, Status> {
-        val service = manager(context) ?: return emptyMap()
-        val result = mutableMapOf<Long, Status>()
-        runCatching {
+    /**
+     * 返回 null 表示「查询失败」（权限/Cursor 异常），与「查询成功但某些 id 不存在」区分开；
+     * 后者才允许把任务收敛成失败，前者必须原样保留，避免一次偶发异常把全部在跑任务判死。
+     */
+    private fun query(context: Context, ids: List<Long>): Map<Long, Status>? {
+        val service = manager(context) ?: return null
+        return runCatching {
+            val result = mutableMapOf<Long, Status>()
             service.query(DownloadManager.Query().setFilterById(*ids.toLongArray()))?.use { cursor ->
                 fun column(name: String) = cursor.getColumnIndex(name).takeIf { it >= 0 }
                 val idAt = column(DownloadManager.COLUMN_ID) ?: return@use
@@ -218,7 +264,7 @@ internal object DownloadCenter {
                     )
                 }
             }
-        }
-        return result
+            result
+        }.getOrNull()
     }
 }
