@@ -52,7 +52,8 @@ internal enum class LinkErrorTarget { STATUS, AUDIO }
 internal fun linkErrorTarget(lane: RequestLane): LinkErrorTarget = when (lane) {
     RequestLane.AUDIO -> LinkErrorTarget.AUDIO
     RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE,
-    RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK -> LinkErrorTarget.STATUS
+    RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK,
+    RequestLane.DOWNLOAD -> LinkErrorTarget.STATUS
 }
 
 /**

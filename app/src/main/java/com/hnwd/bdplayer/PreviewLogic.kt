@@ -1,5 +1,6 @@
 package com.hnwd.bdplayer
 
+import java.util.Locale
 import org.json.JSONObject
 import org.json.JSONTokener
 
@@ -44,19 +45,55 @@ internal fun previewStillCurrent(
     accountMatches: () -> Boolean,
 ): Boolean = id == openId && !destroyed() && visible() && accountMatches()
 
-// ===================== 文档打开大小限制 =====================
+// ===================== 文档体积上限（按网盘区分） =====================
 
 /**
- * 应用内 PDF 预览必须先把整份文件下载下来；实测夸克 / 百度的直链在 100MB 以上
- * 会下载失败，因此在打开入口按 50MB 拦截，避免起一个注定失败的下载弹窗。
- * size 来自网盘 JSON，是字节数的十进制字符串；解析不出来（空串 / 非数字 / 老数据）
- * 一律放行，宁可漏拦也不误拦能正常打开的文件。
+ * 夸克非会员的 `file/download` 实测在约 50MB 以上直接返回 `23018 download file size limit`，
+ * 且 `pdf/preview` 给的是**原件直链**（不像百度会转码降采样），所以在发请求前按原始大小拦掉，
+ * 给一句能解释原因的提示。size 解析不出来时放行，宁可漏拦也不误拦。
  */
-internal const val MAX_PDF_BYTES = 50L * 1024 * 1024
-internal const val PDF_TOO_LARGE_MESSAGE = "文件超过 50MB，暂不支持在 App 内打开。"
+internal const val MAX_QUARK_PDF_BYTES = 50L * 1024 * 1024
+internal const val QUARK_PDF_TOO_LARGE_MESSAGE =
+    "夸克网盘非会员单个文件下载上限约 50MB，请开通会员或到夸克网页版查看。"
 
-internal fun pdfTooLarge(sizeRaw: String?): Boolean =
-    (sizeRaw?.toLongOrNull() ?: 0L) > MAX_PDF_BYTES
+internal fun quarkPdfTooLarge(sizeRaw: String?): Boolean =
+    (sizeRaw?.toLongOrNull() ?: 0L) > MAX_QUARK_PDF_BYTES
+
+/**
+ * 应用内 PDF 预览要把整份文件下到本地，因此百度只按「实际下载体积」限量：
+ * 判据是下载响应的 Content-Length（docview 的 real_size），不是网盘列表里的原始 size
+ * —— 240MB 的原件常转成 29.6MB 副本，用原始 size 预拦会误伤一大片。
+ *
+ * 历史上全局的 50MB 预拦 + 下载器里的 80MB 上限，是在掩盖真正的故障：
+ * dlink 签名绑定生成它时的 WebView UA，用 `pan.baidu.com` 下载大文件会 403 sign error。
+ * UA 修正后两条限制合并成本常量，覆盖 docview / 群预览 / 下载取址回退全部路径；
+ * 夸克不走 docview，仍按上面的独立上限在入口拦。
+ * 声明长度缺失（declared < 0，分块传输）时放行，由下载过程中的累计字节数兜底。
+ */
+internal const val MAX_PDF_BYTES = 200L * 1024 * 1024
+internal const val PDF_TOO_LARGE_MESSAGE = "文档超过 200MB，暂不支持在 App 内在线阅读。"
+
+internal fun pdfTooLarge(bytes: Long): Boolean = bytes > MAX_PDF_BYTES
+
+// ===================== PDF 下载进度 =====================
+
+/** bytesTotal <= 0 表示响应没有 Content-Length（分块传输），此时只能显示已加载量。 */
+internal data class PdfProgress(val bytesDone: Long, val bytesTotal: Long)
+
+/** 返回 0..100；总长度未知时返回 -1，调用方据此切回不确定进度条。 */
+internal fun pdfProgressPercent(done: Long, total: Long): Int =
+    if (total <= 0L || done < 0L) -1
+    else (done.coerceAtMost(total) * 100L / total).toInt().coerceIn(0, 100)
+
+private fun pdfSizeText(bytes: Long): String =
+    String.format(Locale.US, "%.1f MB", bytes.coerceAtLeast(0L) / 1024.0 / 1024.0)
+
+internal fun pdfProgressText(done: Long, total: Long): String {
+    if (done <= 0L) return "正在加载文档…"
+    val percent = pdfProgressPercent(done, total)
+    val loaded = pdfSizeText(done)
+    return if (percent < 0) "已加载 $loaded" else "已加载 $loaded / ${pdfSizeText(total)} · $percent%"
+}
 
 // ===================== PDF 下载失败降级 =====================
 

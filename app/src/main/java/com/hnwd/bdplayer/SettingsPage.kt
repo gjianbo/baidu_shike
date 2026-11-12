@@ -28,6 +28,8 @@ internal interface SettingsHost {
     fun themeLabel(): String
     fun showThemeDialog()
     fun launchBackup()
+    fun openDownloads()
+    fun downloadSummary(): String
     fun appVersionLine(): String
 
     /** 夸克会话是否有效（Cookie 判定归宿主，设置页只读结果）。 */
@@ -78,6 +80,8 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<TextView>(R.id.setThemeValue).text = host.themeLabel()
         page.findViewById<View>(R.id.setThemeRow).setOnClickListener { host.showThemeDialog() }
         page.findViewById<View>(R.id.setBackupRow).setOnClickListener { host.launchBackup() }
+        page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
+        page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
         page.findViewById<TextView>(R.id.setAbout).text = host.appVersionLine()
         host.addPage(page)
         bindPreviewCache(page)

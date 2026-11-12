@@ -22,31 +22,50 @@ internal class PdfFileFetcher(private val context: Context) {
     private var worker: Future<*>? = null
     private var generation = 0
 
-    fun start(source: Uri, onResult: (Result<File>) -> Unit) =
-        fetch({ download(source, it) }, onResult)
+    /** [userAgent] 必须是生成 dlink 的那个 WebView 的 UA，在主线程取好后传进来。 */
+    fun start(
+        source: Uri,
+        userAgent: String,
+        onProgress: (PdfProgress) -> Unit,
+        onResult: (Result<File>) -> Unit,
+    ) = fetch({ file, emit -> download(source, file, userAgent, emit) }, onProgress, onResult)
 
-    fun startQuark(fileId: String, onResult: (Result<File>) -> Unit) {
+    fun startQuark(
+        fileId: String,
+        onProgress: (PdfProgress) -> Unit,
+        onResult: (Result<File>) -> Unit,
+    ) {
         val userAgent = WebSettings.getDefaultUserAgent(context)
         val drive = QuarkPersonalDrive.openSession(userAgent)
-        fetch({ file ->
+        fetch({ file, emit ->
             val uri = (drive ?: throw QuarkLoginRequired()).pdfLink(fileId)
             val request = QuarkPersonalDrive.fileRequest(uri, userAgent)
             QuarkPersonalDrive.fileClient.newCall(request).execute().use { response ->
                 checkStatus(response.code)
                 val body = checkNotNull(response.body) { "文档内容为空，请重新打开。" }
-                body.byteStream().use { savePdf(file, it, body.contentLength()) }
+                body.byteStream().use { savePdf(file, it, body.contentLength(), emit) }
             }
-        }, onResult)
+        }, onProgress, onResult)
     }
 
-    private fun fetch(download: (File) -> File, onResult: (Result<File>) -> Unit) {
+    private fun fetch(
+        download: (File, (Long, Long) -> Unit) -> File,
+        onProgress: (PdfProgress) -> Unit,
+        onResult: (Result<File>) -> Unit,
+    ) {
         cancel()
         val id = generation
+        // 后台只负责投递，代次校验放在主线程：取消/换文档后迟到的进度不会刷新旧弹窗。
+        val emit: (Long, Long) -> Unit = { done, total ->
+            handler.post {
+                if (id == generation) onProgress(PdfProgress(done, total))
+            }
+        }
         worker = executor.submit {
             val result = runCatching {
                 val file = cache.target(PreviewCache.Kind.PDF)
                 try {
-                    download(file)
+                    download(file, emit)
                 } catch (error: Throwable) {
                     cache.discard(file)
                     throw error
@@ -63,18 +82,19 @@ internal class PdfFileFetcher(private val context: Context) {
         }
     }
 
-    private fun download(source: Uri, file: File): File {
+    private fun download(source: Uri, file: File, userAgent: String, emit: (Long, Long) -> Unit): File {
         val connection = URL(source.toString()).openConnection() as HttpsURLConnection
         try {
-            // dlink 是 302 跳 CDN，签名自带，不需要 Cookie；UA 与文档实测一致
+            // dlink 是 302 跳 CDN，签名自带，不需要 Cookie；但签名绑定了生成 dlink 时的 WebView UA，
+            // 大文件 CDN 会严格校验，用 PanApi.DLINK_USER_AGENT("pan.baidu.com") 会 403 sign error。
             connection.instanceFollowRedirects = true
             connection.connectTimeout = 10_000
             connection.readTimeout = 30_000
-            connection.setRequestProperty("User-Agent", PanApi.DLINK_USER_AGENT)
+            connection.setRequestProperty("User-Agent", userAgent)
             connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             checkStatus(connection.responseCode)
             val declared = connection.getHeaderFieldLong("Content-Length", -1L)
-            return connection.inputStream.use { savePdf(file, it, declared) }
+            return connection.inputStream.use { savePdf(file, it, declared, emit) }
         } finally {
             connection.disconnect()
         }
@@ -87,18 +107,29 @@ internal class PdfFileFetcher(private val context: Context) {
         check(code == HttpURLConnection.HTTP_OK) { "文档下载失败（HTTP $code），请重新打开。" }
     }
 
-    private fun savePdf(file: File, input: InputStream, declared: Long): File {
-        check(declared <= MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
+    private fun savePdf(file: File, input: InputStream, declared: Long, emit: (Long, Long) -> Unit): File {
+        // Content-Length 才是实际要下的体积（docview 常把大原件转成小副本），
+        // 按网盘列表里的原始 size 预拦会误伤。declared < 0 表示分块传输，交给下面的累计校验。
+        check(!pdfTooLarge(declared)) { PDF_TOO_LARGE_MESSAGE }
         file.outputStream().use { output ->
             val buffer = ByteArray(16 * 1024)
             var total = 0L
+            var lastEmitAt = 0L
+            var lastEmitBytes = 0L
             while (true) {
                 if (Thread.currentThread().isInterrupted) error("下载已取消。")
                 val count = input.read(buffer)
                 if (count < 0) break
                 total += count
-                check(total <= MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
+                check(!pdfTooLarge(total)) { PDF_TOO_LARGE_MESSAGE }
                 output.write(buffer, 0, count)
+                // 读一块就刷一次会把主线程打满：按字节增量或时间间隔节流。
+                val now = System.currentTimeMillis()
+                if (total - lastEmitBytes >= EMIT_BYTES || now - lastEmitAt >= EMIT_INTERVAL_MS) {
+                    emit(total, declared)
+                    lastEmitAt = now
+                    lastEmitBytes = total
+                }
             }
             check(total > 5) { "文档内容为空，请重新打开。" }
             check(declared <= 0 || total == declared) { "文档下载不完整，请重新打开。" }
@@ -124,6 +155,7 @@ internal class PdfFileFetcher(private val context: Context) {
     }
 
     private companion object {
-        const val MAX_BYTES = 80L * 1024 * 1024
+        const val EMIT_BYTES = 512L * 1024L
+        const val EMIT_INTERVAL_MS = 120L
     }
 }

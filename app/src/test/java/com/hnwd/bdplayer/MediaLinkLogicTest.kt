@@ -101,9 +101,9 @@ class MediaLinkLogicTest {
     }
 
     @Test
-    fun `其余六个 lane 都走状态栏`() {
+    fun `除 AUDIO 外的 lane 都走状态栏`() {
         val others = RequestLane.entries - RequestLane.AUDIO
-        assertEquals(6, others.size)
+        assertEquals(RequestLane.entries.size - 1, others.size)
         others.forEach { assertEquals(LinkErrorTarget.STATUS, linkErrorTarget(it)) }
     }
 

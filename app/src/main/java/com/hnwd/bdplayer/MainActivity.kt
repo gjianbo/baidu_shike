@@ -55,6 +55,7 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
+import com.google.android.material.snackbar.Snackbar
 import com.google.common.util.concurrent.ListenableFuture
 import java.io.File
 import java.net.URL
@@ -82,6 +83,8 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var sourceButton: View
     internal lateinit var searchButton: View
     internal lateinit var refreshButton: View
+    internal lateinit var btnDownloads: View
+    internal lateinit var downloadBadge: TextView
     internal lateinit var sectionRow: LinearLayout
     internal lateinit var sectionTitle: TextView
     internal lateinit var sortButton: TextView
@@ -106,6 +109,7 @@ class MainActivity : AppCompatActivity() {
 
     internal var writeRequestId = 0
     internal var deleteCheckRequestId = 0
+    internal var downloadRequestId = 0
     /**
      * 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。
      *
@@ -133,6 +137,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 媒体取址（群组 sharedownload / 我的网盘下载签名 / 验证码），三条预览链共用。 */
     internal val mediaLinks by lazy { MediaLinkSection(MediaLinkHostAdapter()) }
+
+    /** 长按下载：取址 -> 系统下载队列 -> 下载管理页。 */
+    internal val downloads by lazy { DownloadSection(DownloadHostAdapter(), mediaLinks) }
 
     /** 搜索（输入弹窗 / 结果面板 / 定位）；按需创建，销毁时只碰已存在的实例。 */
     internal var searchSectionRef: SearchSection? = null
@@ -498,6 +505,10 @@ class MainActivity : AppCompatActivity() {
         btnBack = shell.findViewById(R.id.btnBack)
         btnFavorites.setOnClickListener { openFavorites() }
         btnBack.setOnClickListener { closeFavorites() }
+        btnDownloads = shell.findViewById(R.id.btnDownloads)
+        downloadBadge = shell.findViewById(R.id.downloadBadge)
+        btnDownloads.setOnClickListener { openDownloads() }
+        updateDownloadBadge()
         homeGroupChip = TextView(this).apply {
             setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setTypeface(typeface, Typeface.BOLD)
@@ -847,6 +858,7 @@ class MainActivity : AppCompatActivity() {
         // controller 与账号校验可能都还没就绪；openCurrentPlayback 只在守卫成立时
         // 才展开并清零，否则保留标志，等 controller 回调 / updateNowPlaying 继续重试。
         retryOpenPlayerIfPending()
+        updateDownloadBadge()
         maybeCheckHomeInBackground()
     }
 
@@ -950,6 +962,7 @@ class MainActivity : AppCompatActivity() {
             RequestLane.RENEWAL -> ++renewalRequestId
             RequestLane.WRITE -> ++writeRequestId
             RequestLane.DELETE_CHECK -> ++deleteCheckRequestId
+            RequestLane.DOWNLOAD -> ++downloadRequestId
         }
         mediaLinks.dismissCaptcha(lane)
         val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
@@ -961,13 +974,15 @@ class MainActivity : AppCompatActivity() {
             RequestLane.RENEWAL -> renewalRequestId
             RequestLane.WRITE -> writeRequestId
             RequestLane.DELETE_CHECK -> deleteCheckRequestId
+            RequestLane.DOWNLOAD -> downloadRequestId
         } && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
         fun showError(message: String?) {
             val text = message ?: "网盘请求失败，请重试。"
             when (lane) {
                 RequestLane.LIST -> status.text = text
                 RequestLane.AUDIO -> failAudioRequest(text)
-                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK -> Unit
+                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE,
+                RequestLane.DELETE_CHECK, RequestLane.DOWNLOAD -> Unit
             }
         }
         if (lane == RequestLane.LIST) status.text = statusHint ?: "正在读取…"
@@ -1164,6 +1179,11 @@ class MainActivity : AppCompatActivity() {
             backupLauncher.launch(Intent(this@MainActivity, BackupActivity::class.java))
         }
 
+        override fun openDownloads() = this@MainActivity.openDownloads()
+
+        override fun downloadSummary(): String =
+            DownloadCenter.activeCount(this@MainActivity).takeIf { it > 0 }?.let { "$it 个进行中" } ?: ""
+
         override fun appVersionLine(): String {
             val version = runCatching {
                 packageManager.getPackageInfo(packageName, 0).versionName.orEmpty()
@@ -1269,6 +1289,8 @@ class MainActivity : AppCompatActivity() {
             web.evaluateJavascript(script, onResult)
         }
 
+        override fun userAgent() = web.settings.userAgentString
+
         override fun launchViewer(intent: Intent, cachedFile: File?) = launchPreview(intent, cachedFile)
 
         override fun fetchJson(
@@ -1319,6 +1341,8 @@ class MainActivity : AppCompatActivity() {
         override fun evaluateJavascript(script: String, onResult: (String?) -> Unit) {
             web.evaluateJavascript(script, onResult)
         }
+
+        override fun userAgent() = web.settings.userAgentString
 
         override fun openPdfReader(entry: PanEntry, file: File) = startPdfReader(entry, file)
 
@@ -1378,6 +1402,45 @@ class MainActivity : AppCompatActivity() {
             onCancelled = onCancelled, onFailure = onFailure,
             onCaptcha = onCaptcha, onCurrentResult = onCurrentResult, onResult = onResult,
         )
+    }
+
+    // ===================== DownloadHost =====================
+    // 下载取址需要的最小宿主能力：账号、WebView UA、bdstoken 与提示条。
+
+    internal inner class DownloadHostAdapter : DownloadHost {
+        override val hostActivity: android.app.Activity get() = this@MainActivity
+
+        override fun account() = verifiedAccount
+        override fun userAgent() = web.settings.userAgentString
+        override fun sessionReady(provider: SourceProvider) = hasActiveSession(provider)
+        override fun verifyAccount() = verifyAndRefresh()
+        override fun isCurrent() = !isDestroyed && !isFinishing
+        override fun say(message: String) = toast(message)
+        override fun setStatus(message: String) {
+            status.text = message
+        }
+        override fun runOnUiThread(action: () -> Unit) = this@MainActivity.runOnUiThread(action)
+        override fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) =
+            ensureBdstoken(onReady = onReady, onFailure = onFailure)
+
+        override fun onAdded(name: String) {
+            updateDownloadBadge()
+            Snackbar.make(shell, "已加入下载队列：$name", Snackbar.LENGTH_LONG)
+                .setAction("查看进度") { openDownloads() }
+                .show()
+        }
+    }
+
+    internal fun openDownloads() {
+        startActivity(Intent(this, DownloadActivity::class.java))
+    }
+
+    /** 顶栏下载图标常显，有进行中任务时带数量角标。 */
+    internal fun updateDownloadBadge() {
+        if (!::downloadBadge.isInitialized) return
+        val count = DownloadCenter.activeCount(this)
+        downloadBadge.text = count.toString()
+        downloadBadge.visibility = if (count > 0) View.VISIBLE else View.GONE
     }
 
     // ===================== SearchHost =====================

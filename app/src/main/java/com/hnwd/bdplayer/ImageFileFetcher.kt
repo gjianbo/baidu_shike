@@ -62,7 +62,7 @@ internal object ImageTypes {
 internal class InvalidImageLink(message: String) : IllegalStateException(message)
 
 /**
- * 图片下载器。百度走 dlink（UA=pan.baidu.com、跟随 302），夸克走原文件 download_url。
+ * 图片下载器。百度走 dlink（跟随 302，UA 必须是生成 dlink 的 WebView UA），夸克走原文件 download_url。
  * 两条链路下载完成后统一做大小与文件头校验。
  */
 internal class ImageFileFetcher(private val context: Context) {
@@ -72,8 +72,9 @@ internal class ImageFileFetcher(private val context: Context) {
     private var worker: Future<*>? = null
     private var generation = 0
 
-    fun start(source: Uri, onResult: (Result<File>) -> Unit) =
-        fetch({ file -> download(source, file) }, onResult)
+    /** [userAgent] 必须是生成 dlink 的那个 WebView 的 UA，在主线程取好后传进来。 */
+    fun start(source: Uri, userAgent: String, onResult: (Result<File>) -> Unit) =
+        fetch({ file -> download(source, file, userAgent) }, onResult)
 
     fun startQuark(fileId: String, name: String, onResult: (Result<File>) -> Unit) =
         fetch({ file -> downloadQuark(fileId, name, file) }, onResult)
@@ -102,14 +103,15 @@ internal class ImageFileFetcher(private val context: Context) {
         }
     }
 
-    private fun download(source: Uri, file: File): File {
+    private fun download(source: Uri, file: File, userAgent: String): File {
         val connection = URL(source.toString()).openConnection() as HttpsURLConnection
         try {
-            // dlink 302 跳 CDN，签名自带，UA 与文档/音视频链路一致
+            // dlink 302 跳 CDN，签名自带，但签名绑定了生成 dlink 时的 WebView UA；
+            // 大原图用 PanApi.DLINK_USER_AGENT("pan.baidu.com") 会 403 sign error。
             connection.instanceFollowRedirects = true
             connection.connectTimeout = 10_000
             connection.readTimeout = 30_000
-            connection.setRequestProperty("User-Agent", PanApi.DLINK_USER_AGENT)
+            connection.setRequestProperty("User-Agent", userAgent)
             connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             checkStatus(connection.responseCode)
             val declared = connection.getHeaderFieldLong("Content-Length", -1L)

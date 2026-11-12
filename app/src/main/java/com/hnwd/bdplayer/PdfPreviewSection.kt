@@ -2,6 +2,8 @@ package com.hnwd.bdplayer
 
 import android.app.Activity
 import android.net.Uri
+import android.widget.FrameLayout
+import android.widget.ProgressBar
 import androidx.appcompat.app.AlertDialog
 import java.io.File
 import org.json.JSONObject
@@ -21,6 +23,8 @@ internal interface PdfPreviewHost {
     fun account(): String
     fun accountVerified(): Boolean
     fun sessionReady(provider: SourceProvider): Boolean
+    /** dlink 签名绑定生成它的 WebView UA，下载必须原样带上；主线程读取。 */
+    fun userAgent(): String
     /** 该条目该记在哪个账号名下（夸克走 AccountScope，百度走已校验账号）。 */
     fun playbackAccount(entry: PanEntry): String
     /** 作废进行中的列表请求（PDF 取址与列表共用 LIST 通道）。 */
@@ -75,14 +79,15 @@ internal class PdfPreviewSection(
     }
 
     fun open(entry: PanEntry) {
-        // 大文件下载必失败（夸克 / 百度直链 100MB+ 实测）：在起任何请求前拦掉，
-        // 只留一句提示；不动 openId，也不打断可能正在进行中的另一次下载。
-        if (pdfTooLarge(entry.size)) {
+        val quark = entry.provider == SourceProvider.QUARK
+        // 夸克 pdf/preview 给的是原件直链且非会员有约 50MB 的官方下载上限，直接给准确提示；
+        // 百度 docview 常把 240MB 原件转成 29.6MB 副本，按原始大小预拦会误伤，
+        // 实际要下多少只有响应头的 Content-Length 知道，判定放在 PdfFileFetcher。
+        if (quark && quarkPdfTooLarge(entry.size)) {
             host.setStatus("")
-            host.say(PDF_TOO_LARGE_MESSAGE)
+            host.say(QUARK_PDF_TOO_LARGE_MESSAGE)
             return
         }
-        val quark = entry.provider == SourceProvider.QUARK
         if (if (quark) !host.sessionReady(SourceProvider.QUARK) else !host.accountVerified()) {
             host.setStatus("请确认网盘登录后重试。")
             return
@@ -229,9 +234,19 @@ internal class PdfPreviewSection(
         val quark = entry.provider == SourceProvider.QUARK
         if (!isCurrentPdf(id, account, entry.provider)) return
         loading?.dismiss()
+        val bar = ProgressBar(activity, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            // 拿到 Content-Length 之前只转不确定进度；拿到后切成百分比。
+            isIndeterminate = true
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
         val dialog = AlertDialog.Builder(activity)
             .setTitle(entry.name)
-            .setMessage("正在下载文档…")
+            .setMessage("正在加载文档…")
+            .setView(activity.padded(bar))
             .setCancelable(false)
             .setNegativeButton("取消") { _, _ ->
                 openId++
@@ -241,6 +256,14 @@ internal class PdfPreviewSection(
             }
             .show()
         loading = dialog
+        fun paint(progress: PdfProgress) {
+            // 弹窗已被取消/替换时，迟到的进度回调不能再刷新 UI。
+            if (loading !== dialog) return
+            val percent = pdfProgressPercent(progress.bytesDone, progress.bytesTotal)
+            bar.isIndeterminate = percent < 0
+            if (percent >= 0) bar.progress = percent
+            dialog.setMessage(pdfProgressText(progress.bytesDone, progress.bytesTotal))
+        }
         fun complete(result: Result<File>) {
             if (loading === dialog) {
                 dialog.dismiss()
@@ -281,8 +304,8 @@ internal class PdfPreviewSection(
                 if (quark) host.say(message)
             }
         }
-        if (quark) fetcher.startQuark(entry.fileId, ::complete)
-        else fetcher.start(requireNotNull(link), ::complete)
+        if (quark) fetcher.startQuark(entry.fileId, { paint(it) }, ::complete)
+        else fetcher.start(requireNotNull(link), host.userAgent(), { paint(it) }, ::complete)
     }
 
     private fun openCachedPdf(entry: PanEntry, file: File) {

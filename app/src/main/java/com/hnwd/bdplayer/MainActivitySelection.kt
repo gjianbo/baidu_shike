@@ -172,6 +172,9 @@ internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEnt
     } else if (!entry.isDisk && !entry.directory && !quark) {
         choices += SheetChoice("转存到我的网盘", meta = "保存为网盘副本", tag = "transfer")
     }
+    if (!entry.directory) {
+        choices += SheetChoice("下载", meta = "保存到本机「下载 / 拾课」", tag = "download")
+    }
     choices += SheetChoice(if (favorites.has(entry)) "取消收藏" else "收藏", tag = "favorite")
     choices += SheetChoice("详情", tag = "detail")
 
@@ -188,6 +191,7 @@ internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEnt
                 "share" -> diskWrites.promptShare(listOf(entry))
                 "delete" -> diskWrites.confirmDelete(listOf(entry))
                 "transfer" -> diskWrites.promptTransfer(entry)
+                "download" -> downloads.start(entry)
                 "favorite" -> toggleFavorite(entry)
                 "detail" -> showEntryDetail(entry)
             }

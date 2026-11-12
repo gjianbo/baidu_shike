@@ -22,6 +22,8 @@ internal interface ImagePreviewHost {
     fun account(): String
     fun accountVerified(): Boolean
     fun sessionReady(provider: SourceProvider): Boolean
+    /** dlink 签名绑定生成它的 WebView UA，下载必须原样带上；主线程读取。 */
+    fun userAgent(): String
     fun playbackAccount(entry: PanEntry): String
     fun bumpListRequest()
     fun verifyAccount()
@@ -232,7 +234,7 @@ internal class ImagePreviewSection(
                 showOriginalFailure(imageFailureMessage(it))
             }
         }
-        fetcher.start(link, ::complete)
+        fetcher.start(link, host.userAgent(), ::complete)
     }
 
     private fun showOriginalFailure(reason: String) {

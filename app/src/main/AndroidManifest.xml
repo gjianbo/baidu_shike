@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 下载进度在 App 内展示，隐藏系统下载器的重复通知。 -->
+    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <permission android:name="com.hnwd.bdplayer.CONTROL_AUDIO" android:protectionLevel="signature" />
@@ -42,6 +44,11 @@
         </provider>
         <activity android:name=".QuarkDriveActivity" android:exported="false"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout" />
+        <activity
+            android:name=".DownloadActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout"
+            android:theme="@style/AppTheme" />
         <activity
             android:name=".BackupActivity"
             android:exported="false"

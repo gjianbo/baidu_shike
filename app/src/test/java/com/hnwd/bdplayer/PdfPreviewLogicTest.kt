@@ -13,20 +13,73 @@ import org.junit.Test
  */
 class PdfPreviewLogicTest {
 
-    // ---------- 文档打开大小限制 ----------
+    // ---------- 文档体积上限（夸克按原始大小、百度按 Content-Length） ----------
 
     @Test
-    fun `50MB 以内放行 超过 50MB 拦截`() {
-        assertEquals(50L * 1024 * 1024, MAX_PDF_BYTES)
-        assertEquals("文件超过 50MB，暂不支持在 App 内打开。", PDF_TOO_LARGE_MESSAGE)
-        assertFalse(pdfTooLarge(null))
-        assertFalse(pdfTooLarge(""))
-        assertFalse(pdfTooLarge("0"))
-        assertFalse(pdfTooLarge("abc"))
-        assertFalse(pdfTooLarge("-1"))
-        assertFalse(pdfTooLarge((50L * 1024 * 1024).toString()))
-        assertTrue(pdfTooLarge((50L * 1024 * 1024 + 1).toString()))
-        assertTrue(pdfTooLarge((100L * 1024 * 1024).toString()))
+    fun `夸克超过 50MB 预拦且提示说明平台限制`() {
+        assertEquals(50L * 1024 * 1024, MAX_QUARK_PDF_BYTES)
+        assertEquals(
+            "夸克网盘非会员单个文件下载上限约 50MB，请开通会员或到夸克网页版查看。",
+            QUARK_PDF_TOO_LARGE_MESSAGE,
+        )
+        assertFalse(quarkPdfTooLarge(null))
+        assertFalse(quarkPdfTooLarge(""))
+        assertFalse(quarkPdfTooLarge("abc"))
+        assertFalse(quarkPdfTooLarge("-1"))
+        assertFalse(quarkPdfTooLarge((50L * 1024 * 1024).toString()))
+        assertTrue(quarkPdfTooLarge((50L * 1024 * 1024 + 1).toString()))
+        assertTrue(quarkPdfTooLarge("70675789")) // 实测 67.4MB 触发 23018
+    }
+
+    @Test
+    fun `200MB 以内放行 超过 200MB 拦截`() {
+        assertEquals(200L * 1024 * 1024, MAX_PDF_BYTES)
+        assertEquals("文档超过 200MB，暂不支持在 App 内在线阅读。", PDF_TOO_LARGE_MESSAGE)
+        assertFalse(pdfTooLarge(-1L)) // 分块传输没有 Content-Length，交给累计字节数兜底
+        assertFalse(pdfTooLarge(0L))
+        assertFalse(pdfTooLarge(MAX_PDF_BYTES))
+        assertTrue(pdfTooLarge(MAX_PDF_BYTES + 1))
+        assertTrue(pdfTooLarge(240L * 1024 * 1024))
+    }
+
+    @Test
+    fun `UA 修复后 大原件与转码副本都不该被体积误拦`() {
+        // 96.4MB / 113.6MB 原件直出：旧实现先被 50MB 预拦、再被 80MB 下载上限拦
+        assertFalse(pdfTooLarge(96_366_817L))
+        assertFalse(pdfTooLarge(113_612_768L))
+        // 240MB 原件经 docview 转码后只有 29.6MB，原始 size 不该作为判据
+        assertFalse(pdfTooLarge(29_638_474L))
+        assertFalse(pdfTooLarge(109L * 1024 * 1024))
+    }
+
+    // ---------- 下载进度（百分比与文案都是纯函数） ----------
+
+    @Test
+    fun `百分比在总长度未知或数据异常时返回负一`() {
+        assertEquals(-1, pdfProgressPercent(0L, -1L))
+        assertEquals(-1, pdfProgressPercent(0L, 0L))
+        assertEquals(-1, pdfProgressPercent(-1L, 100L))
+    }
+
+    @Test
+    fun `百分比按总长度计算并钳在 0 到 100`() {
+        assertEquals(0, pdfProgressPercent(0L, 120L * 1024 * 1024))
+        assertEquals(10, pdfProgressPercent(12L * 1024 * 1024, 120L * 1024 * 1024))
+        assertEquals(100, pdfProgressPercent(120L * 1024 * 1024, 120L * 1024 * 1024))
+        assertEquals(100, pdfProgressPercent(200L * 1024 * 1024, 120L * 1024 * 1024))
+        // 100MB 级原件：先乘 100 也不能溢出 Long
+        assertEquals(84, pdfProgressPercent(96_366_817L, 113_612_768L))
+    }
+
+    @Test
+    fun `进度文案区分已知总长与分块传输`() {
+        assertEquals("正在加载文档…", pdfProgressText(0L, 113_612_768L))
+        assertEquals(
+            "已加载 12.0 MB / 120.0 MB · 10%",
+            pdfProgressText(12L * 1024 * 1024, 120L * 1024 * 1024),
+        )
+        assertEquals("已加载 12.0 MB", pdfProgressText(12L * 1024 * 1024, -1L))
+        assertEquals("已加载 108.3 MB", pdfProgressText(113_612_768L, -1L))
     }
 
     // ---------- 账号探测 ----------
