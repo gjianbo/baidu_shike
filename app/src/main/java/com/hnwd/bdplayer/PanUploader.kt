@@ -81,7 +81,6 @@ internal class PanUploader(private val context: Context) {
 
     /** bdstoken + 账号等级；等级决定单文件上限。 */
     fun session(): Pair<String, Int> {
-        android.util.Log.d("ShikeUpload", "cookieLen=${cookie.length}")
         val fields = enc("[\"bdstoken\",\"is_vip\"]")
         val request = Request.Builder()
             .url("https://pan.baidu.com/api/gettemplatevariable?$COMMON&fields=$fields")

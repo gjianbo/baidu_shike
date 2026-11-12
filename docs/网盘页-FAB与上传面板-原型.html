@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拾课 · 网盘页 FAB 与上传面板原型</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --page: #14151a;
+    --panel: #1d1f26;
+    --panel-2: #242730;
+    --outer-line: #343743;
+    --outer-txt: #e9e8ee;
+    --outer-txt-2: #9b99a8;
+    --hi: #bfc5ff;
+
+    --bg: #f7f5ef;
+    --surface: #fffdf8;
+    --surface-2: #f2efe7;
+    --ink: #1b1c20;
+    --ink-2: #5e5c66;
+    --ink-3: #75727c;
+    --line: #ded9d0;
+    --accent: #3b4ccb;
+    --accent-soft: #dfe1ff;
+    --accent-ink: #2e3bb2;
+    --on-accent: #ffffff;
+    --ok: #2c6a4e;
+    --ok-soft: #c3ebd8;
+    --shadow: rgba(0,0,0,.18);
+  }
+  [data-theme="night"] {
+    --bg: #111216;
+    --surface: #1a1b21;
+    --surface-2: #202128;
+    --ink: #e8e6ec;
+    --ink-2: #b6b3bf;
+    --ink-3: #8d8a97;
+    --line: #3a3b47;
+    --accent: #bfc5ff;
+    --accent-soft: #27359b;
+    --accent-ink: #dde1ff;
+    --on-accent: #0d1a66;
+    --ok: #9bd7b9;
+    --ok-soft: #164a33;
+    --shadow: rgba(0,0,0,.5);
+  }
+  body {
+    margin: 0; padding: 32px 24px 56px; background: var(--page); color: var(--outer-txt);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; letter-spacing: .2px; }
+  .sub { font-size: 13px; color: var(--outer-txt-2); margin: 0 0 20px; line-height: 1.7; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 9px; align-items: center; padding: 12px 14px;
+    background: var(--panel); border: 1px solid var(--outer-line); border-radius: 12px; margin-bottom: 22px;
+  }
+  button { font: inherit; cursor: pointer; }
+  .toolbar button {
+    font-size: 13px; color: var(--outer-txt); background: var(--panel-2);
+    border: 1px solid var(--outer-line); padding: 8px 15px; border-radius: 8px; transition: .18s;
+  }
+  .toolbar button:hover { border-color: var(--hi); color: var(--hi); }
+  .toolbar button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+  .toolbar button.primary:hover { filter: brightness(1.12); color: var(--on-accent); }
+  .badge { margin-left: auto; font-size: 12px; color: var(--outer-txt-2); }
+
+  .stage { display: grid; grid-template-columns: 360px 360px; gap: 28px; justify-content: center; align-items: start; }
+  @media (max-width: 820px) { .stage { grid-template-columns: 360px; } }
+  .caption { font-size: 12px; color: var(--outer-txt-2); margin: 0 0 10px 2px; letter-spacing: .3px; }
+  .phone {
+    width: 360px; height: 720px; border-radius: 30px; overflow: hidden; position: relative;
+    background: var(--bg); color: var(--ink);
+    box-shadow: 0 24px 60px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.08);
+    display: flex; flex-direction: column;
+  }
+  .statusbar {
+    height: 30px; flex: none; padding: 0 18px; display: flex; align-items: center;
+    justify-content: space-between; font-size: 11px; font-weight: 600; color: var(--ink-2);
+  }
+  .statusbar .battery { width: 20px; height: 10px; border: 1px solid var(--ink-3); border-radius: 3px; position: relative; }
+  .statusbar .battery::before { content: ""; position: absolute; inset: 1px; right: 5px; background: var(--ok); border-radius: 1px; }
+  .brand { height: 46px; flex: none; display: flex; align-items: center; padding: 0 10px 0 16px; gap: 2px; }
+  .logo {
+    width: 30px; height: 30px; border-radius: 8px; background: var(--ink); color: var(--bg);
+    display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; margin-right: 9px;
+  }
+  .brand .name { font-size: 15px; font-weight: 700; }
+  .brand .spacer { flex: 1; }
+  .iconbtn {
+    width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center;
+    justify-content: center; color: var(--ink-2); flex: none;
+  }
+  .iconbtn svg { width: 19px; height: 19px; stroke: currentColor; fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .iconbtn.removed { opacity: .28; text-decoration: line-through; }
+  .head { padding: 8px 20px 4px; }
+  .head h2 { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: .2px; }
+  .head p { margin: 4px 0 0; font-size: 11.5px; color: var(--ink-3); }
+  .search {
+    margin: 12px 20px 8px; padding: 11px 14px; border-radius: 12px; background: var(--surface);
+    border: 1px solid var(--line); font-size: 12px; color: var(--ink-3); display: flex;
+    align-items: center; justify-content: space-between;
+  }
+  .search svg { width: 17px; height: 17px; stroke: var(--ink-3); fill: none; stroke-width: 2; }
+  .sortrow { margin: 0 20px; padding: 8px 2px; display: flex; align-items: center; justify-content: space-between; font-size: 11.5px; color: var(--ink-3); }
+  .list { flex: 1; overflow: hidden; padding: 0 20px 120px; }
+  .filerow { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .folder {
+    width: 36px; height: 36px; border-radius: 10px; flex: none; display: flex; align-items: center;
+    justify-content: center; background: var(--accent-soft); color: var(--accent-ink);
+  }
+  .folder svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; }
+  .filemain { flex: 1; min-width: 0; }
+  .filename { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .filemeta { font-size: 10.5px; color: var(--ink-3); margin-top: 3px; }
+  .radio { width: 15px; height: 15px; border: 1.5px solid var(--line); border-radius: 50%; flex: none; }
+
+  .fab {
+    position: absolute; right: 18px; bottom: 76px; width: 56px; height: 56px; border-radius: 50%;
+    background: var(--accent); color: var(--on-accent); border: none; display: flex;
+    align-items: center; justify-content: center; box-shadow: 0 8px 22px var(--shadow); z-index: 4;
+    transition: bottom .25s ease;
+  }
+  .fab svg { width: 26px; height: 26px; stroke: currentColor; fill: none; stroke-width: 2.4; stroke-linecap: round; }
+  .fab.raised { bottom: 146px; }
+  .fabhint {
+    position: absolute; right: 82px; bottom: 92px; font-size: 10.5px; color: var(--ink-3);
+    background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; z-index: 4;
+    transition: bottom .25s ease;
+  }
+  .fabhint.raised { bottom: 162px; }
+
+  .mini {
+    position: absolute; left: 14px; right: 14px; bottom: 14px; height: 58px; border-radius: 14px;
+    background: var(--surface); border: 1px solid var(--line); box-shadow: 0 6px 18px var(--shadow);
+    display: none; align-items: center; gap: 10px; padding: 0 12px; z-index: 3;
+  }
+  .mini.show { display: flex; }
+  .mini .cover { width: 36px; height: 36px; border-radius: 9px; background: var(--accent-soft); flex: none; }
+  .mini .mt { flex: 1; min-width: 0; font-size: 11.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mini .ms { font-size: 10px; color: var(--ink-3); margin-top: 3px; }
+  .mini .play { width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center; font-size: 11px; flex: none; }
+  .tabbar {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 58px; background: var(--surface);
+    border-top: 1px solid var(--line); display: flex; align-items: center; z-index: 2;
+  }
+  .tabbar div { flex: 1; text-align: center; font-size: 10px; color: var(--ink-3); }
+  .tabbar div.on { color: var(--accent-ink); font-weight: 700; }
+
+  .dim { position: absolute; inset: 0; background: rgba(0,0,0,.45); z-index: 5; }
+  .dim.hidden { display: none; }
+  .sheet {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; background: var(--surface);
+    border-radius: 20px 20px 0 0; padding: 8px 18px 24px; box-shadow: 0 -10px 30px var(--shadow);
+  }
+  .sheet.hidden { display: none; }
+  .handle { width: 34px; height: 4px; border-radius: 4px; background: var(--line); margin: 0 auto 16px; }
+  .sheet h3 { margin: 0; font-size: 16px; font-weight: 700; }
+  .sheet .target { margin: 5px 0 16px; font-size: 11px; color: var(--ink-3); line-height: 1.6; }
+  .sheet .target b { color: var(--accent-ink); font-weight: 600; }
+  .action {
+    display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 13px;
+    background: var(--surface-2); margin-bottom: 9px; border: 1px solid transparent;
+  }
+  .action:hover { border-color: var(--accent); }
+  .action .ico {
+    width: 40px; height: 40px; border-radius: 11px; flex: none; background: var(--accent-soft);
+    color: var(--accent-ink); display: flex; align-items: center; justify-content: center;
+  }
+  .action .ico svg { width: 21px; height: 21px; stroke: currentColor; fill: none; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  .action .txt { flex: 1; min-width: 0; }
+  .action .t { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .action .s { font-size: 10.5px; color: var(--ink-3); margin-top: 4px; line-height: 1.5; }
+  .pill { font-size: 9px; font-weight: 600; padding: 2px 6px; border-radius: 6px; background: var(--ok-soft); color: var(--ok); }
+  .pill.pending { background: var(--surface); color: var(--ink-3); border: 1px solid var(--line); }
+  .cancel { width: 100%; margin-top: 8px; padding: 11px; border-radius: 12px; border: 1px solid var(--line); background: none; color: var(--ink-2); font-size: 12.5px; }
+
+  .dialog {
+    position: absolute; left: 24px; right: 24px; top: 260px; z-index: 7; background: var(--surface);
+    border-radius: 16px; padding: 20px 18px 16px; box-shadow: 0 16px 40px var(--shadow);
+  }
+  .dialog.hidden { display: none; }
+  .dialog h3 { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+  .dialog p { margin: 0 0 14px; font-size: 11px; color: var(--ink-3); }
+  .dialog input {
+    width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--surface-2); color: var(--ink); font-size: 12.5px; outline: none;
+  }
+  .dialog .row { display: flex; gap: 8px; margin-top: 16px; }
+  .dialog .row button { flex: 1; padding: 10px; border-radius: 10px; font-size: 12px; border: 1px solid var(--line); background: none; color: var(--ink-2); }
+  .dialog .row button.go { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+
+  .uploadcard {
+    position: absolute; left: 18px; right: 18px; top: 210px; z-index: 6; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 14px; padding: 14px; box-shadow: 0 10px 30px var(--shadow);
+  }
+  .uploadcard.hidden { display: none; }
+  .uploadcard .ut { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .uploadcard .um { font-size: 10.5px; color: var(--ink-3); margin: 5px 0 10px; }
+  .track { height: 5px; border-radius: 5px; background: var(--line); overflow: hidden; }
+  .track i { display: block; height: 100%; width: 42%; border-radius: 5px; background: var(--accent); }
+  .uploadcard .uf { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-3); margin-top: 8px; }
+  .notice {
+    position: absolute; left: 18px; right: 18px; top: 330px; z-index: 6; font-size: 10.5px;
+    line-height: 1.7; color: var(--ink-3); text-align: center;
+  }
+  .notice.hidden { display: none; }
+
+  .snack {
+    position: absolute; left: 24px; right: 24px; bottom: 22px; padding: 10px 14px;
+    border-radius: 11px; background: var(--ink); color: var(--bg); font-size: 11.5px;
+    box-shadow: 0 8px 24px var(--shadow); opacity: 0; transform: translateY(8px);
+    transition: .25s; pointer-events: none; text-align: center; z-index: 9;
+  }
+  .snack.show { opacity: 1; transform: translateY(0); }
+
+  .notes { margin-top: 30px; border-top: 1px solid var(--outer-line); padding-top: 18px; }
+  .notes h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; color: var(--outer-txt-2); line-height: 1.7; }
+  th, td { text-align: left; padding: 8px 10px 8px 0; border-bottom: 1px solid var(--outer-line); vertical-align: top; }
+  th { color: var(--outer-txt); font-weight: 600; width: 150px; }
+</style>
+</head>
+<body data-theme="night">
+<div class="wrap">
+  <h1>拾课 · 网盘页 FAB 与上传面板原型</h1>
+  <p class="sub">只画「我们能实现的功能」：右下角浮动 +，面板只两项。上传真实传输标为待验证，不画 BT / 扫描 / 安装包等做不到的入口。</p>
+
+  <div class="toolbar">
+    <button id="themeBtn">切换浅色</button>
+    <button id="miniBtn">显示迷你播放条</button>
+    <button id="providerBtn">切换到夸克网盘</button>
+    <button id="resetBtn" class="primary">回到面板</button>
+    <span class="badge">点右屏两项可看后续界面</span>
+  </div>
+
+  <div class="stage">
+    <div>
+      <div class="caption">A · 网盘页收起态（顶栏少了「新建文件夹」）</div>
+      <div class="phone" id="phoneA">
+        <div class="statusbar"><span>13:50</span><span style="display:flex;align-items:center;gap:6px">5G ▮▮▮ <span class="battery"></span></span></div>
+        <div class="brand">
+          <div class="logo">拾</div><div class="name">拾课</div><div class="spacer"></div>
+          <div class="iconbtn" title="下载管理"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg></div>
+          <div class="iconbtn" title="收藏"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.2-5.4-2.9-5.4 2.9 1-6.2L3.2 9.5l6.1-.9z"/></svg></div>
+          <div class="iconbtn" title="搜索"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></div>
+          <div class="iconbtn" title="刷新"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6M20 5v6h-6"/></svg></div>
+        </div>
+        <div class="head"><h2>文件</h2><p id="subtitleA">百度网盘 · 我的网盘</p></div>
+        <div class="search"><span>搜索网盘文件</span><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></div>
+        <div class="sortrow"><span>按文件名 ↑</span><span>列表 / 筛选</span></div>
+        <div class="list">
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">精品课</div><div class="filemeta">12 项 · 11-12 06:39</div></div><div class="radio"></div></div>
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">工具</div><div class="filemeta">8 项 · 11-11 10:35</div></div><div class="radio"></div></div>
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">电视剧-电影</div><div class="filemeta">32 项 · 09-20 13:39</div></div><div class="radio"></div></div>
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">aichat_history</div><div class="filemeta">6 项 · 07-09 14:04</div></div><div class="radio"></div></div>
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">我的备份</div><div class="filemeta">2 台设备 · 系统目录</div></div><div class="radio"></div></div>
+        </div>
+        <button class="fab" id="fab" title="添加"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+        <div class="fabhint" id="fabhint">+ 添加</div>
+        <div class="mini" id="mini"><div class="cover"></div><div style="flex:1;min-width:0"><div class="mt">第 08 课 · 儿童营养搭配</div><div class="ms">正在播放 · 拾课</div></div><div class="play">▶</div></div>
+        <div class="tabbar"><div>首页</div><div class="on">网盘</div><div>收藏</div><div>设置</div></div>
+        <div class="snack"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="caption">B · 点 FAB 后的面板（只两项）</div>
+      <div class="phone" id="phoneB">
+        <div class="statusbar"><span>13:50</span><span style="display:flex;align-items:center;gap:6px">5G ▮▮▮ <span class="battery"></span></span></div>
+        <div class="brand">
+          <div class="logo">拾</div><div class="name">拾课</div><div class="spacer"></div>
+          <div class="iconbtn"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg></div>
+          <div class="iconbtn"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.2-5.4-2.9-5.4 2.9 1-6.2L3.2 9.5l6.1-.9z"/></svg></div>
+          <div class="iconbtn"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></div>
+          <div class="iconbtn"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2 6M20 5v6h-6"/></svg></div>
+        </div>
+        <div class="head"><h2>文件</h2><p id="subtitleB">百度网盘 · 我的网盘</p></div>
+        <div class="search"><span>搜索网盘文件</span><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg></div>
+        <div class="sortrow"><span>按文件名 ↑</span><span>列表 / 筛选</span></div>
+        <div class="list">
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">精品课</div><div class="filemeta">12 项 · 11-12 06:39</div></div><div class="radio"></div></div>
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">工具</div><div class="filemeta">8 项 · 11-11 10:35</div></div><div class="radio"></div></div>
+          <div class="filerow"><div class="folder"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></div><div class="filemain"><div class="filename">电视剧-电影</div><div class="filemeta">32 项 · 09-20 13:39</div></div><div class="radio"></div></div>
+        </div>
+        <div class="tabbar"><div>首页</div><div class="on">网盘</div><div>收藏</div><div>设置</div></div>
+
+        <div class="dim" id="dim"></div>
+
+        <div class="sheet" id="sheet">
+          <div class="handle"></div>
+          <h3>添加到当前目录</h3>
+          <div class="target">将保存到 <b id="target">百度网盘 / 我的网盘</b><br>文件只上传到你当前浏览的目录</div>
+          <div class="action" id="actionUpload">
+            <div class="ico"><svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 16v3h16v-3"/></svg></div>
+            <div class="txt"><div class="t">上传文件 <span class="pill pending">接口待验证</span></div><div class="s">从本机选择任意文件 · 进度复用「下载」页</div></div>
+          </div>
+          <div class="action" id="actionFolder">
+            <div class="ico"><svg viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM12 12v5m-2.5-2.5h5"/></svg></div>
+            <div class="txt"><div class="t">新建文件夹 <span class="pill">已可用</span></div><div class="s">在当前目录创建，沿用现有网盘写操作</div></div>
+          </div>
+          <button class="cancel" id="cancelBtn">取消</button>
+        </div>
+
+        <div class="dialog hidden" id="folderDialog">
+          <h3>新建文件夹</h3>
+          <p id="folderHint">将创建到 百度网盘 / 我的网盘</p>
+          <input id="folderName" value="新课程" />
+          <div class="row"><button id="folderCancel">取消</button><button class="go" id="folderGo">创建</button></div>
+        </div>
+
+        <div class="uploadcard hidden" id="uploadCard">
+          <div class="ut">门店活动执行手册.pdf</div>
+          <div class="um">本机文件 · 29.6 MB · 上传中</div>
+          <div class="track"><i></i></div>
+          <div class="uf"><span>42% · 2.1 MB/s</span><span>取消</span></div>
+        </div>
+        <div class="notice hidden" id="uploadNotice">进度、失败重试与历史可复用现有「下载」页；<br>真实传输需先完成夸克 / 百度上传接口端到端验证。</div>
+
+        <div class="snack"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <h2>范围与边界</h2>
+    <table>
+      <tr><th>现在就能做</th><td>右下角 FAB、两项面板、新建文件夹（百度 <code>POST /api/create</code> / 夸克 <code>create()</code> 按来源分派）、目标目录提示、迷你播放条避让、顶栏移除旧图标。</td></tr>
+      <tr><th>阶段 1 · 待验证</th><td>「上传文件」的真实传输：系统文件选择 <code>OpenDocument</code> 免权限；夸克 <code>formupload/pre</code> 小文件表单或百度 <code>precreate + superfile2 + create</code> 需真机抓包跑通一家，再开放按钮。</td></tr>
+      <tr><th>阶段 2 · 再排</th><td>分片、大文件、后台保活、断点续传、多任务；把现有「下载」页升级成传输中心，进度与历史同一套 UI。</td></tr>
+      <tr><th>明确不做</th><td>BT / 磁力链、扫描文件、安装包分类、相册 / 文档 / 音频分栏、SVIP 营销位、9 宫格图标矩阵。</td></tr>
+      <tr><th>关键约束</th><td>右下角已被迷你播放条占用（<code>app_main.xml:495-501</code>），本原型用「上移避让」；<code>PanApi</code> 写操作是隐藏 WebView 的表单请求，传不了二进制，上传必须另走原生 HTTP；上传曾被下线（<code>docs/网盘文件管理-实施方案.md:198-215</code>），不能照旧代码重来。</td></tr>
+    </table>
+  </div>
+</div>
+
+<script>
+  const state = { mini: false, quark: false, view: "sheet" };
+
+  function snack(phone, text) {
+    const el = phone.querySelector(".snack");
+    el.textContent = text;
+    el.classList.add("show");
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.classList.remove("show"), 1700);
+  }
+
+  function render() {
+    const a = document.getElementById("phoneA");
+    const b = document.getElementById("phoneB");
+    const label = state.quark ? "夸克网盘 · 我的网盘" : "百度网盘 · 我的网盘";
+    document.getElementById("subtitleA").textContent = label;
+    document.getElementById("subtitleB").textContent = label;
+    document.getElementById("target").textContent = state.quark ? "夸克网盘 / 我的网盘" : "百度网盘 / 我的网盘";
+    document.getElementById("folderHint").textContent = "将创建到 " + (state.quark ? "夸克网盘 / 我的网盘" : "百度网盘 / 我的网盘");
+    document.getElementById("mini").classList.toggle("show", state.mini);
+    document.getElementById("fab").classList.toggle("raised", state.mini);
+    document.getElementById("fabhint").classList.toggle("raised", state.mini);
+    document.getElementById("fabhint").textContent = state.mini ? "+ 添加（已避让播放条）" : "+ 添加";
+
+    const sheet = document.getElementById("sheet");
+    const dim = document.getElementById("dim");
+    const dialog = document.getElementById("folderDialog");
+    const card = document.getElementById("uploadCard");
+    const notice = document.getElementById("uploadNotice");
+    sheet.classList.toggle("hidden", state.view !== "sheet");
+    dim.classList.toggle("hidden", state.view === "upload");
+    dialog.classList.toggle("hidden", state.view !== "folder");
+    card.classList.toggle("hidden", state.view !== "upload");
+    notice.classList.toggle("hidden", state.view !== "upload");
+  }
+
+  document.getElementById("themeBtn").addEventListener("click", (e) => {
+    const night = document.body.dataset.theme === "night";
+    document.body.dataset.theme = night ? "light" : "night";
+    e.target.textContent = night ? "切换深色" : "切换浅色";
+  });
+  document.getElementById("miniBtn").addEventListener("click", (e) => {
+    state.mini = !state.mini;
+    e.target.textContent = state.mini ? "隐藏迷你播放条" : "显示迷你播放条";
+    render();
+  });
+  document.getElementById("providerBtn").addEventListener("click", (e) => {
+    state.quark = !state.quark;
+    e.target.textContent = state.quark ? "切换到百度网盘" : "切换到夸克网盘";
+    snack(document.getElementById("phoneB"), state.quark ? "新建文件夹将走夸克 create()" : "新建文件夹将走百度 /api/create");
+    render();
+  });
+  document.getElementById("resetBtn").addEventListener("click", () => { state.view = "sheet"; render(); });
+
+  document.getElementById("fab").addEventListener("click", () => {
+    state.view = "sheet";
+    render();
+    snack(document.getElementById("phoneA"), "打开添加面板");
+  });
+  document.getElementById("actionFolder").addEventListener("click", () => { state.view = "folder"; render(); });
+  document.getElementById("actionUpload").addEventListener("click", () => {
+    state.view = "upload";
+    render();
+    snack(document.getElementById("phoneB"), "示例进度 · 真实上传待接口验证");
+  });
+  document.getElementById("cancelBtn").addEventListener("click", () => {
+    state.view = "sheet";
+    snack(document.getElementById("phoneB"), "已收起面板");
+  });
+  document.getElementById("folderCancel").addEventListener("click", () => { state.view = "sheet"; render(); });
+  document.getElementById("folderGo").addEventListener("click", () => {
+    const name = document.getElementById("folderName").value.trim() || "新建文件夹";
+    state.view = "sheet";
+    render();
+    snack(document.getElementById("phoneB"), "已创建「" + name + "」");
+  });
+  render();
+</script>
+</body>
+</html>

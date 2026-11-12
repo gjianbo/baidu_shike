@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拾课 · 音频页黑胶唱片动画原型</title>
+<style>
+  * { box-sizing: border-box; }
+  :root {
+    --page: #14151a;
+    --panel: #1d1f26;
+    --panel-2: #242730;
+    --line: #343743;
+    --txt: #e9e8ee;
+    --txt-2: #9b99a8;
+    --hi: #bfc5ff;
+    --app-bg: #f7f5ef;
+    --app-surface: #fffdf8;
+    --app-ink: #1b1c20;
+    --app-ink3: #75727c;
+    --app-line: #ded9d0;
+    --accent: #3b4ccb;
+    --on-accent: #ffffff;
+    --disc-edge: rgba(0,0,0,.18);
+  }
+  [data-theme="night"] {
+    --app-bg: #111216;
+    --app-surface: #1a1b21;
+    --app-ink: #e8e6ec;
+    --app-ink3: #8d8a97;
+    --app-line: #2c2e37;
+    --accent: #bfc5ff;
+    --on-accent: #0d1a66;
+    --disc-edge: rgba(255,255,255,.14);
+  }
+  body {
+    margin: 0;
+    padding: 30px 24px 48px;
+    background: radial-gradient(1200px 700px at 50% -10%, #22242d 0%, var(--page) 62%);
+    color: var(--txt);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 6px; letter-spacing: .2px; }
+  .sub { font-size: 13px; color: var(--txt-2); margin: 0 0 22px; line-height: 1.7; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 9px; align-items: center;
+    padding: 12px 14px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; margin-bottom: 24px;
+  }
+  button {
+    font: inherit; font-size: 13px; color: var(--txt); cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line);
+    padding: 8px 15px; border-radius: 8px; transition: .18s;
+  }
+  button:hover { border-color: var(--hi); color: var(--hi); }
+  button.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; font-weight: 600; }
+  button.primary:hover { filter: brightness(1.12); color: var(--on-accent); }
+  .badge {
+    margin-left: auto; font-size: 12px; color: var(--txt-2);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: #666; transition: .3s; }
+  .dot.on { background: #6dd39b; box-shadow: 0 0 10px #6dd39b; }
+
+  .stage { display: grid; grid-template-columns: 360px 1fr; gap: 26px; align-items: start; }
+  @media (max-width: 820px) { .stage { grid-template-columns: 1fr; } }
+
+  /* ---------- 手机框 ---------- */
+  .phone {
+    width: 360px; height: 660px; border-radius: 30px; overflow: hidden;
+    background: var(--app-bg); color: var(--app-ink);
+    box-shadow: 0 24px 60px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.08);
+    display: flex; flex-direction: column;
+  }
+  .app-top {
+    height: 52px; flex: none; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 14px;
+  }
+  .app-top svg { width: 22px; height: 22px; stroke: var(--app-ink); fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .app-top .ghost { opacity: .55; }
+  .divider { height: 1px; background: var(--app-line); flex: none; }
+  .app-body { flex: 1; display: flex; flex-direction: column; padding: 0 20px 8px; min-height: 0; }
+
+  /* B 槽 */
+  .b-slot { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  .turntable { width: 264px; height: 264px; position: relative; }
+  .turntable svg { width: 100%; height: 100%; display: block; overflow: visible; }
+
+  /* 唱片旋转 */
+  .disc-rot {
+    transform-origin: 140px 140px;
+    transform-box: view-box;
+    animation: spin 3.4s linear infinite;
+  }
+  .paused .disc-rot { animation-play-state: paused; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* 唱臂：绕支点转动 */
+  .arm-rot {
+    transform-origin: 248px 34px;
+    transform-box: view-box;
+    transform: rotate(0deg);
+    transition: transform .68s cubic-bezier(.34, 1.12, .5, 1);
+  }
+  .paused .arm-rot { transform: rotate(-46deg); }
+  .arm-lift { transition: transform .68s cubic-bezier(.34, 1.12, .5, 1); }
+  .paused .arm-lift { transform: translateY(-5px); }
+
+  .groove { fill: none; stroke: rgba(255,255,255,.055); stroke-width: 1; }
+  .groove.hi { stroke: rgba(255,255,255,.11); }
+  .label-wave { fill: none; stroke: var(--on-accent); stroke-width: 3.2; stroke-linecap: round; }
+
+  .meta { flex: none; text-align: center; padding-bottom: 6px; }
+  .meta .t { font-size: 17px; font-weight: 600; letter-spacing: .2px; }
+  .meta .s { font-size: 12px; color: var(--accent); margin-top: 5px; }
+
+  /* C 槽：进度 */
+  .progress { flex: none; padding: 12px 0 4px; }
+  .track { height: 4px; border-radius: 4px; background: var(--app-line); position: relative; }
+  .track .fill { position: absolute; left: 0; top: 0; bottom: 0; width: 38%; border-radius: 4px; background: var(--accent); }
+  .track .knob { position: absolute; left: 38%; top: 50%; width: 11px; height: 11px; border-radius: 50%; background: var(--accent); transform: translate(-50%, -50%); }
+  .times { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--app-ink3); margin-top: 7px; }
+
+  /* 传输组 */
+  .transport { flex: none; display: flex; align-items: center; justify-content: center; gap: 26px; padding: 8px 0 12px; }
+  .transport svg { width: 24px; height: 24px; fill: var(--app-ink); opacity: .8; }
+  .play-btn {
+    width: 56px; height: 56px; border-radius: 50%; background: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 20px rgba(59,76,203,.28); cursor: pointer;
+    transition: transform .18s;
+  }
+  .play-btn:active { transform: scale(.94); }
+  .play-btn svg { width: 26px; height: 26px; fill: var(--on-accent); opacity: 1; }
+  .d-slot { flex: none; display: flex; justify-content: space-around; padding: 8px 0 12px; border-top: 1px solid var(--app-line); }
+  .d-slot span { font-size: 10.5px; color: var(--app-ink3); }
+
+  /* ---------- 右侧说明 ---------- */
+  .cards { display: flex; flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--hi); letter-spacing: .4px; }
+  .state-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+  .state-row:last-child { border-bottom: 0; }
+  .state-row .k { width: 62px; flex: none; font-size: 12px; color: var(--txt-2); }
+  .state-row .v { font-size: 13px; }
+  .state-row .v b { color: var(--hi); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.6; }
+  th { color: var(--txt-2); font-weight: 500; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  .ok { color: #7ddca6; }
+  .no { color: #e39a9a; }
+  .note { font-size: 12.5px; color: var(--txt-2); line-height: 1.8; }
+  .note code { background: var(--panel-2); padding: 1px 6px; border-radius: 4px; color: var(--hi); font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>音频页 · 黑胶唱片动画原型</h1>
+  <p class="sub">参考夸克：播放时读头落到唱片上、唱片匀速转动；暂停时读头抬到旁边、唱片停在当前角度。点下面的按钮看状态切换，也可以开「自动演示」让它循环播。</p>
+
+  <div class="toolbar">
+    <button class="primary" id="toggle">暂停</button>
+    <button id="demo">自动演示：关</button>
+    <button id="theme">切换深色 / 浅色</button>
+    <div class="badge"><span class="dot on" id="dot"></span><span id="badgeTxt">播放中</span></div>
+  </div>
+
+  <div class="stage">
+    <!-- ============ 手机 ============ -->
+    <div class="phone" id="phone">
+      <div class="app-top">
+        <svg viewBox="0 0 24 24"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        <svg class="ghost" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+      </div>
+      <div class="divider"></div>
+
+      <div class="app-body">
+        <div class="b-slot">
+          <div class="turntable" id="turntable">
+            <svg viewBox="0 0 280 280" aria-label="黑胶唱片动画">
+              <defs>
+                <radialGradient id="vinyl" cx="42%" cy="36%" r="72%">
+                  <stop offset="0%"  stop-color="#2b2d34"/>
+                  <stop offset="55%" stop-color="#15161b"/>
+                  <stop offset="100%" stop-color="#0a0b0e"/>
+                </radialGradient>
+                <linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%"  stop-color="#e8eaf2"/>
+                  <stop offset="45%" stop-color="#a9adba"/>
+                  <stop offset="100%" stop-color="#6f7482"/>
+                </linearGradient>
+                <radialGradient id="sheen" cx="30%" cy="22%" r="80%">
+                  <stop offset="0%" stop-color="rgba(255,255,255,.13)"/>
+                  <stop offset="45%" stop-color="rgba(255,255,255,0)"/>
+                  <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+                </radialGradient>
+              </defs>
+
+              <!-- 唱片投影 -->
+              <ellipse cx="140" cy="252" rx="112" ry="12" fill="rgba(0,0,0,.20)"/>
+
+              <!-- 唱片（旋转） -->
+              <g class="disc-rot">
+                <circle cx="140" cy="140" r="112" fill="url(#vinyl)"/>
+                <circle cx="140" cy="140" r="112" fill="url(#sheen)"/>
+                <circle cx="140" cy="140" r="112" fill="none" stroke="var(--disc-edge)" stroke-width="1.5"/>
+                <!-- 纹路 -->
+                <g class="groove">
+                  <circle cx="140" cy="140" r="104"/><circle cx="140" cy="140" r="99"/>
+                  <circle cx="140" cy="140" r="94"/><circle cx="140" cy="140" r="89"/>
+                  <circle cx="140" cy="140" r="84"/><circle cx="140" cy="140" r="79"/>
+                  <circle cx="140" cy="140" r="74"/><circle cx="140" cy="140" r="69"/>
+                  <circle cx="140" cy="140" r="64"/><circle cx="140" cy="140" r="59"/>
+                  <circle cx="140" cy="140" r="54"/>
+                </g>
+                <circle class="groove hi" cx="140" cy="140" r="107"/>
+                <circle class="groove hi" cx="140" cy="140" r="49"/>
+                <!-- 高光扇区（随盘转动，制造光泽感） -->
+                <path d="M140 140 L140 28 A112 112 0 0 1 219 61 Z" fill="rgba(255,255,255,.045)"/>
+                <!-- 中心标签 -->
+                <circle cx="140" cy="140" r="45" fill="var(--accent)"/>
+                <circle cx="140" cy="140" r="45" fill="none" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+                <!-- 波形图标（对应现有 ic_audio_wave） -->
+                <g class="label-wave">
+                  <path d="M122 140 v-9"/>
+                  <path d="M131 140 v-16"/>
+                  <path d="M140 140 v-22"/>
+                  <path d="M149 140 v-16"/>
+                  <path d="M158 140 v-9"/>
+                  <path d="M122 140 v9"/>
+                  <path d="M131 140 v16"/>
+                  <path d="M140 140 v22"/>
+                  <path d="M149 140 v16"/>
+                  <path d="M158 140 v9"/>
+                </g>
+                <!-- 主轴 -->
+                <circle cx="140" cy="140" r="4.5" fill="#f2f3f8" stroke="rgba(0,0,0,.25)" stroke-width="1"/>
+              </g>
+
+              <!-- 唱臂（绕支点） -->
+              <g class="arm-lift">
+                <g class="arm-rot">
+                  <!-- 支点底座 -->
+                  <circle cx="248" cy="34" r="15" fill="url(#metal)" stroke="rgba(0,0,0,.25)" stroke-width="1.2"/>
+                  <circle cx="248" cy="34" r="6.5" fill="#3a3d47"/>
+                  <!-- 臂管 -->
+                  <path d="M248 34 L196 96" stroke="rgba(0,0,0,.28)" stroke-width="11" stroke-linecap="round"/>
+                  <path d="M248 34 L196 96" stroke="url(#metal)" stroke-width="7" stroke-linecap="round"/>
+                  <!-- 唱头 -->
+                  <g transform="translate(196 96) rotate(-50)">
+                    <rect x="-11" y="-8" width="24" height="15" rx="3.5" fill="#33363f" stroke="rgba(255,255,255,.28)" stroke-width="1"/>
+                    <rect x="-9" y="5" width="20" height="4" rx="2" fill="#8d92a0"/>
+                    <circle cx="0" cy="10" r="2" fill="#e9ebf2"/>
+                  </g>
+                </g>
+              </g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="meta">
+          <div class="t">04.｜数据统计：用AI把7日记录可视化</div>
+          <div class="s">01.更新中的栏目</div>
+        </div>
+
+        <div class="progress">
+          <div class="track"><div class="fill"></div><div class="knob"></div></div>
+          <div class="times"><span>06:32</span><span>17:08</span></div>
+        </div>
+
+        <div class="transport">
+          <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zm3 7l10 7V5z"/></svg>
+          <div class="play-btn" id="playBtn">
+            <svg id="playIcon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          </div>
+          <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM5 5l10 7L5 19z"/></svg>
+        </div>
+
+        <div class="d-slot"><span>倍速 1.0x</span><span>定时</span><span>收藏</span><span>列表</span><span>更多</span></div>
+      </div>
+    </div>
+
+    <!-- ============ 说明 ============ -->
+    <div class="cards">
+      <div class="card">
+        <h2>当前状态</h2>
+        <div class="state-row"><div class="k">播放状态</div><div class="v" id="stPlay"><b>播放中</b></div></div>
+        <div class="state-row"><div class="k">唱片</div><div class="v" id="stDisc"><b>匀速旋转</b>（3.4s / 圈，线性）</div></div>
+        <div class="state-row"><div class="k">读头</div><div class="v" id="stArm"><b>落在唱片纹路上</b></div></div>
+        <div class="state-row"><div class="k">过渡</div><div class="v">唱臂 0.68s 回弹曲线；唱片停在当前角度，不回零</div></div>
+      </div>
+
+      <div class="card">
+        <h2>竞品 / 现状 / 原型 对比</h2>
+        <table>
+          <tr><th></th><th>夸克</th><th>拾课现状</th><th>本原型</th></tr>
+          <tr><th>唱片</th><td class="ok">旋转</td><td class="no">静态圆盘</td><td class="ok">旋转 + 纹路 + 光泽</td></tr>
+          <tr><th>读头</th><td class="ok">落下 / 归位</td><td class="no">无</td><td class="ok">落下 / 抬开</td></tr>
+          <tr><th>暂停</th><td class="ok">读头离盘、停转</td><td class="no">画面不变</td><td class="ok">停在当前角度</td></tr>
+          <tr><th>中心</th><td>封面</td><td>波形图标</td><td>波形（可换封面）</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>落地要点（待你拍板后改 Kotlin）</h2>
+        <p class="note">
+          · 中间 <code>cover</code> 现在是 <code>220dp ImageView</code> + <code>bg_audio_disc</code> 圆底，改成自定义 <code>View</code>（<code>onDraw</code> 画纹路 / 标签 / 唱臂）最省依赖，项目无 Lottie。<br>
+          · 唱片用 <code>ObjectAnimator.ofFloat(0f,360f)</code> 无限线性；暂停用 <code>pause()</code> 保留角度，不 <code>cancel()</code>。<br>
+          · 唱臂用 <code>ViewPropertyAnimator.rotation()</code> 过渡，支点做 <code>pivotX/Y</code>。<br>
+          · 状态只绑 <code>update()</code> 里的 <code>player.isPlaying</code>；<b>animator 必须缓存，只在状态翻转时切换</b>——<code>update()</code> 每秒都在跑，不能在里面 new animator。<br>
+          · 页面关闭 / <code>compact</code> 隐藏封面时要 <code>cancel()</code>，避免无限动画泄漏。<br>
+          · 浅色 / 深色两套主题都用同一张黑胶盘，靠 <code>accent</code> 中心标签区分。
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const turntable = document.getElementById('turntable');
+  const phone     = document.getElementById('phone');
+  const btn       = document.getElementById('toggle');
+  const demoBtn   = document.getElementById('demo');
+  const themeBtn  = document.getElementById('theme');
+  const playBtn   = document.getElementById('playBtn');
+  const playIcon  = document.getElementById('playIcon');
+  const dot       = document.getElementById('dot');
+  const badgeTxt  = document.getElementById('badgeTxt');
+  const stPlay    = document.getElementById('stPlay');
+  const stDisc    = document.getElementById('stDisc');
+  const stArm     = document.getElementById('stArm');
+
+  const ICON_PLAY  = 'M8 5v14l11-7z';
+  const ICON_PAUSE = 'M7 5h4v14H7zM13 5h4v14h-4z';
+
+  let playing = true;
+  let demo = false;
+  let demoTimer = null;
+  let night = false;
+
+  function render() {
+    turntable.classList.toggle('paused', !playing);
+    document.body.classList.toggle('is-paused', !playing);
+    btn.textContent = playing ? '暂停' : '播放';
+    playIcon.innerHTML = '<path d="' + (playing ? ICON_PAUSE : ICON_PLAY) + '"/>';
+    dot.classList.toggle('on', playing);
+    badgeTxt.textContent = playing ? '播放中' : '已暂停';
+    stPlay.innerHTML = playing ? '<b>播放中</b>' : '<b>已暂停</b>';
+    stDisc.innerHTML = playing ? '<b>匀速旋转</b>（3.4s / 圈，线性）' : '<b>停转</b>（停在当前角度）';
+    stArm.innerHTML  = playing ? '<b>落在唱片纹路上</b>' : '<b>抬到旁边</b>（唱片外）';
+  }
+
+  function setPlaying(v) { playing = v; render(); }
+
+  btn.addEventListener('click', () => { if (demo) stopDemo(); setPlaying(!playing); });
+  playBtn.addEventListener('click', () => { if (demo) stopDemo(); setPlaying(!playing); });
+
+  function stopDemo() {
+    demo = false;
+    clearInterval(demoTimer);
+    demoTimer = null;
+    demoBtn.textContent = '自动演示：关';
+  }
+  demoBtn.addEventListener('click', () => {
+    if (demo) { stopDemo(); return; }
+    demo = true;
+    demoBtn.textContent = '自动演示：开';
+    setPlaying(true);
+    demoTimer = setInterval(() => setPlaying(!playing), 2600);
+  });
+
+  themeBtn.addEventListener('click', () => {
+    night = !night;
+    document.documentElement.setAttribute('data-theme', night ? 'night' : 'light');
+  });
+
+  render();
+</script>
+</body>
+</html>

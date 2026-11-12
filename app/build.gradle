@@ -22,12 +22,12 @@ android {
         applicationId 'com.hnwd.bdplayer'
         minSdk 29
         targetSdk 35
-        versionCode 25
+        versionCode 26
         // CI 不带 -P，直接用这个默认值构建，并要求 Git tag 等于 v<versionName>；
         // 本地发版走 build-release.sh --version。发新版本时这里和 versionCode 要一起改：
         // .github/scripts/check-version-code.sh 在 CI 与本地发版前以已发布的 v* tag
         // 为基线做严格递增校验，会拦住「versionName 变了但 versionCode 没涨」。
-        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('1.0.1')
+        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('1.1.0')
     }
 
     compileOptions {
