@@ -44,6 +44,20 @@ internal fun previewStillCurrent(
     accountMatches: () -> Boolean,
 ): Boolean = id == openId && !destroyed() && visible() && accountMatches()
 
+// ===================== 文档打开大小限制 =====================
+
+/**
+ * 应用内 PDF 预览必须先把整份文件下载下来；实测夸克 / 百度的直链在 100MB 以上
+ * 会下载失败，因此在打开入口按 50MB 拦截，避免起一个注定失败的下载弹窗。
+ * size 来自网盘 JSON，是字节数的十进制字符串；解析不出来（空串 / 非数字 / 老数据）
+ * 一律放行，宁可漏拦也不误拦能正常打开的文件。
+ */
+internal const val MAX_PDF_BYTES = 50L * 1024 * 1024
+internal const val PDF_TOO_LARGE_MESSAGE = "文件超过 50MB，暂不支持在 App 内打开。"
+
+internal fun pdfTooLarge(sizeRaw: String?): Boolean =
+    (sizeRaw?.toLongOrNull() ?: 0L) > MAX_PDF_BYTES
+
 // ===================== PDF 下载失败降级 =====================
 
 internal enum class PdfRetry { RETRY_LINK, RETRY_FALLBACK, SHOW_ERROR }

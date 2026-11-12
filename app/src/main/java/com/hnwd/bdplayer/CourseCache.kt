@@ -56,7 +56,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     fun directoryContaining(entry: PanEntry): String? {
         val prefix = AccountScope.prefix()
         val candidates = if (entry.isDisk) {
-            preferences.all.keys.asSequence()
+            PrefIndex.keys(preferences).asSequence()
                 .filter { it.startsWith(prefix) }
                 .map { it.removePrefix(prefix).substringBeforeLast(':') }
                 .filter { it == "disk:roots" || it.startsWith("disk:dir:") }
@@ -64,7 +64,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 .toList()
         } else {
             val directoryPrefix = "${prefix}dir:${entry.gid}:${entry.messageId}:"
-            val nested = preferences.all.keys.asSequence()
+            val nested = PrefIndex.keys(preferences).asSequence()
                 .filter { it.startsWith(directoryPrefix) }
                 .map { it.removePrefix(prefix).substringBeforeLast(':') }
                 .distinct()
@@ -110,9 +110,9 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     private fun maybePrune() {
         val now = System.currentTimeMillis()
         if (!throttle.onWrite(now)) return
-        // preferences.all 会把整表键拷贝一份，历史欠账大时在主线程做会卡掉一帧。
-        // 淘汰只是维护动作，返回值没有调用方消费，所以移到后台；单飞标志防止
-        // 连续写入堆出多个并发扫描。读缓存仍走同步路径，不受淘汰时序影响
+        // 整表快照走 PrefIndex 只读索引，写入后自动失效、命中期间零拷贝；淘汰本身
+        // 只是维护动作，返回值没有调用方消费，所以仍放后台，单飞标志防止连续写入
+        // 堆出多个并发扫描。读缓存仍走同步路径，不受淘汰时序影响
         // （readPage 自带 TTL 判断，最坏只是多留一会儿过期页）。
         // prefix 必须在主线程快照：后台再读 AccountScope.current 可能已切账号。
         if (!pruneInFlight.compareAndSet(false, true)) return
@@ -134,7 +134,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
      */
     @Synchronized
     fun prune(now: Long = System.currentTimeMillis(), prefix: String = AccountScope.prefix()): Int {
-        val plan = planCachePrune(preferences.all, prefix, now)
+        val plan = planCachePrune(PrefIndex.snapshot(preferences), prefix, now)
         if (plan.keys.isEmpty()) return 0
         preferences.edit {
             plan.keys.forEach { remove(it) }
@@ -171,7 +171,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     /** 已缓存网盘文件的内容指纹（md5:size），用于「已转存」匹配。 */
     fun diskIndex(): Set<String> {
         val prefix = AccountScope.prefix()
-        val keys = preferences.all.keys.asSequence()
+        val keys = PrefIndex.keys(preferences).asSequence()
             .filter { it.startsWith(prefix) }
             .map { it.removePrefix(prefix).substringBeforeLast(':') }
             .filter { it == "disk:roots" || it.startsWith("disk:dir:") }
@@ -227,7 +227,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     fun clearDisk() {
         val prefix = AccountScope.prefix()
         preferences.edit {
-            preferences.all.keys.filter { stored ->
+            PrefIndex.keys(preferences).filter { stored ->
                 if (!stored.startsWith(prefix)) {
                     false
                 } else {
@@ -243,7 +243,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
     fun clearAfter(key: String, page: Int) {
         val prefix = AccountScope.key("$key:")
         preferences.edit {
-            preferences.all.keys.filter { storedKey ->
+            PrefIndex.keys(preferences).filter { storedKey ->
                 storedKey.startsWith(prefix) && (storedKey.removePrefix(prefix).toIntOrNull() ?: 0) > page
             }.forEach { remove(it) }
         }

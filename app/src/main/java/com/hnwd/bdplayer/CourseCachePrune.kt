@@ -106,7 +106,7 @@ internal fun planCachePrune(
     return PrunePlan(keys, evict.size)
 }
 
-/** write() 后的淘汰节流：避免每次写都扫一遍 preferences.all（那正是卡顿来源）。 */
+/** write() 后的淘汰节流：避免每次写都重建一遍整表快照（那正是卡顿来源）。 */
 internal class PruneThrottle {
     private var writes = 0
     private var lastPruneAt = 0L

@@ -181,7 +181,7 @@ internal object BackupStore {
     private fun stringMap(prefs: android.content.SharedPreferences): JSONObject {
         val result = JSONObject()
         val prefix = AccountScope.prefix()
-        prefs.all.forEach { (key, value) ->
+        PrefIndex.snapshot(prefs).forEach { (key, value) ->
             if (key.startsWith(prefix) && value is String) {
                 result.put(key.removePrefix(prefix), value)
             }
@@ -192,7 +192,7 @@ internal object BackupStore {
     private fun longMap(prefs: android.content.SharedPreferences): JSONObject {
         val result = JSONObject()
         val prefix = AccountScope.prefix()
-        prefs.all.forEach { (key, value) ->
+        PrefIndex.snapshot(prefs).forEach { (key, value) ->
             if (key.startsWith(prefix) && value is Long) {
                 result.put(key.removePrefix(prefix), value)
             }

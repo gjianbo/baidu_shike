@@ -4,7 +4,7 @@ import android.app.Dialog
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -504,7 +504,7 @@ internal fun MainActivity.showPlayHistory() {
             .coerceIn(minOf(dp(280), maxHeight), maxHeight)
     }
     dialog.window?.apply {
-        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
         setDimAmount(0.45f)
         addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         setWindowAnimations(R.style.SearchSheetAnimation)
@@ -611,15 +611,16 @@ internal fun MainActivity.confirmClearHistory() {
         .setMessage("将清除当前账号在本机的播放记录和音视频续播点。网盘文件会保留。")
         .setNegativeButton("取消", null)
         .setPositiveButton("清除") { _, _ ->
-            // 清记录要遍历整表 preferences.all，放后台避免主线程拷贝大 Map；
-            // toast / refresh 必须等清理落盘后再回主线程，否则会读到旧记录。
+            // 清记录要遍历整表，放后台避免主线程拷贝大 Map；键集合走 PrefIndex
+            // 只读快照，命中期间不再重复拷贝。toast / refresh 必须等清理落盘后
+            // 再回主线程，否则会读到旧记录。
             AppIo.execute {
                 audioHistory.clear()
                 videoHistory.clear()
                 val progress = getSharedPreferences("video_progress", android.content.Context.MODE_PRIVATE)
                 progress.edit {
                     val prefix = AccountScope.prefix()
-                    progress.all.keys.filter { it.startsWith(prefix) }.forEach { remove(it) }
+                    PrefIndex.keys(progress).filter { it.startsWith(prefix) }.forEach { remove(it) }
                 }
                 runOnUiThread {
                     if (isDestroyed || isFinishing) return@runOnUiThread

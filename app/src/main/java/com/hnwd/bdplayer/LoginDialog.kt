@@ -3,7 +3,7 @@ package com.hnwd.bdplayer
 import android.app.Activity
 import android.app.Dialog
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.net.Uri
 import android.view.View
 import android.view.WindowManager
@@ -38,7 +38,7 @@ internal class LoginDialog(
     init {
         setContentView(host.layoutInflater.inflate(R.layout.dialog_login, null, false))
         window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)

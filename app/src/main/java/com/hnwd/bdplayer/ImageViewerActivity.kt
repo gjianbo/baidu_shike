@@ -9,16 +9,16 @@ import android.graphics.ImageDecoder
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.drawable.AnimatedImageDrawable
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.graphics.drawable.Drawable
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.os.Handler
 import android.os.Looper
 import android.text.TextUtils
 import android.util.LruCache
+import java.util.Locale
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
@@ -256,7 +256,7 @@ class ImageViewerActivity : AppCompatActivity() {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            background = ColorDrawable(Color.argb(190, 0, 0, 0))
+            background = Color.argb(190, 0, 0, 0).toDrawable()
             setPadding(dp(4), dp(8), dp(4), dp(10))
         }
         fun cell(iconRes: Int, label: String, desc: String, onClick: () -> Unit): LinearLayout {
@@ -299,8 +299,8 @@ class ImageViewerActivity : AppCompatActivity() {
 
     private fun sizeLabel(): String {
         val size = when {
-            imageBytes >= 1024L * 1024 -> String.format("%.1f MB", imageBytes / 1024f / 1024f)
-            imageBytes >= 1024L -> String.format("%.0f KB", imageBytes / 1024f)
+            imageBytes >= 1024L * 1024 -> String.format(Locale.US, "%.1f MB", imageBytes / 1024f / 1024f)
+            imageBytes >= 1024L -> String.format(Locale.US, "%.0f KB", imageBytes / 1024f)
             imageBytes > 0 -> "$imageBytes B"
             else -> ""
         }
@@ -348,7 +348,8 @@ class ImageViewerActivity : AppCompatActivity() {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, items.getOrNull(index)?.title ?: "image_${System.currentTimeMillis()}")
             put(MediaStore.Images.Media.MIME_TYPE, mime)
-            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.IS_PENDING, 1)
+            // minSdk 29：IS_PENDING 从 29 起可用，无需再判 SDK_INT。
+            put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: run {
             Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()
@@ -356,11 +357,9 @@ class ImageViewerActivity : AppCompatActivity() {
         }
         try {
             contentResolver.openOutputStream(uri)?.use { out -> source.inputStream().use { it.copyTo(out) } }
-            if (Build.VERSION.SDK_INT >= 29) {
-                values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                contentResolver.update(uri, values, null, null)
-            }
+            values.clear()
+            values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
             Toast.makeText(this, "已保存到相册", Toast.LENGTH_SHORT).show()
         } catch (_: Exception) {
             contentResolver.delete(uri, null, null)

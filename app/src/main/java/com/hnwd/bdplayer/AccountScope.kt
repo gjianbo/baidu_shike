@@ -57,7 +57,7 @@ internal object AccountScope {
         NAMESPACED.forEach { name ->
             val prefs = context.getSharedPreferences(name, Context.MODE_PRIVATE)
             prefs.edit {
-                legacyKeyMoves(prefs.all.keys, prefix()).forEach { (oldKey, target) ->
+                legacyKeyMoves(PrefIndex.keys(prefs), prefix()).forEach { (oldKey, target) ->
                     if (!prefs.contains(target)) copyValue(this, prefs, oldKey, target)
                     // 旧键在新代码里永远读不到，留着只会让 preferences.all 越滚越大
                     // （prune/diskIndex 都是整表遍历）。复制成功后必须删掉。
@@ -73,7 +73,7 @@ internal object AccountScope {
         from: String,
         to: String,
     ) {
-        when (val value = prefs.all[from]) {
+        when (val value = PrefIndex.value(prefs, from)) {
             is String -> editor.putString(to, value)
             is Long -> editor.putLong(to, value)
             is Int -> editor.putInt(to, value)

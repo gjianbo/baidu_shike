@@ -8,7 +8,6 @@ import android.content.res.Configuration
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -237,6 +236,8 @@ class MainActivity : AppCompatActivity() {
     internal var videoToRestore: VideoPlaybackPage.Snapshot? = null
     internal var loadingVideo: VideoPlaybackPage.Snapshot? = null
     internal var pendingQueue: QueueSelection? = null
+    /** onCreate 收到媒体通知 action 时置位，等 controller 异步就绪后再展开播放页。 */
+    private var pendingOpenPlayer = false
     internal var audioRequestMessage: String? = null
     internal var refreshAudioPageMessage: (() -> Unit)? = null
     internal val nowPlayingTicker = object : Runnable {
@@ -290,6 +291,12 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (intent.action == ACTION_OPEN_PLAYER) {
+            pendingOpenPlayer = true
+            // 通知 action 只是一次性事件；清掉，避免后续 recreate()（如备份恢复）
+            // 读到残留 action 而误弹播放页。
+            intent.action = null
+        }
         (lastCustomNonConfigurationInstance as? RetainedPlayback)?.let {
             videoToRestore = it.video
             pendingQueue = it.selection
@@ -611,6 +618,13 @@ class MainActivity : AppCompatActivity() {
                         renewBackgroundAudio(it)
                         advanceAudioIfEnded(it)
                     }
+                    // 通知拉起时 onStart 可能早于这里（controller 还是 null），
+                    // 上面那次尝试会保留 pendingOpenPlayer；controller 就绪后补一次。
+                    // 若此刻账号校验还没完成，ownsAudio 守卫仍不成立 → 继续保留标志，
+                    // 由 updateNowPlaying() 在迷你条可见时做最终收敛。
+                    retryOpenPlayerIfPending()
+                    // 连接失败时不留悬挂标志，避免后续 onStart 反复空转或延迟弹页。
+                    if (controller == null) pendingOpenPlayer = false
                 }
             }, uiExecutor)
         }
@@ -631,6 +645,52 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         // 从夸克登录页返回后，设置页的网盘登录态需要重算。
         if (screen == Screen.SETTINGS && ready) refresh()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == ACTION_OPEN_PLAYER) {
+            // Activity 存活时 controller / 账号校验可能仍在异步建立，openCurrentPlayback()
+            // 的守卫此刻不成立会静默失败。先挂起标志，让 controller 就绪回调与
+            // updateNowPlaying() 在条件成立时收敛；若播放页已在前台会被立即清零。
+            pendingOpenPlayer = true
+            // 同上：消费掉一次性 action，避免成为持久 base intent。
+            intent.action = null
+            openCurrentPlayback()
+        }
+    }
+
+    /**
+     * 媒体通知点击：把当前播放页带到前台。
+     * 不主动重建视频页——后台 Service 可能仍持有旧页面的 player，重建会造成双播放器。
+     * 播放页已在（Dialog / 音频页）时无需动作；常规后台音频则展开音频播放页。
+     *
+     * 冷启动（Activity 被回收）时 controller 与账号校验都是异步的，且 showPlayback 的
+     * ownsAudio() 守卫依赖异步的 verifiedAccount（WebView probeAccount），过早调用会
+     * 静默失败。因此只在守卫确实成立时才展开并清零 [pendingOpenPlayer]；否则保留标志，
+     * 由 [retryOpenPlayerIfPending] 在账号校验通过（迷你条可见）后再次触发。
+     */
+    private fun openCurrentPlayback() {
+        when {
+            videoPage != null || audioPage != null -> pendingOpenPlayer = false
+            else -> controller?.let { player ->
+                if (ownsAudio(player)) {
+                    // 从 H5/WebView 页点通知回来时主界面被隐藏（showWeb 把 native 置 GONE），
+                    // 先恢复主界面再展开，否则 showPlayback 的可见性守卫会一直不成立。
+                    if (native.visibility != View.VISIBLE) showApp()
+                    if (native.visibility == View.VISIBLE) {
+                        pendingOpenPlayer = false
+                        showPlayback(player)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 通知拉起时的重试钩子：onStart / controller 就绪 / 账号校验通过三处都会调用。 */
+    internal fun retryOpenPlayerIfPending() {
+        if (pendingOpenPlayer) openCurrentPlayback()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -781,6 +841,9 @@ class MainActivity : AppCompatActivity() {
         if (videoToRestore == null && videoPage == null && videoLoading == null) videoToRestore = loadingVideo
         nowPlaying.post(nowPlayingTicker)
         restoreVideoIfReady()
+        // controller 与账号校验可能都还没就绪；openCurrentPlayback 只在守卫成立时
+        // 才展开并清零，否则保留标志，等 controller 回调 / updateNowPlaying 继续重试。
+        retryOpenPlayerIfPending()
         maybeCheckHomeInBackground()
     }
 
@@ -1416,6 +1479,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     internal companion object {
+        /** 媒体通知点击：把当前播放页带到前台（两个播放 Service 的 contentIntent 共用）。 */
+        const val ACTION_OPEN_PLAYER = "com.hnwd.bdplayer.action.OPEN_PLAYER"
         const val STATE_SCREEN = "screen"
         const val STATE_FILTER = "media_filter"
         const val STATE_TRANSFERRED_ONLY = "transferred_only"

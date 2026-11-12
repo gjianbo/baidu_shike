@@ -53,7 +53,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
 
     fun recentAcrossGroups(): List<AudioHistoryItem> {
         val prefix = AccountScope.prefix(account ?: AccountScope.current)
-        return preferences.all.keys.asSequence()
+        return PrefIndex.keys(preferences).asSequence()
             .filter { it.startsWith(prefix) }
             .map { it.removePrefix(prefix) }
             .flatMap { recentBucket(it).asSequence() }
@@ -70,7 +70,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
      */
     fun progressIndex(): Map<String, AudioHistoryItem> = runCatching {
         val prefix = AccountScope.prefix(account ?: AccountScope.current)
-        preferences.all.keys.asSequence()
+        PrefIndex.keys(preferences).asSequence()
             .filter { it.startsWith(prefix) }
             .map { it.removePrefix(prefix) }
             .flatMap { bucket -> recentBucket(bucket).asSequence() }
@@ -107,7 +107,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
     fun clear() {
         preferences.edit {
             val prefix = AccountScope.prefix(account ?: AccountScope.current)
-            preferences.all.keys.filter { it.startsWith(prefix) }.forEach { remove(it) }
+            PrefIndex.keys(preferences).filter { it.startsWith(prefix) }.forEach { remove(it) }
         }
     }
 

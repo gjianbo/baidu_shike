@@ -63,8 +63,10 @@
     </style>
 
     <!-- PdfViewerFragment 的 ToolBoxView 使用 Material3 属性 -->
-    <style name="PdfReaderTheme" parent="Theme.Material3.Light.NoActionBar">
-        <item name="android:windowBackground">@android:color/white</item>
+    <!-- 目录弹窗跟随暗黑主题：DayNight 才会让 alertDialogTheme / colorSurface 走夜间变体；
+         写死 Light 时目录 ListView 的浅色文字会落在白色弹窗上，完全看不清。 -->
+    <style name="PdfReaderTheme" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
     </style>
 
     <!-- 图片预览固定黑底，避免启动瞬间露出浅色窗口背景 -->

@@ -203,6 +203,9 @@ class PdfReaderActivity : AppCompatActivity() {
 
     private fun outlineList(): ListView = ListView(this).apply {
         divider = null
+        // 目录既嵌在侧栏、也放进 AlertDialog；显式指定背景，保证暗黑模式下
+        // 与 R.color.ink / ink3 的浅色文字始终有对比度，不依赖弹窗主题。
+        setBackgroundColor(getColor(R.color.surface))
         adapter = object : BaseAdapter() {
             override fun getCount() = outline.size
             override fun getItem(position: Int) = outline[position]

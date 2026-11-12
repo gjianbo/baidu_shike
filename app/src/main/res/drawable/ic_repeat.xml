@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 顺序播放（循环关闭）：双箭头环形；与 ic_playlist 同规格 24dp / 1.7 描边 / ink2 -->
+    <path
+        android:pathData="M17,2.5 L21,6.5 L17,10.5 M21,6.5 H7 A4.5,4.5 0 0,0 2.5,11 V13 M7,21.5 L3,17.5 L7,13.5 M3,17.5 H17 A4.5,4.5 0 0,0 21.5,13 V11"
+        android:fillColor="#00000000" android:strokeColor="@color/ink2"
+        android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round"/>
+</vector>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp" android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 播放列表：三横线 + 播放三角；与视频页图标同规格（24dp / 1.7 描边 / ink2 / round 端点） -->
+    <path
+        android:pathData="M4,6.5 H13 M4,11.5 H13 M4,16.5 H9 M13.5,13.5 L19.5,17 L13.5,20.5 Z"
+        android:fillColor="#00000000" android:strokeColor="@color/ink2"
+        android:strokeWidth="1.7" android:strokeLineCap="round" android:strokeLineJoin="round"/>
+</vector>

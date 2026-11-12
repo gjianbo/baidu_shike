@@ -13,6 +13,22 @@ import org.junit.Test
  */
 class PdfPreviewLogicTest {
 
+    // ---------- 文档打开大小限制 ----------
+
+    @Test
+    fun `50MB 以内放行 超过 50MB 拦截`() {
+        assertEquals(50L * 1024 * 1024, MAX_PDF_BYTES)
+        assertEquals("文件超过 50MB，暂不支持在 App 内打开。", PDF_TOO_LARGE_MESSAGE)
+        assertFalse(pdfTooLarge(null))
+        assertFalse(pdfTooLarge(""))
+        assertFalse(pdfTooLarge("0"))
+        assertFalse(pdfTooLarge("abc"))
+        assertFalse(pdfTooLarge("-1"))
+        assertFalse(pdfTooLarge((50L * 1024 * 1024).toString()))
+        assertTrue(pdfTooLarge((50L * 1024 * 1024 + 1).toString()))
+        assertTrue(pdfTooLarge((100L * 1024 * 1024).toString()))
+    }
+
     // ---------- 账号探测 ----------
 
     @Test

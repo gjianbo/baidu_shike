@@ -3,7 +3,7 @@ package com.hnwd.bdplayer
 import android.app.Dialog
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
@@ -337,7 +337,7 @@ internal fun MainActivity.showChoiceSheet(
             .coerceIn(minOf(dp(260), maxHeight), maxHeight)
     }
     dialog.window?.apply {
-        setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
         setDimAmount(0.45f)
         addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
         setWindowAnimations(R.style.SearchSheetAnimation)

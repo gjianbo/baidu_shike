@@ -4,7 +4,7 @@ import android.app.Activity
 import android.app.Dialog
 import android.content.SharedPreferences
 import android.graphics.Color
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -130,7 +130,7 @@ internal class SearchSection(private val host: SearchHost) {
         dialog.setContentView(view)
         host.sizeSheet(dialog) { WindowManager.LayoutParams.WRAP_CONTENT }
         dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setSoftInputMode(
@@ -222,7 +222,7 @@ internal class SearchSection(private val host: SearchHost) {
             searchResultHeight(available, activity.dp(320), activity.dp(640), activity.dp(24))
         }
         dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
             setDimAmount(0.45f)
             addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
             setWindowAnimations(R.style.SearchSheetAnimation)

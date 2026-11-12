@@ -74,6 +74,13 @@ internal class PdfPreviewSection(
     }
 
     fun open(entry: PanEntry) {
+        // 大文件下载必失败（夸克 / 百度直链 100MB+ 实测）：在起任何请求前拦掉，
+        // 只留一句提示；不动 openId，也不打断可能正在进行中的另一次下载。
+        if (pdfTooLarge(entry.size)) {
+            host.setStatus("")
+            host.say(PDF_TOO_LARGE_MESSAGE)
+            return
+        }
         val quark = entry.provider == SourceProvider.QUARK
         if (if (quark) !host.sessionReady(SourceProvider.QUARK) else !host.accountVerified()) {
             host.setStatus("请确认网盘登录后重试。")

@@ -9,23 +9,13 @@
     <issue id="SetTextI18n" severity="ignore" />
 
     <!--
-      UseKtx 已清理：toUri 30 / SharedPreferences.edit 33 / toColorInt 2 /
-      isVisible 2 / isGone 1 / isNotEmpty 2 / createBitmap 1 共 71 个代码点
-      已改用 KTX 扩展，并在 build.gradle 显式声明 androidx.core:core-ktx:1.13.1
+      UseKtx 已全部真修，无定点忽略、无全局抑制：toUri 30 / SharedPreferences.edit 33 /
+      toColorInt 2 / isVisible 2 / isGone 1 / isNotEmpty 2 / createBitmap 1 共 71 个代码点，
+      另有 8 处 ColorDrawable(int) 改用 androidx.core.graphics.drawable.toDrawable()。
+      Int.toDrawable() 实际在 ColorDrawableKt、不在 DrawableKt（此前 javap 查错类导致
+      误判为「依赖里没有、不可实施」）。build.gradle 显式声明 core-ktx:1.13.1
       （之前仅靠传递依赖）。全部为 apply() 语义，无 commit()，与 inline edit {} 等价。
-      仅剩 Int.toDrawable 8 条：core-ktx 1.13.1 的 DrawableKt 里没有
-      Int.toDrawable() 扩展（javap 核实只有 toBitmap/updateBounds/toBitmapOrNull），
-      lint 建议在当前依赖版本下不可实施，故按文件定点忽略、不做全局抑制。
     -->
-    <issue id="UseKtx">
-        <ignore regexp=".*DiskMutationSection\.kt" />
-        <ignore regexp=".*ImageViewerActivity\.kt" />
-        <ignore regexp=".*LoginDialog\.kt" />
-        <ignore regexp=".*MainActivityChrome\.kt" />
-        <ignore regexp=".*MainActivityHome\.kt" />
-        <ignore regexp=".*SearchSection\.kt" />
-    </issue>
-
     <!-- ===== 单语言应用，不使用 RTL（17 + 6）===== -->
     <!--
       应用只提供简体中文资源，实际不会进入 RTL 布局。left/right 改成 start/end
@@ -69,24 +59,15 @@
     -->
     <issue id="TrustAllX509TrustManager" severity="ignore" />
 
-    <!-- ===== 定点忽略：只忽略指定文件，不全局抑制以免掩盖别处的真实问题（7）===== -->
+    <!-- ===== 定点忽略：只忽略指定文件，不全局抑制以免掩盖别处的真实问题（2）===== -->
     <!--
-      DefaultLocale 2 / ObsoleteSdkInt 2 在 ImageViewerActivity.kt；
-      ClickableViewAccessibility 1 在 VideoPlaybackPage.kt —— 均属媒体页文件，
-      S0 窗口刚合入，改它要重新走真机回归，留给该窗口处理。
       SetJavaScriptEnabled 2 在 LoginDialog.kt / MainActivity.kt 属于「有意为之」：
       百度/夸克 H5 登录必须开 JS，已限定 allowFileAccess/allowContentAccess=false
       与 quark.cn 域名校验；仅在这两个文件忽略，未来新增 WebView 仍会被告警。
+      原 DefaultLocale / ObsoleteSdkInt / ClickableViewAccessibility 共 5 条已在
+      20:54 那轮代码侧真修（Locale.US / 去掉恒真 SDK 判断 / 补 performClick），
+      对应定点忽略块已删除，不再掩盖媒体页的真实问题。
     -->
-    <issue id="DefaultLocale">
-        <ignore regexp=".*ImageViewerActivity\.kt" />
-    </issue>
-    <issue id="ObsoleteSdkInt">
-        <ignore regexp=".*ImageViewerActivity\.kt" />
-    </issue>
-    <issue id="ClickableViewAccessibility">
-        <ignore regexp=".*VideoPlaybackPage\.kt" />
-    </issue>
     <issue id="SetJavaScriptEnabled">
         <ignore regexp=".*LoginDialog\.kt" />
         <ignore regexp=".*MainActivity\.kt" />

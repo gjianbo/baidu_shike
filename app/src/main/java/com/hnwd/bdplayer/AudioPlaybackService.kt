@@ -95,7 +95,10 @@ class AudioPlaybackService : MediaSessionService() {
             })
         }
         val activity = PendingIntent.getActivity(
-            this, 0, Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            this, 0,
+            Intent(this, MainActivity::class.java)
+                .setAction(MainActivity.ACTION_OPEN_PLAYER)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_IMMUTABLE,
         )
         session = MediaSession.Builder(this, player)

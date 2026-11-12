@@ -6,7 +6,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
-import android.graphics.drawable.ColorDrawable
+import androidx.core.graphics.drawable.toDrawable
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
@@ -592,7 +592,7 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         }
         dialog.show()
         dialog.window?.apply {
-            setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            setBackgroundDrawable(android.graphics.Color.TRANSPARENT.toDrawable())
             setLayout((activity.resources.displayMetrics.widthPixels * 0.92f).toInt(), activity.dp(460))
         }
         loadDir(startDir)

@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.Dialog
 import android.content.ComponentName
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.net.Uri
@@ -125,7 +126,13 @@ internal class VideoPlaybackPage(
         if (player.mediaItemCount == 0 || !player.playWhenReady) return
         backgroundSession = true
         onClearBackgroundAudio()
-        VideoAudioSessionService.prepare(player)
+        // 顺序要紧：先把新 player 放进 bridge，Service 的 onCreate() 才读得到它。
+        // 显式 startService 让 Service 进入 started 状态，避免只靠页面 MediaController
+        // 的 bind 维持——按 Home 后页面 controller 若被断开，通知会随之消失。
+        VideoAudioBridge.prepare(player)
+        // 后台启动普通 Service 在 Android 8+ 会抛 IllegalStateException；此时下面的
+        // MediaController bind 仍会拉起 Service，功能不丢，所以这里吞掉即可。
+        runCatching { activity.startService(Intent(activity, VideoAudioSessionService::class.java)) }
         val token = SessionToken(activity, ComponentName(activity, VideoAudioSessionService::class.java))
         val future = MediaController.Builder(activity, token).buildAsync()
         audioControllerFuture = future
@@ -134,18 +141,26 @@ internal class VideoPlaybackPage(
                 if (audioControllerFuture === future) {
                     audioControllerFuture = null
                     backgroundSession = false
-                    VideoAudioSessionService.stop(activity)
+                    VideoAudioBridge.release(activity, player)
                 }
             }
         }, ContextCompat.getMainExecutor(activity))
     }
 
     private fun stopAudioSession() {
-        if (!backgroundSession) return
+        if (!backgroundSession) {
+            // 构造期已把本页 player 预占进 bridge，但会话尚未真正启动
+            // （暂停进入 / 播放失败 / 立刻返回），这里清掉残留引用，
+            // 避免 bridge 单例持有随后被 release 的 ExoPlayer。
+            if (VideoAudioBridge.player === player) VideoAudioBridge.release(activity, player)
+            return
+        }
         backgroundSession = false
         audioControllerFuture?.let(MediaController::releaseFuture)
         audioControllerFuture = null
-        VideoAudioSessionService.stop(activity)
+        // 换课时新页面已 prepare(newPlayer)，身份校验会让这次 stop 被忽略，
+        // 避免旧页面把新会话连同通知一起停掉。
+        VideoAudioBridge.release(activity, player)
     }
 
     fun pauseForBackground() {
@@ -591,7 +606,10 @@ internal class VideoPlaybackPage(
             addView(audioOnly, LinearLayout.LayoutParams(dp(44), dp(44)))
             addView(moreButton, LinearLayout.LayoutParams(dp(44), dp(44)))
         }
-        // ···：只放低频动作；竖屏下方已有课程列表，不再放「选集」，转音频已常驻顶栏
+        // 竖屏顶栏只有返回键常驻；标题 / 转音频 / 更多跟随控制条显隐：
+        // 默认隐藏、点一下画面才出现、播放中自动收起。横屏全屏态仍整条顶栏随控制条。
+        val chromeViews = listOf(titleColumn, audioOnly, moreButton)
+        // ···：只放低频动作；竖屏下方已有课程列表，不再放「选集」；转音频不再常驻顶栏
         moreButton.setOnClickListener { anchor ->
             val menu = PopupMenu(dialog.context, anchor, Gravity.END)
             menu.menu.add(0, 0, 0, if (favorite.label.text == "已收藏") "取消收藏" else "收藏")
@@ -698,7 +716,9 @@ internal class VideoPlaybackPage(
             if (showEmbeddedCourses && courseDialog?.isShowing == true) courseDialog?.dismiss()
             embeddedCourses.visibility = if (showEmbeddedCourses) View.VISIBLE else View.GONE
             courseChip.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
-            audioOnly.visibility = if (immersive) View.GONE else View.VISIBLE
+            // 横屏顶栏不放转音频（动作在 D 槽/菜单）；竖屏的显隐统一交给
+            // controller visibility listener，避免布局回调把它强行改回 VISIBLE。
+            if (immersive) audioOnly.visibility = View.GONE
             // 竖屏宽度有限：传输组只留播放键，上一/下一交给下方常驻课程列表；
             // 横屏够宽，三件全显示。避免时间/轨道/倍速被挤到重叠。
             previous.visibility = if (landscape) View.VISIBLE else View.GONE
@@ -781,7 +801,7 @@ internal class VideoPlaybackPage(
             isClickable = true
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             visibility = View.GONE
-            setOnTouchListener { _, event ->
+            setOnTouchListener { v, event ->
                 when (event.actionMasked) {
                     MotionEvent.ACTION_DOWN -> {
                         downX = event.x
@@ -835,6 +855,10 @@ internal class VideoPlaybackPage(
                     }
 
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        // 纯点击（未触发横滑/竖滑手势、也不是长按倍速）时补 performClick，
+                        // 让无障碍点击路径完整；ACTION_CANCEL 不视为点击。
+                        val tapped = gestureMode == 0 && !speedHeld &&
+                            event.actionMasked == MotionEvent.ACTION_UP
                         if (gestureMode == 1 && player.duration > 0) player.seekTo(seekTarget)
                         if (player.playbackParameters.speed != speedBase) {
                             player.setPlaybackParameters(PlaybackParameters(speedBase))
@@ -842,6 +866,7 @@ internal class VideoPlaybackPage(
                         }
                         gestureMode = 0
                         speedHeld = false
+                        if (tapped) v.performClick()
                     }
                 }
                 gestureDetector.onTouchEvent(event)
@@ -851,8 +876,18 @@ internal class VideoPlaybackPage(
         video.setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
             controllerVisible = visibility == View.VISIBLE
             // 布局恒定（控制层叠加、不占位），显隐不再触发重排。
-            // 竖屏保留顶栏（Dialog 没有系统返回入口），横屏才完全沉浸。
-            topBar.visibility = if (immersive) visibility else View.VISIBLE
+            // 竖屏：顶栏容器常显只为保留返回键（Dialog 没有系统返回入口），
+            //       标题/转音频/更多跟随控制条 → 默认隐藏、点一下显示、播放中自动收起。
+            // 横屏沉浸：整条顶栏跟随控制条，与原有行为一致；耳机在横屏顶栏不占位。
+            if (immersive) {
+                titleColumn.visibility = View.VISIBLE
+                moreButton.visibility = View.VISIBLE
+                audioOnly.visibility = View.GONE
+                topBar.visibility = visibility
+            } else {
+                topBar.visibility = View.VISIBLE
+                chromeViews.forEach { it.visibility = visibility }
+            }
         })
         var orientationRequested = startFullscreen && activity.requestedOrientation != orientationBeforeFullscreen
         updateFullscreen = { enabled ->
@@ -967,10 +1002,23 @@ internal class VideoPlaybackPage(
                 ::handleBack,
             )
         }
-        if (startFullscreen) updateFullscreen(true)
+        if (startFullscreen) {
+            updateFullscreen(true)
+        } else {
+            // 竖屏进入即沉浸：控制条与顶栏附加元素默认隐藏，点画面才显示。
+            // 放在 dialog.show() 之后，确保 PlayerView 已 attach、hideController 生效。
+            video.hideController()
+            chromeViews.forEach { it.visibility = View.GONE }
+        }
         player.setMediaSource(source, startPositionMs ?: savedPositionMs())
         player.playWhenReady = playWhenReady
         player.prepare()
+        // 换课时 startVideo 先构造本页、再 close 旧页，旧页 dismiss 会走
+        // stopAudioSession()→VideoAudioBridge.release(oldPlayer)；而本页的 prepare()
+        // 结果（STATE_READY）是异步的。此处同步把本页 player 预占进 bridge，
+        // 让 release 的身份校验生效：Service 保持存活并原地换绑，避免「只听声音」
+        // 换课时通知闪断 / session 置空死区。仅音频模式需要，普通视频播放不碰。
+        if (listening) VideoAudioBridge.prepare(player)
     }
 
     data class Snapshot(

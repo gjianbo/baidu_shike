@@ -153,6 +153,10 @@ internal fun MainActivity.updateNowPlaying() {
             showPlayback(active)
         }
     }
+    // 迷你条可见 = controller 就绪且 ownsAudio()（账号校验）已通过，正是冷启动后
+    // 「从通知拉起、要展开播放页」的收敛点。ticker 每秒刷新，账号异步校验完成后
+    // 必然走到这里；retryOpenPlayerIfPending 只在确实展开时才清 pendingOpenPlayer。
+    retryOpenPlayerIfPending()
 }
 
 
@@ -667,11 +671,9 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         gravity = Gravity.START
         setPadding(0, dp(3), 0, 0)
     }
-    val cover = ImageView(this).apply {
-        setImageResource(R.drawable.ic_audio_wave)
-        setColorFilter(color(R.color.accent))
-        setBackgroundResource(R.drawable.bg_audio_disc)
-        scaleType = ImageView.ScaleType.CENTER_INSIDE
+    // B 槽：黑胶唱片动画（播放时唱片转、读头落下；暂停时读头抬开、唱片停在当前角度）。
+    // 视觉见 docs/音频页-黑胶唱片动画原型.html；显隐仍由下方 compact 分支控制。
+    val cover = VinylDiscView(this).apply {
         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
     }
     val seek = SeekBar(this).apply {
@@ -710,17 +712,36 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         gravity = Gravity.CENTER
         maxLines = 1
     }
-    // 底部传输组：上一 · 大圆播放 · 下一 · 列表（列表改 BottomSheet，不常驻）
-    val listButton = icon(R.drawable.ic_layers).apply { contentDescription = "播放列表" }
+    // 底部传输组：循环 · 上一 · 大圆播放 · 下一 · 播放列表，左右对称（对齐竞品五行布局）
+    val repeatButton = icon(R.drawable.ic_repeat).apply { contentDescription = "播放循环" }
+    val playlistButton = icon(R.drawable.ic_playlist).apply { contentDescription = "播放列表" }
+    // update() 每 500ms 跑一次，只在循环态真的翻转时重建 Drawable / 染色。
+    var repeatLooping: Boolean? = null
+    fun paintRepeat() {
+        val looping = player.repeatMode == Player.REPEAT_MODE_ONE
+        if (repeatLooping == looping) return
+        repeatLooping = looping
+        repeatButton.setImageResource(if (looping) R.drawable.ic_repeat_one else R.drawable.ic_repeat)
+        repeatButton.setColorFilter(color(if (looping) R.color.accent else R.color.ink2))
+        repeatButton.contentDescription = if (looping) "单曲循环，点击关闭" else "播放循环，点击开启单曲循环"
+    }
+    repeatButton.setOnClickListener {
+        val looping = player.repeatMode == Player.REPEAT_MODE_ONE
+        player.repeatMode = if (looping) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
+        paintRepeat()
+        toast(if (looping) "已关闭单曲循环" else "单曲循环已开启")
+    }
+    paintRepeat()
     val transport = row().apply {
         gravity = Gravity.CENTER
+        addView(repeatButton, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginEnd = dp(4) })
         addView(previous, LinearLayout.LayoutParams(dp(44), dp(44)))
         addView(play, LinearLayout.LayoutParams(dp(64), dp(64)).apply {
-            marginStart = dp(24)
-            marginEnd = dp(24)
+            marginStart = dp(16)
+            marginEnd = dp(16)
         })
         addView(next, LinearLayout.LayoutParams(dp(44), dp(44)))
-        addView(listButton, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(12) })
+        addView(playlistButton, LinearLayout.LayoutParams(dp(44), dp(44)).apply { marginStart = dp(4) })
     }
     val favorite = audioIconButton(R.drawable.ic_star, "收藏", color(R.color.ink3)) {}
     fun paintFavorite(starred: Boolean) {
@@ -765,32 +786,10 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     val back = audioIconButton(R.drawable.ic_chevron_down, "收起播放页", color(R.color.ink2)) {
         closeAudioPage()
     }
-    val moreTop = audioIconButton(R.drawable.ic_more_horiz, "更多", color(R.color.ink2)) {}
+    // 顶栏只保留收起键；播放列表入口下沉到传输组右端，与左侧循环按钮对称
     val topBar = FrameLayout(this).apply {
         setPadding(dp(6), 0, dp(6), 0)
         addView(back, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.CENTER_VERTICAL))
-        addView(moreTop, FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END or Gravity.CENTER_VERTICAL))
-    }
-    moreTop.setOnClickListener { anchor ->
-        PopupMenu(this, anchor, Gravity.END).apply {
-            menu.add(0, 0, 0, "停止播放")
-            menu.add(0, 1, 1, "文件信息")
-            setOnMenuItemClickListener {
-                when (it.itemId) {
-                    0 -> { stopBackgroundAudio(); closeAudioPage() }
-                    else -> {
-                        val entry = currentAudioEntry(player)
-                        android.app.AlertDialog.Builder(this@showPlayback)
-                            .setTitle(entry?.name ?: "音频")
-                            .setMessage(entry?.let { PanApi.readablePath(it.path) }.orEmpty())
-                            .setPositiveButton("关闭", null)
-                            .show()
-                    }
-                }
-                true
-            }
-            show()
-        }
     }
     var loadingCourses = false
     var checkedPagination: Pair<PanEntry, String?>? = null
@@ -869,7 +868,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
             addView(labelView, LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(5) })
         }
     }
-    // 动作栏（进度条上方）：倍速 · 定时 · −30 · +30 · 收藏 · 更多
+    // 动作栏（进度条上方）：倍速 · 定时 · −30 · +30 · 收藏（「更多」已由顶栏播放列表取代）
     val speedIcon = audioIconButton(R.drawable.ic_speed, "播放倍速", color(R.color.ink3)) {}
     val speedCell = actionCell(speedIcon, speed, "播放倍速")
     speedCell.setOnClickListener { anchor ->
@@ -899,33 +898,9 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         audioIconButton(R.drawable.ic_forward30, "前进 30 秒", color(R.color.ink3)) {},
         TextView(this).apply { text = "+30" }, "前进 30 秒",
     ).apply { setOnClickListener { seekBy(30_000L) } }
-    val moreCell = actionCell(
-        audioIconButton(R.drawable.ic_settings, "更多", color(R.color.ink3)) {},
-        TextView(this).apply { text = "更多" }, "更多",
-    )
-    moreCell.setOnClickListener { anchor ->
-        PopupMenu(this, anchor, Gravity.END).apply {
-            menu.add(0, 0, 0, "停止播放")
-            menu.add(0, 1, 1, "文件信息")
-            setOnMenuItemClickListener {
-                when (it.itemId) {
-                    0 -> { stopBackgroundAudio(); closeAudioPage() }
-                    else -> {
-                        val entry = currentAudioEntry(player)
-                        android.app.AlertDialog.Builder(this@showPlayback)
-                            .setTitle(entry?.name ?: "音频")
-                            .setMessage(entry?.let { PanApi.readablePath(it.path) }.orEmpty())
-                            .setPositiveButton("关闭", null).show()
-                    }
-                }
-                true
-            }
-            show()
-        }
-    }
     val actionBar = row().apply {
         gravity = Gravity.CENTER
-        listOf(speedCell, timerCell, back30Cell, forward30Cell, favoriteCell, moreCell).forEach { cell ->
+        listOf(speedCell, timerCell, back30Cell, forward30Cell, favoriteCell).forEach { cell ->
             addView(cell, LinearLayout.LayoutParams(0, -1, 1f))
         }
     }
@@ -935,7 +910,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         addView(progressRow, LinearLayout.LayoutParams(-1, dp(40)))
         addView(transport, LinearLayout.LayoutParams(-1, dp(88)))
     }
-    // 列表改 Material BottomSheet：主布局不常驻，点底部 ☰ 上滑，布局占位恒定无空白。
+    // 列表改 Material BottomSheet：主布局不常驻，点传输组右端播放列表图标上滑，布局占位恒定无空白。
     val playbackBody = FrameLayout(this).apply {
         addView(playerPanel, FrameLayout.LayoutParams(-1, -1))
     }
@@ -956,7 +931,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         // 紧凑抽屉（1 条课程时仅 ~128dp）要有遮罩才看得出是浮层，否则像页面底部多了一行
         dialog.window?.setDimAmount(0.45f)
     }
-    listButton.setOnClickListener { showPlaylist() }
+    playlistButton.setOnClickListener { showPlaylist() }
     val playbackContent = column().apply {
         isClickable = true
         accessibilityPaneTitle = "音频播放"
@@ -999,8 +974,10 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         totalTime.text = formatAudioTime(duration)
         play.setImageResource(if (player.isPlaying) R.drawable.ic_pause else R.drawable.ic_play)
         play.setColorFilter(color(R.color.onAccent))
+        cover.setPlaying(player.isPlaying)
         val starred = entry != null && favorites.has(entry)
         paintFavorite(starred)
+        paintRepeat()
         val queue = PlaybackQueueState.entries
         val index = entry?.let { active -> queue.indexOfFirst { sameEntry(it, active) } } ?: -1
         val listKey = PlaybackQueueState.listKey
@@ -1086,6 +1063,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     releaseAudioPage = {
         player.removeListener(listener)
         handler.removeCallbacks(ticker)
+        cover.release()
     }
     audioPage = page
     native.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
