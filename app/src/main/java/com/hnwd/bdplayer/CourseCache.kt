@@ -81,6 +81,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         entries: List<PanEntry>,
         nextCursor: String?,
         latestEmpty: Boolean = false,
+        directoryFileIds: Set<String>? = null,
     ) {
         val data = JSONArray()
         entries.forEach {
@@ -101,7 +102,9 @@ internal class CourseCache(private val preferences: SharedPreferences) {
             putString(
                 pageKey(key, page),
                 JSONObject().put("syncedAt", System.currentTimeMillis()).put("entries", data)
-                    .put("nextCursor", nextCursor).put("latestEmpty", latestEmpty).toString(),
+                    .put("nextCursor", nextCursor).put("latestEmpty", latestEmpty).apply {
+                        if (directoryFileIds != null) put("directoryFileIds", JSONArray(directoryFileIds))
+                    }.toString(),
             )
         }
         maybePrune()
@@ -206,6 +209,21 @@ internal class CourseCache(private val preferences: SharedPreferences) {
         write(key, page, entries, nextCursor = null, latestEmpty = latestEmpty)
         if (old == null) return true
         return old.entries.contentOnly() != entries.contentOnly() || old.latestEmpty != latestEmpty
+    }
+
+    fun readDirectoryFileIds(key: String): Set<String>? = runCatching {
+        val raw = preferences.getString(pageKey(key, 1), null) ?: return null
+        val ids = JSONObject(raw).optJSONArray("directoryFileIds") ?: return null
+        (0 until ids.length()).mapTo(HashSet()) { ids.getString(it) }
+    }.getOrNull()
+
+    fun writeRecentDirectory(key: String, fresh: List<PanEntry>): Boolean {
+        val old = readPage(key, 1)
+        val entries = fresh.take(200)
+        write(key, 1, entries, nextCursor = null, latestEmpty = entries.isEmpty(),
+            directoryFileIds = fresh.mapTo(HashSet()) { it.fileId })
+        return old == null || old.entries.contentOnly() != entries.contentOnly() ||
+            old.latestEmpty != entries.isEmpty()
     }
 
     fun isFresh(key: String, ttlMillis: Long): Boolean {

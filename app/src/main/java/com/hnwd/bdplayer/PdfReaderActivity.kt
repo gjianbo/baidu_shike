@@ -37,7 +37,8 @@ import androidx.core.net.toUri
  * 而主界面是平台 Activity + 手写浅色主题，改它会影响全部现有 UI。
  */
 class PdfReaderActivity : AppCompatActivity() {
-    private var tempFile: String? = null
+    private val cache by lazy { PreviewCache.get(this) }
+    private var cachedFile: File? = null
     private lateinit var viewer: OutlinePdfViewerFragment
     private lateinit var outlineButton: TextView
     private lateinit var outlinePanel: LinearLayout
@@ -53,14 +54,15 @@ class PdfReaderActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val raw = intent.getStringExtra(EXTRA_URI)
-        tempFile = intent.getStringExtra(EXTRA_FILE)
+        val file = intent.getStringExtra(EXTRA_FILE)?.let(::File)
         val name = intent.getStringExtra(EXTRA_TITLE).orEmpty()
         val uri = raw?.let { it.toUri() }
-        if (uri == null || tempFile?.let { PdfCache.retain(File(it)) } != true) {
+        if (uri == null || file == null || !cache.retain(file)) {
             Toast.makeText(this, "文档缓存已失效，请从列表重新打开。", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
+        cachedFile = file
         // 渲染发生在 isolatedProcess 服务中，按包名显式授予读取权限
         grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
 
@@ -178,7 +180,7 @@ class PdfReaderActivity : AppCompatActivity() {
 
     internal fun loadOutline() {
         if (outlineRequested) return
-        val file = tempFile?.let(::File) ?: return
+        val file = cachedFile ?: return
         outlineRequested = true
         lifecycleScope.launch {
             outline = withContext(Dispatchers.IO) {
@@ -276,14 +278,13 @@ class PdfReaderActivity : AppCompatActivity() {
     override fun onDestroy() {
         outlineDialog?.setOnDismissListener(null)
         outlineDialog?.dismiss()
-        // 配置变更后阅读器仍在使用同一份缓存。
         if (isFinishing) {
             intent.getStringExtra(EXTRA_URI)?.let {
                 revokeUriPermission(it.toUri(), Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            tempFile?.let { PdfCache.release(File(it)) }
         }
         super.onDestroy()
+        cachedFile?.let(cache::release)
     }
 
     companion object {

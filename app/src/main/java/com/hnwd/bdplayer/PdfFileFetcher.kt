@@ -13,85 +13,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import javax.net.ssl.HttpsURLConnection
 
-/** PDF 存在应用私有缓存中，下载验证完成后才供阅读器复用。 */
-internal object PdfCache {
-    // 与音频 dlink 播放、文档下载共用同一 UA（文档 §5.3 / §6.3）
-    const val USER_AGENT = PanApi.DLINK_USER_AGENT
-    const val MAX_BYTES = 80L * 1024 * 1024
-
-    private const val ORPHAN_AGE_MS = 24 * 60 * 60 * 1000L
-    private const val CACHE_BYTES = 320L * 1024 * 1024
-    private val activeFiles = mutableSetOf<File>()
-    private fun dir(context: Context): File = File(context.cacheDir, "pdf")
-
-    @Synchronized
-    fun find(context: Context, key: String): File? =
-        File(dir(context), "$key.pdf").takeIf { it.isFile }?.also {
-            it.setLastModified(System.currentTimeMillis())
-        }
-
-    @Synchronized
-    fun publish(context: Context, key: String, temp: File): File {
-        val existing = find(context, key)
-        if (existing != null) {
-            discard(temp)
-            return existing
-        }
-        val cached = File(dir(context), "$key.pdf")
-        check(temp.renameTo(cached)) { "无法保存文档缓存，请重试。" }
-        activeFiles.remove(temp)
-        activeFiles.add(cached)
-        try {
-            prune(context)
-        } finally {
-            release(cached)
-        }
-        return cached
-    }
-
-    @Synchronized
-    fun target(context: Context): File {
-        val directory = dir(context).apply { mkdirs() }
-        prune(context)
-        return File.createTempFile("document-", ".pdf", directory).also { activeFiles.add(it) }
-    }
-
-    @Synchronized
-    fun retain(file: File): Boolean {
-        if (!file.isFile) return false
-        activeFiles.add(file)
-        return true
-    }
-
-    @Synchronized
-    fun discard(file: File) {
-        release(file)
-        file.delete()
-    }
-
-    @Synchronized
-    fun release(file: File) {
-        activeFiles.remove(file)
-    }
-
-    @Synchronized
-    fun prune(context: Context) {
-        val cutoff = System.currentTimeMillis() - ORPHAN_AGE_MS
-        val files = dir(context).listFiles().orEmpty().filter { it.isFile && it.extension == "pdf" }
-        val cached = files.filterNot { it.name.startsWith("document-") }
-        files.filter { it.name.startsWith("document-") && it !in activeFiles && it.lastModified() < cutoff }
-            .forEach(File::delete)
-        var total = cached.filter { it in activeFiles }.sumOf(File::length)
-        cached.filterNot { it in activeFiles }.sortedByDescending(File::lastModified).forEach { file ->
-            if (total + file.length() <= CACHE_BYTES) total += file.length()
-            else file.delete()
-        }
-    }
-}
-
 internal class InvalidPdfLink(message: String) : IllegalStateException(message)
 
 internal class PdfFileFetcher(private val context: Context) {
+    private val cache = PreviewCache.get(context)
     private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
     private var worker: Future<*>? = null
@@ -119,17 +44,17 @@ internal class PdfFileFetcher(private val context: Context) {
         val id = generation
         worker = executor.submit {
             val result = runCatching {
-                val file = PdfCache.target(context)
+                val file = cache.target(PreviewCache.Kind.PDF)
                 try {
                     download(file)
                 } catch (error: Throwable) {
-                    PdfCache.discard(file)
+                    cache.discard(file)
                     throw error
                 }
             }
             handler.post {
                 if (id != generation) {
-                    result.getOrNull()?.let(PdfCache::discard)
+                    result.getOrNull()?.let(cache::discard)
                     return@post
                 }
                 worker = null
@@ -145,7 +70,7 @@ internal class PdfFileFetcher(private val context: Context) {
             connection.instanceFollowRedirects = true
             connection.connectTimeout = 10_000
             connection.readTimeout = 30_000
-            connection.setRequestProperty("User-Agent", PdfCache.USER_AGENT)
+            connection.setRequestProperty("User-Agent", PanApi.DLINK_USER_AGENT)
             connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             checkStatus(connection.responseCode)
             val declared = connection.getHeaderFieldLong("Content-Length", -1L)
@@ -163,7 +88,7 @@ internal class PdfFileFetcher(private val context: Context) {
     }
 
     private fun savePdf(file: File, input: InputStream, declared: Long): File {
-        check(declared <= PdfCache.MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
+        check(declared <= MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
         file.outputStream().use { output ->
             val buffer = ByteArray(16 * 1024)
             var total = 0L
@@ -172,7 +97,7 @@ internal class PdfFileFetcher(private val context: Context) {
                 val count = input.read(buffer)
                 if (count < 0) break
                 total += count
-                check(total <= PdfCache.MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
+                check(total <= MAX_BYTES) { "文档超过 80 MB，暂不支持在线阅读。" }
                 output.write(buffer, 0, count)
             }
             check(total > 5) { "文档内容为空，请重新打开。" }
@@ -196,5 +121,9 @@ internal class PdfFileFetcher(private val context: Context) {
     fun close() {
         cancel()
         executor.shutdownNow()
+    }
+
+    private companion object {
+        const val MAX_BYTES = 80L * 1024 * 1024
     }
 }

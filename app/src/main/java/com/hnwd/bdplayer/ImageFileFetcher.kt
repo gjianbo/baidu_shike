@@ -59,82 +59,6 @@ internal object ImageTypes {
     }
 }
 
-/** 图片缓存独立存放，不与已稳定的 PDF 缓存互相影响。 */
-internal object ImageCache {
-    const val USER_AGENT = PanApi.DLINK_USER_AGENT
-    const val MAX_BYTES = 30L * 1024 * 1024
-    private const val ORPHAN_AGE_MS = 24 * 60 * 60 * 1000L
-    private const val CACHE_BYTES = 160L * 1024 * 1024
-    private val activeFiles = mutableSetOf<File>()
-
-    private fun dir(context: Context): File = File(context.cacheDir, "images")
-    private fun cached(context: Context, key: String, ext: String): File = File(dir(context), "$key.$ext")
-
-    @Synchronized
-    fun find(context: Context, key: String, ext: String): File? =
-        cached(context, key, ext).takeIf { it.isFile && it.length() > 12 }?.also {
-            it.setLastModified(System.currentTimeMillis())
-        }
-
-    @Synchronized
-    fun publish(context: Context, key: String, ext: String, temp: File): File {
-        find(context, key, ext)?.let {
-            discard(temp)
-            return it
-        }
-        val target = cached(context, key, ext)
-        dir(context).mkdirs()
-        check(temp.renameTo(target)) { "无法保存图片缓存，请重试。" }
-        activeFiles.remove(temp)
-        activeFiles.add(target)
-        try {
-            prune(context)
-        } finally {
-            release(target)
-        }
-        return target
-    }
-
-    @Synchronized
-    fun target(context: Context): File {
-        val directory = dir(context).apply { mkdirs() }
-        prune(context)
-        return File.createTempFile("image-", ".tmp", directory).also { activeFiles.add(it) }
-    }
-
-    @Synchronized
-    fun retain(file: File): Boolean {
-        if (!file.isFile) return false
-        activeFiles.add(file)
-        return true
-    }
-
-    @Synchronized
-    fun discard(file: File) {
-        release(file)
-        file.delete()
-    }
-
-    @Synchronized
-    fun release(file: File) {
-        activeFiles.remove(file)
-    }
-
-    @Synchronized
-    fun prune(context: Context) {
-        val cutoff = System.currentTimeMillis() - ORPHAN_AGE_MS
-        val files = dir(context).listFiles().orEmpty().filter { it.isFile }
-        val temps = files.filter { it.name.startsWith("image-") }
-        val cached = files.filterNot { it.name.startsWith("image-") }
-        temps.filter { it !in activeFiles && it.lastModified() < cutoff }.forEach(File::delete)
-        var total = cached.filter { it in activeFiles }.sumOf(File::length)
-        cached.filterNot { it in activeFiles }.sortedByDescending(File::lastModified).forEach { file ->
-            if (total + file.length() <= CACHE_BYTES) total += file.length()
-            else file.delete()
-        }
-    }
-}
-
 internal class InvalidImageLink(message: String) : IllegalStateException(message)
 
 /**
@@ -142,6 +66,7 @@ internal class InvalidImageLink(message: String) : IllegalStateException(message
  * 两条链路下载完成后统一做大小与文件头校验。
  */
 internal class ImageFileFetcher(private val context: Context) {
+    private val cache = PreviewCache.get(context)
     private val handler = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
     private var worker: Future<*>? = null
@@ -158,17 +83,17 @@ internal class ImageFileFetcher(private val context: Context) {
         val id = generation
         worker = executor.submit {
             val result = runCatching {
-                val file = ImageCache.target(context)
+                val file = cache.target(PreviewCache.Kind.IMAGE)
                 try {
                     download(file)
                 } catch (error: Throwable) {
-                    ImageCache.discard(file)
+                    cache.discard(file)
                     throw error
                 }
             }
             handler.post {
                 if (id != generation) {
-                    result.getOrNull()?.let(ImageCache::discard)
+                    result.getOrNull()?.let(cache::discard)
                     return@post
                 }
                 worker = null
@@ -184,7 +109,7 @@ internal class ImageFileFetcher(private val context: Context) {
             connection.instanceFollowRedirects = true
             connection.connectTimeout = 10_000
             connection.readTimeout = 30_000
-            connection.setRequestProperty("User-Agent", ImageCache.USER_AGENT)
+            connection.setRequestProperty("User-Agent", PanApi.DLINK_USER_AGENT)
             connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             checkStatus(connection.responseCode)
             val declared = connection.getHeaderFieldLong("Content-Length", -1L)
@@ -216,7 +141,7 @@ internal class ImageFileFetcher(private val context: Context) {
     }
 
     private fun saveImage(file: File, input: InputStream, declared: Long): File {
-        check(declared <= ImageCache.MAX_BYTES) { "图片超过 30 MB，暂不支持在线预览。" }
+        check(declared <= MAX_BYTES) { "图片超过 30 MB，无法下载原图。" }
         file.outputStream().use { output ->
             val buffer = ByteArray(16 * 1024)
             var total = 0L
@@ -225,7 +150,7 @@ internal class ImageFileFetcher(private val context: Context) {
                 val count = input.read(buffer)
                 if (count < 0) break
                 total += count
-                check(total <= ImageCache.MAX_BYTES) { "图片超过 30 MB，暂不支持在线预览。" }
+                check(total <= MAX_BYTES) { "图片超过 30 MB，无法下载原图。" }
                 output.write(buffer, 0, count)
             }
             // 内容为空或长度不符多半是 dlink 已失效/被劫持，按地址失效处理以便重新取址
@@ -253,6 +178,10 @@ internal class ImageFileFetcher(private val context: Context) {
     fun close() {
         cancel()
         executor.shutdownNow()
+    }
+
+    private companion object {
+        const val MAX_BYTES = 30L * 1024 * 1024
     }
 }
 

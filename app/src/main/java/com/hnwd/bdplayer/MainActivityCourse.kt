@@ -35,7 +35,11 @@ internal fun MainActivity.listSortable(): Boolean = screen == Screen.DISK || scr
 internal fun MainActivity.listSelectable(): Boolean = listSortable() && screen != Screen.DISK
 
 
-internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortable: Boolean) {
+internal fun MainActivity.addFilteredCourseRows(
+    entries: List<PanEntry>,
+    sortable: Boolean,
+    preserveMediaFilter: Boolean = false,
+) {
     val home = screen == Screen.HOME
     val transferred = if (entries.any { !it.isDisk }) transferredIndex() else emptySet()
     val transferredCount = entries.count { matchesTransferred(it, transferred) }
@@ -45,13 +49,14 @@ internal fun MainActivity.addFilteredCourseRows(entries: List<PanEntry>, sortabl
     transferredChip.contentDescription = "只看已转存，共 $transferredCount 项"
     val kinds = entries.map(PanApi::kindOf).toSet()
     val showFilters = if (home) {
-        MediaFilter.entries.any { it != MediaFilter.ALL && kinds.any(it::includes) }
+        (preserveMediaFilter && mediaFilter != MediaFilter.ALL) ||
+            MediaFilter.entries.any { it != MediaFilter.ALL && kinds.any(it::includes) }
     } else {
         kinds.size >= 2 || transferredCount > 0
     }
     filterBar.visibility = if (showFilters) View.VISIBLE else View.GONE
-    showAvailableMediaFilters(kinds)
-    if (mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
+    showAvailableMediaFilters(kinds, includeSelected = preserveMediaFilter)
+    if (!preserveMediaFilter && mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
         mediaFilter = MediaFilter.ALL
     }
     val rows = column()
@@ -510,27 +515,32 @@ internal fun MainActivity.renderCourseSwitch() {
 }
 
 
-internal fun MainActivity.advanceAfterEnd(entry: PanEntry, isCurrent: () -> Boolean, playNext: () -> Unit) {
+internal fun MainActivity.advanceAfterEnd(
+    entry: PanEntry,
+    isCurrent: () -> Boolean,
+    onUnavailable: () -> Unit = {},
+    playNext: () -> Unit,
+) {
     val listKey = PlaybackQueueState.listKey
     fun canAdvance() = hasActiveSession(entry.provider) && !isFinishing && !isDestroyed &&
         PlaybackQueueState.listKey == listKey && isCurrent() &&
         PlaybackQueueState.entries.any { sameEntry(it, entry) }
 
     fun tryNext() {
-        if (!canAdvance()) return
-        if (SleepTimer.consumeStopAfterCurrent()) return
+        if (!canAdvance()) return onUnavailable()
         if (siblingOf(entry, 1) != null) {
             playNext()
             return
         }
-        if (automaticCourseLoad?.let { sameEntry(it, entry) } == true ||
-            !hasMoreCourses(entry, listKey)
-        ) return
+        if (automaticCourseLoad?.let { sameEntry(it, entry) } == true) return
+        if (!hasMoreCourses(entry, listKey)) return onUnavailable()
         automaticCourseLoad = entry
         loadMoreCourses(entry, listKey, ::canAdvance) { courses ->
             if (automaticCourseLoad === entry) {
                 automaticCourseLoad = null
-                if (courses != null) tryNext()
+                if (courses != null) tryNext() else onUnavailable()
+            } else {
+                onUnavailable()
             }
         }
     }

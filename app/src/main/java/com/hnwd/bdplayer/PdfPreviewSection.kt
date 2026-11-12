@@ -55,6 +55,7 @@ internal class PdfPreviewSection(
     private val addresses: MediaAddressCache,
 ) {
     private val activity: Activity get() = host.hostActivity
+    private val cache by lazy { PreviewCache.get(activity) }
     private var openId = 0
     private var loading: AlertDialog? = null
     private val fetcher by lazy { PdfFileFetcher(host.hostActivity) }
@@ -96,9 +97,9 @@ internal class PdfPreviewSection(
         }
         val account = host.playbackAccount(entry)
         val key = mediaCacheKey(account, entry)
-        PdfCache.find(activity, key)?.let {
+        cache.acquire(PreviewCache.Kind.PDF, "$key.pdf")?.let {
             host.setStatus("")
-            host.openPdfReader(entry, it)
+            openCachedPdf(entry, it)
             return
         }
         if (quark) {
@@ -246,15 +247,14 @@ internal class PdfPreviewSection(
                 loading = null
             }
             if (!isCurrentPdf(id, account, entry.provider)) {
-                result.getOrNull()?.let(PdfCache::discard)
+                result.getOrNull()?.let(cache::discard)
                 return
             }
             result.mapCatching { temp ->
                 try {
-                    val cached = PdfCache.publish(activity, key, temp)
-                    host.openPdfReader(entry, cached)
+                    openCachedPdf(entry, cache.publish(PreviewCache.Kind.PDF, "$key.pdf", temp))
                 } finally {
-                    PdfCache.discard(temp)
+                    cache.discard(temp)
                 }
             }.onFailure {
                 val plan = pdfFailurePlan(
@@ -283,5 +283,13 @@ internal class PdfPreviewSection(
         }
         if (quark) fetcher.startQuark(entry.fileId, ::complete)
         else fetcher.start(requireNotNull(link), ::complete)
+    }
+
+    private fun openCachedPdf(entry: PanEntry, file: File) {
+        try {
+            host.openPdfReader(entry, file)
+        } finally {
+            cache.release(file)
+        }
     }
 }

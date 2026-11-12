@@ -189,6 +189,41 @@
         </LinearLayout>
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/homeRefreshNotice"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="@dimen/page_pad"
+        android:layout_marginTop="6dp"
+        android:layout_marginBottom="6dp"
+        android:background="@drawable/bg_source_chip"
+        android:backgroundTint="@color/accent"
+        android:gravity="center"
+        android:minHeight="44dp"
+        android:orientation="horizontal"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="8dp"
+        android:visibility="gone">
+
+        <ProgressBar
+            android:id="@+id/homeRefreshSpinner"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_marginEnd="8dp"
+            android:importantForAccessibility="no"
+            android:indeterminateTint="@color/onAccent" />
+
+        <TextView
+            android:id="@+id/homeRefreshLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:accessibilityLiveRegion="polite"
+            android:gravity="center"
+            android:textColor="@color/onAccent"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
     <TextView
         android:id="@+id/appSub"
         android:layout_width="match_parent"

@@ -2,35 +2,34 @@ package com.hnwd.bdplayer
 
 import android.os.SystemClock
 
-/**
- * v0.2 睡眠定时：进程内单例，供音频后台服务、视频播放页和界面共同读写。
- * - [deadlineElapsedMs] 为 0 表示未开启定时。
- * - [stopAfterCurrent] 只生效一次，由「本集结束停止」消费。
- */
-internal object SleepTimer {
-    @Volatile
+/** 音频服务和视频播放各自维护定时，避免切换播放器时相互清除。 */
+internal class SleepTimer(private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime) {
     var deadlineElapsedMs: Long = 0L
         private set
-
-    @Volatile
     var stopAfterCurrent: Boolean = false
         private set
 
-    fun arm(minutes: Int) {
-        deadlineElapsedMs = if (minutes > 0) SystemClock.elapsedRealtime() + minutes * 60_000L else 0L
+    fun set(minutes: Int) {
+        when {
+            minutes == AFTER_CURRENT -> stopAfterCurrent = true
+            minutes > 0 -> deadlineElapsedMs = elapsedRealtime() + minutes * 60_000L
+            minutes == 0 -> {
+                clearDeadline()
+                stopAfterCurrent = false
+            }
+        }
     }
 
-    fun disarm() {
-        deadlineElapsedMs = 0L
-    }
-
-    fun armStopAfterCurrent() {
-        stopAfterCurrent = true
-    }
+    fun clearDeadline() { deadlineElapsedMs = 0L }
 
     fun consumeStopAfterCurrent(): Boolean = stopAfterCurrent.also { stopAfterCurrent = false }
 
     fun isArmed(): Boolean = deadlineElapsedMs > 0L
 
-    fun remainingMs(): Long = (deadlineElapsedMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+    fun remainingMs(): Long = (deadlineElapsedMs - elapsedRealtime()).coerceAtLeast(0L)
+
+    companion object {
+        const val AFTER_CURRENT = -1
+        val audio = SleepTimer()
+    }
 }

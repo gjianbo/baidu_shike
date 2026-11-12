@@ -84,5 +84,6 @@ dependencies {
     // core-ktx 之前靠传递依赖进入 classpath（1.13.1）；UseKtx 清理后大量用到
     // toUri / edit / toColorInt / isVisible 等扩展，显式声明避免依赖树变化导致断供。
     implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.0.0'
     implementation 'com.google.android.material:material:1.11.0'
 }

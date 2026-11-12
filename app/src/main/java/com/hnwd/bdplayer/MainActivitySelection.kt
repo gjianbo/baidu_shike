@@ -196,9 +196,8 @@ internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEnt
 }
 
 
-/** V02-3 睡眠定时：把定时分钟数下发给音频后台服务（0 = 关闭）。 */
+/** 音频睡眠定时由服务执行。 */
 internal fun MainActivity.sendSleepTimer(minutes: Int) {
-    if (minutes > 0) SleepTimer.arm(minutes) else SleepTimer.disarm()
     controller?.sendCustomCommand(
         AudioPlaybackService.SLEEP_TIMER,
         Bundle().apply { putInt("minutes", minutes) },

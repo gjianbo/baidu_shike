@@ -56,6 +56,7 @@ class ImageViewerActivity : AppCompatActivity() {
         const val EXTRA_COUNT = "image_count"
         const val EXTRA_SWITCH_INDEX = "image_switch_index"
         const val EXTRA_OPEN_ORIGINAL = "image_open_original"
+        const val EXTRA_SAVE_ORIGINAL = "image_save_original"
         private const val EXTRA_ITEMS = "image_items"
         private const val EXTRA_PROVIDER = "image_provider"
         private const val MAX_DECODE_EDGE = 4096
@@ -86,8 +87,11 @@ class ImageViewerActivity : AppCompatActivity() {
     private var generation = 0
     private var currentUrl = ""
     private var originalFetcher: ImageFileFetcher? = null
+    private var downloadingOriginalForSave = false
+    private var savingImage = false
     private var index = 0
     private var count = 1
+    private val cache by lazy { PreviewCache.get(this) }
     private var localFile: File? = null
     private var mime = "image/*"
     private var animation: AnimatedImageDrawable? = null
@@ -121,7 +125,7 @@ class ImageViewerActivity : AppCompatActivity() {
                 .coerceIn(0, count - 1)
         } else {
             val cached = intent.getStringExtra(EXTRA_FILE)?.let(::File)
-            if (cached == null || !ImageCache.retain(cached)) {
+            if (cached == null || !cache.retain(cached)) {
                 Toast.makeText(this, "图片缓存已失效，请从列表重新打开。", Toast.LENGTH_SHORT).show()
                 finish()
                 return
@@ -184,6 +188,9 @@ class ImageViewerActivity : AppCompatActivity() {
         setContentView(root)
         updateChrome()
         if (previewMode) showAt(index) else localFile?.let(::decodeLocal)
+        if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_SAVE_ORIGINAL, false)) {
+            saveToGallery()
+        }
     }
 
     private fun topBar(): View {
@@ -340,30 +347,53 @@ class ImageViewerActivity : AppCompatActivity() {
 
     /** 保存到系统相册：minSdk 29 起用 MediaStore + IS_PENDING，不需要写权限。 */
     private fun saveToGallery() {
-        val source = localFile
-        if (source == null || !source.exists()) {
-            Toast.makeText(this, "原图尚未加载完成，请稍后再试", Toast.LENGTH_SHORT).show()
+        if (savingImage || downloadingOriginalForSave) return
+        val source = localFile?.takeIf { it.isFile }
+        if (source == null) {
+            val item = items.getOrNull(index)
+            if (item != null && currentUrl.isNotEmpty()) {
+                downloadingOriginalForSave = true
+                Toast.makeText(this, "正在下载原图…", Toast.LENGTH_SHORT).show()
+                openOriginal(item, save = true)
+            } else {
+                Toast.makeText(this, "图片尚未加载完成，请稍后再试", Toast.LENGTH_SHORT).show()
+            }
             return
         }
+        val name = items.getOrNull(index)?.title ?: intent.getStringExtra(EXTRA_TITLE)
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, items.getOrNull(index)?.title ?: "image_${System.currentTimeMillis()}")
+            put(MediaStore.Images.Media.DISPLAY_NAME, name ?: "image_${System.currentTimeMillis()}")
             put(MediaStore.Images.Media.MIME_TYPE, mime)
-            // minSdk 29：IS_PENDING 从 29 起可用，无需再判 SDK_INT。
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
-        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: run {
+        // 先打开文件，切图后即使缓存被清理，写入仍然对应用户点击保存的原图。
+        val input = runCatching { source.inputStream() }.getOrElse {
             Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()
             return
         }
-        try {
-            contentResolver.openOutputStream(uri)?.use { out -> source.inputStream().use { it.copyTo(out) } }
-            values.clear()
-            values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            contentResolver.update(uri, values, null, null)
-            Toast.makeText(this, "已保存到相册", Toast.LENGTH_SHORT).show()
-        } catch (_: Exception) {
-            contentResolver.delete(uri, null, null)
-            Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()
+        val resolver = applicationContext.contentResolver
+        savingImage = true
+        AppIo.execute {
+            val result = runCatching {
+                input.use { stream ->
+                    val uri = checkNotNull(resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+                    try {
+                        checkNotNull(resolver.openOutputStream(uri)).use { stream.copyTo(it) }
+                        val published = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                        check(resolver.update(uri, published, null, null) > 0)
+                    } catch (error: Exception) {
+                        runCatching { resolver.delete(uri, null, null) }
+                        throw error
+                    }
+                }
+            }
+            handler.post {
+                savingImage = false
+                if (!isFinishing && !isDestroyed) {
+                    val message = if (result.isSuccess) "已保存到相册" else "保存失败"
+                    Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                }
+            }
         }
     }
 
@@ -390,7 +420,8 @@ class ImageViewerActivity : AppCompatActivity() {
         val request = ++generation
         decodeThread?.interrupt()
         originalFetcher?.cancel()
-        localFile?.let(ImageCache::release)
+        downloadingOriginalForSave = false
+        localFile?.let(cache::release)
         localFile = null
         currentUrl = ""
         index = target
@@ -448,22 +479,36 @@ class ImageViewerActivity : AppCompatActivity() {
 
     private fun isCurrent(request: Int) = request == generation && !isFinishing && !isDestroyed
 
-    private fun openOriginal(item: ImagePreviewItem) {
+    private fun openOriginal(item: ImagePreviewItem, save: Boolean = false) {
         if (provider == SourceProvider.BAIDU) {
-            returnToList(index, original = true)
+            returnToList(index, original = true, save = save)
             return
         }
         val ext = ImageTypes.ext(item.title)
+        val cacheName = "${item.key}.$ext"
         mime = ImageTypes.mime(ext)
         fun showFile(file: File) {
-            check(ImageCache.retain(file)) { "图片缓存已失效，请重试" }
-            imageBytes = file.length()
+            localFile?.let(cache::release)
             localFile = file
+            imageBytes = file.length()
             updateChrome()
             decodeLocal(file)
+            if (save) {
+                downloadingOriginalForSave = false
+                saveToGallery()
+            }
         }
-        ImageCache.find(this, item.key, ext)?.let {
-            runCatching { showFile(it) }.onFailure { showError(it.message ?: "图片打开失败") }
+        fun fail(error: Throwable) {
+            val message = error.message ?: "图片打开失败"
+            if (save) {
+                downloadingOriginalForSave = false
+                Toast.makeText(this, "保存原图失败：$message", Toast.LENGTH_SHORT).show()
+            } else {
+                showError(message)
+            }
+        }
+        cache.acquire(PreviewCache.Kind.IMAGE, cacheName)?.let {
+            runCatching { showFile(it) }.onFailure(::fail)
             return
         }
         hint.text = "正在加载原图…"
@@ -471,16 +516,16 @@ class ImageViewerActivity : AppCompatActivity() {
         val fetcher = originalFetcher ?: ImageFileFetcher(this).also { originalFetcher = it }
         fetcher.startQuark(item.fileId, item.title) { result ->
             if (!isCurrent(request)) {
-                result.getOrNull()?.let(ImageCache::discard)
+                result.getOrNull()?.let(cache::discard)
                 return@startQuark
             }
             result.mapCatching { temp ->
                 try {
-                    showFile(ImageCache.publish(this, item.key, ext, temp))
+                    showFile(cache.publish(PreviewCache.Kind.IMAGE, cacheName, temp))
                 } finally {
-                    ImageCache.discard(temp)
+                    cache.discard(temp)
                 }
-            }.onFailure { showError(it.message ?: "图片打开失败") }
+            }.onFailure(::fail)
         }
     }
 
@@ -493,10 +538,11 @@ class ImageViewerActivity : AppCompatActivity() {
         }
     }
 
-    private fun returnToList(target: Int, original: Boolean) {
+    private fun returnToList(target: Int, original: Boolean, save: Boolean = false) {
         setResult(RESULT_OK, Intent()
             .putExtra(EXTRA_SWITCH_INDEX, target)
-            .putExtra(EXTRA_OPEN_ORIGINAL, original))
+            .putExtra(EXTRA_OPEN_ORIGINAL, original)
+            .putExtra(EXTRA_SAVE_ORIGINAL, save))
         finish()
     }
 
@@ -593,7 +639,7 @@ class ImageViewerActivity : AppCompatActivity() {
         originalFetcher?.close()
         animation?.stop()
         drawableCache.evictAll()
-        localFile?.let(ImageCache::release)
+        localFile?.let(cache::release)
         super.onDestroy()
     }
 

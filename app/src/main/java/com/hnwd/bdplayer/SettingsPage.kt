@@ -8,6 +8,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import android.webkit.CookieManager
+import java.text.DecimalFormat
 
 /**
  * 设置页需要的宿主能力：页面容器、账号展示信息、以及各行的跳转动作。
@@ -79,7 +80,76 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setBackupRow).setOnClickListener { host.launchBackup() }
         page.findViewById<TextView>(R.id.setAbout).text = host.appVersionLine()
         host.addPage(page)
+        bindPreviewCache(page)
         host.renderCourseSwitch()
+    }
+
+    private fun bindPreviewCache(page: View) {
+        val row = page.findViewById<View>(R.id.setPreviewCacheRow)
+        val value = page.findViewById<TextView>(R.id.setPreviewCacheValue)
+        val cache = PreviewCache.get(activity)
+
+        fun update(work: () -> PreviewCache.Usage, ready: (PreviewCache.Usage) -> Unit = {}) {
+            row.isEnabled = false
+            AppIo.execute {
+                val usage = work()
+                activity.runOnUiThread {
+                    if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+                    value.text = "${cacheSize(usage.totalBytes)} / ${usage.limit.label}"
+                    row.isEnabled = true
+                    if (row.isAttachedToWindow) ready(usage)
+                }
+            }
+        }
+
+        row.setOnClickListener {
+            update(cache::usage) { usage ->
+                AlertDialog.Builder(activity)
+                    .setTitle("预览缓存")
+                    .setMessage(
+                        "已用 ${cacheSize(usage.totalBytes)} / ${usage.limit.label}\n" +
+                            "图片 ${cacheSize(usage.imageBytes)} · 文档 ${cacheSize(usage.pdfBytes)}\n\n" +
+                            "超出上限时，自动清理最久未打开的预览文件。",
+                    )
+                    .setNegativeButton("关闭", null)
+                    .setNeutralButton("清理缓存") { _, _ ->
+                        AlertDialog.Builder(activity)
+                            .setTitle("清理预览缓存")
+                            .setMessage("将清理本机的图片和 PDF 预览缓存。正在使用的文件会保留，其余文件再次打开时会重新加载。")
+                            .setNegativeButton("取消", null)
+                            .setPositiveButton("清理") { _, _ ->
+                                update(cache::clear) { remaining ->
+                                    host.say(when {
+                                        remaining.totalBytes == 0L -> "预览缓存已清理"
+                                        remaining.totalBytes == remaining.inUseBytes ->
+                                            "已清理可删除的缓存，仍有 ${cacheSize(remaining.inUseBytes)} 正在使用"
+                                        else -> "清理后仍占用 ${cacheSize(remaining.totalBytes)}"
+                                    })
+                                }
+                            }
+                            .show()
+                    }
+                    .setPositiveButton("调整上限") { _, _ ->
+                        host.pickFromSheet(
+                            title = "缓存上限",
+                            subtitle = "图片和 PDF 共用",
+                            choices = PreviewCacheLimit.entries.map { limit ->
+                                SheetChoice(limit.label, checked = limit == usage.limit, tag = limit)
+                            },
+                        ) { choice ->
+                            val limit = choice.tag as PreviewCacheLimit
+                            update({ cache.setLimit(limit) })
+                        }
+                    }
+                    .show()
+            }
+        }
+        update(cache::usage)
+    }
+
+    private fun cacheSize(bytes: Long): String {
+        val megabytes = bytes / (1024.0 * 1024.0)
+        return if (bytes > 0 && megabytes < 1) "<1 MB" else "${DecimalFormat("0.#").format(megabytes)} MB"
     }
 
     private fun quarkEverLogged(): Boolean =

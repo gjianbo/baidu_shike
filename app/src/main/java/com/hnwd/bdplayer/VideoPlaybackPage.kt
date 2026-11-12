@@ -52,7 +52,6 @@ import androidx.media3.ui.PlayerView
 import com.google.common.util.concurrent.ListenableFuture
 import kotlin.math.abs
 import androidx.core.graphics.toColorInt
-import androidx.core.content.edit
 
 @OptIn(UnstableApi::class)
 internal class VideoPlaybackPage(
@@ -60,13 +59,14 @@ internal class VideoPlaybackPage(
     private val entry: PanEntry,
     source: MediaSource,
     private val account: String,
-    private val history: AudioHistory,
+    private val historyRecording: AudioHistory.Recording,
     startPositionMs: Long?,
     playWhenReady: Boolean,
     retryOnExpiredLink: Boolean,
     startAudioOnly: Boolean,
     startFullscreen: Boolean,
     val orientationBeforeFullscreen: Int,
+    private val sleepTimer: SleepTimer,
     onRetry: (Snapshot, Boolean) -> Unit,
     courses: List<PanEntry>,
     currentCourse: Int,
@@ -98,10 +98,6 @@ internal class VideoPlaybackPage(
         controllerHideOnTouch = true
     }
     private val progress = activity.getSharedPreferences("video_progress", Activity.MODE_PRIVATE)
-    private val progressKey = AccountScope.key(
-        "${entry.origin}:${entry.sourceId}:${entry.gid}:${entry.messageId}:${entry.fileId}",
-    )
-    private val legacyProgressKey = AccountScope.key("${entry.gid}:${entry.messageId}:${entry.fileId}")
     private var readyToSave = false
     private var keepOrientationOnClose = false
     private var immersive = false
@@ -163,8 +159,15 @@ internal class VideoPlaybackPage(
         VideoAudioBridge.release(activity, player)
     }
 
+    fun canPlayInBackground(): Boolean = listening && dialog.isShowing &&
+        (backgroundSession || VideoAudioBridge.player === player)
+
+    fun releaseIdleAudioSession() {
+        if (player.playbackState == Player.STATE_ENDED || player.playerError != null) stopAudioSession()
+    }
+
     fun pauseForBackground() {
-        if (listening && backgroundSession) return
+        if (canPlayInBackground()) return
         pause()
     }
 
@@ -511,24 +514,24 @@ internal class VideoPlaybackPage(
         val sleepHandler = Handler(Looper.getMainLooper())
         val timer = actionCell(R.drawable.ic_timer, "定时", "睡眠定时") {}
         fun paintTimer() {
-            val armed = SleepTimer.isArmed()
+            val armed = sleepTimer.isArmed() || sleepTimer.stopAfterCurrent
             timer.icon.setColorFilter(if (armed) actionActiveColor else Color.WHITE)
             timer.label.setTextColor(if (armed) actionActiveColor else actionLabelColor)
-            val remaining = SleepTimer.remainingMs()
-            timer.root.contentDescription = if (armed) {
-                "睡眠定时，剩余 ${formatAudioTime((remaining / 1000).toInt())}"
-            } else {
-                "睡眠定时"
+            timer.root.contentDescription = when {
+                sleepTimer.stopAfterCurrent -> "本集结束后停止"
+                sleepTimer.isArmed() -> "睡眠定时，剩余 ${formatAudioTime((sleepTimer.remainingMs() / 1000).toInt())}"
+                else -> "睡眠定时"
             }
         }
         val sleepTick = object : Runnable {
             override fun run() {
-                if (!SleepTimer.isArmed()) {
+                if (!dialog.isShowing) return
+                if (!sleepTimer.isArmed()) {
                     paintTimer()
                     return
                 }
-                if (SleepTimer.remainingMs() <= 0L) {
-                    SleepTimer.disarm()
+                if (sleepTimer.remainingMs() <= 0L) {
+                    sleepTimer.clearDeadline()
                     player.pause()
                     paintTimer()
                 } else {
@@ -538,22 +541,16 @@ internal class VideoPlaybackPage(
         }
         fun showTimerMenu(anchor: View) {
             val menu = PopupMenu(activity, anchor, Gravity.END)
-            menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed()
-            listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
-                menu.menu.add(0, index + 1, index + 1, "$minutes 分钟")
+            menu.menu.add(0, 0, 0, "关闭定时").isChecked = !sleepTimer.isArmed() && !sleepTimer.stopAfterCurrent
+            listOf(15, 30, 45, 60).forEach { minutes ->
+                menu.menu.add(0, minutes, minutes, "$minutes 分钟")
             }
-            menu.menu.add(0, 99, 99, "本集结束后停止")
+            menu.menu.add(0, SleepTimer.AFTER_CURRENT, 99, "本集结束后停止").isChecked = sleepTimer.stopAfterCurrent
             menu.menu.setGroupCheckable(0, true, false)
             menu.setOnMenuItemClickListener { item ->
                 sleepHandler.removeCallbacks(sleepTick)
-                when (item.itemId) {
-                    0 -> SleepTimer.disarm()
-                    99 -> SleepTimer.armStopAfterCurrent()
-                    else -> {
-                        SleepTimer.arm(listOf(15, 30, 45, 60)[item.itemId - 1])
-                        sleepHandler.postDelayed(sleepTick, 1_000L)
-                    }
-                }
+                sleepTimer.set(item.itemId)
+                if (sleepTimer.isArmed()) sleepHandler.post(sleepTick)
                 paintTimer()
                 true
             }
@@ -615,6 +612,8 @@ internal class VideoPlaybackPage(
             menu.menu.add(0, 0, 0, if (favorite.label.text == "已收藏") "取消收藏" else "收藏")
             menu.menu.add(0, 1, 1, "睡眠定时")
             menu.menu.add(0, 2, 2, "文件信息")
+            video.controllerShowTimeoutMs = 0
+            menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
             menu.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
                     0 -> favorite.root.performClick()
@@ -627,8 +626,6 @@ internal class VideoPlaybackPage(
                 }
                 true
             }
-            video.controllerShowTimeoutMs = 0
-            menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
             menu.show()
         }
         val playbackStatus = LinearLayout(activity).apply {
@@ -964,14 +961,17 @@ internal class VideoPlaybackPage(
                     ensureAudioSession()
                 }
                 if (playbackState == Player.STATE_ENDED) {
-                    stopAudioSession()
-                    progress.edit { remove(progressKey).remove(legacyProgressKey) }
-                    history.save(entry, (player.currentPosition / 1000).toInt(), completed = true, duration = durationSeconds())
+                    // 只听声音的会话留给下一集接管，切集期间媒体通知还能关联当前播放页。
+                    historyRecording.saveVideo(progress, player.currentPosition, completed = true, durationSeconds())
                     readyToSave = false
-                    video.post {
-                        if (!canAutoAdvance()) return@post
-                        if (SleepTimer.consumeStopAfterCurrent()) return@post
-                        onEnded(snapshot())
+                    if (sleepTimer.consumeStopAfterCurrent()) {
+                        player.pause()
+                        paintTimer()
+                        stopAudioSession()
+                    } else {
+                        sleepHandler.post {
+                            if (canAutoAdvance()) onEnded(snapshot()) else releaseIdleAudioSession()
+                        }
                     }
                 }
                 if (player.playerError != null) return
@@ -981,7 +981,6 @@ internal class VideoPlaybackPage(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                stopAudioSession()
                 val status = error.mediaHttpStatus()
                 message.text = "播放失败（${status?.let { "HTTP $it" } ?: error.errorCodeName}）。"
                 message.visibility = View.VISIBLE
@@ -989,7 +988,9 @@ internal class VideoPlaybackPage(
                 if (retryOnExpiredLink &&
                     (error.isExpiredMediaLink() || (entry.provider == SourceProvider.QUARK && status == 412))
                 ) {
-                    video.post { if (dialog.isShowing) retryPlayback(true) }
+                    sleepHandler.post { if (dialog.isShowing) retryPlayback(true) }
+                } else {
+                    stopAudioSession()
                 }
             }
         })
@@ -1013,12 +1014,13 @@ internal class VideoPlaybackPage(
         player.setMediaSource(source, startPositionMs ?: savedPositionMs())
         player.playWhenReady = playWhenReady
         player.prepare()
+        if (sleepTimer.isArmed()) sleepHandler.post(sleepTick)
         // 换课时 startVideo 先构造本页、再 close 旧页，旧页 dismiss 会走
         // stopAudioSession()→VideoAudioBridge.release(oldPlayer)；而本页的 prepare()
         // 结果（STATE_READY）是异步的。此处同步把本页 player 预占进 bridge，
         // 让 release 的身份校验生效：Service 保持存活并原地换绑，避免「只听声音」
         // 换课时通知闪断 / session 置空死区。仅音频模式需要，普通视频播放不碰。
-        if (listening) VideoAudioBridge.prepare(player)
+        if (listening && playWhenReady) VideoAudioBridge.prepare(player)
     }
 
     data class Snapshot(
@@ -1029,13 +1031,15 @@ internal class VideoPlaybackPage(
         val audioOnly: Boolean,
         val fullscreen: Boolean,
         val orientationBeforeFullscreen: Int,
+        val historyRecording: AudioHistory.Recording,
     )
 
     fun canAutoAdvance(): Boolean =
         dialog.isShowing && player.playbackState == Player.STATE_ENDED && player.playWhenReady
 
     fun snapshot() = Snapshot(
-        entry, account, player.currentPosition, player.playWhenReady, listening, immersive, orientationBeforeFullscreen,
+        entry, account, player.currentPosition, player.playWhenReady, listening, immersive,
+        orientationBeforeFullscreen, historyRecording,
     )
 
     fun pause() {
@@ -1048,22 +1052,11 @@ internal class VideoPlaybackPage(
         dialog.dismiss()
     }
 
-    private fun savedPositionMs(): Long {
-        val saved = progress.getLong(progressKey, 0L)
-        if (saved > 0 || entry.isDisk) return saved
-        // 旧版本进度键不含来源；首次打开时迁移一次，避免升级后丢失续播位置。
-        val legacy = progress.getLong(legacyProgressKey, 0L)
-        if (legacy > 0) {
-            progress.edit { putLong(progressKey, legacy).remove(legacyProgressKey) }
-        }
-        return legacy
-    }
+    private fun savedPositionMs(): Long = historyRecording.videoPosition(progress)
 
     private fun saveProgress() {
         if (!readyToSave) return
-        val position = player.currentPosition
-        progress.edit { putLong(progressKey, position) }
-        history.save(entry, (position / 1000).toInt(), completed = false, duration = durationSeconds())
+        historyRecording.saveVideo(progress, player.currentPosition, completed = false, durationSeconds())
     }
 
     private fun durationSeconds(): Int {

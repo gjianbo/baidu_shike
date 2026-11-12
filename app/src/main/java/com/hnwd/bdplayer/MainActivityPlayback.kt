@@ -171,7 +171,10 @@ internal fun MainActivity.resolveAudio(
     }
     if (route == PlaybackRoute.AUDIO) {
         controller?.let { player ->
+            val recordingId = player.currentMediaItem?.mediaMetadata?.extras
+                ?.getString(AudioPlaybackService.HISTORY_RECORDING_ID)
             if (currentAudioEntry(player)?.let { sameEntry(it, entry) } == true &&
+                AudioHistory.canResumeRecording(recordingId) &&
                 player.playerError == null && player.playbackState != Player.STATE_ENDED &&
                 player.playbackState != Player.STATE_IDLE
             ) {
@@ -371,6 +374,7 @@ internal fun MainActivity.requestMediaLink(
     route: PlaybackRoute,
     webResumeSeconds: Int? = null,
     openPlayer: Boolean = true,
+    historyRecording: AudioHistory.Recording? = null,
 ) {
     if (viewer != verifiedAccount) {
         verifyAndRefresh()
@@ -378,12 +382,12 @@ internal fun MainActivity.requestMediaLink(
     }
     if (route == PlaybackRoute.AUDIO) {
         mediaAddresses.link(mediaCacheKey(viewer, entry))?.let { uri ->
-            openAudioLink(entry, uri, route, openPlayer, webResumeSeconds)
+            openAudioLink(entry, uri, route, openPlayer, webResumeSeconds, historyRecording)
             return
         }
     }
     mediaLinks.resolve(entry, viewer, lane = RequestLane.AUDIO) { uri ->
-        openAudioLink(entry, uri, route, openPlayer, webResumeSeconds)
+        openAudioLink(entry, uri, route, openPlayer, webResumeSeconds, historyRecording)
     }
 }
 
@@ -394,6 +398,7 @@ internal fun MainActivity.openAudioLink(
     route: PlaybackRoute,
     openPlayer: Boolean,
     webResumeSeconds: Int?,
+    historyRecording: AudioHistory.Recording? = null,
 ) {
     when (route) {
         PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri, openPlayer)
@@ -403,7 +408,7 @@ internal fun MainActivity.openAudioLink(
             confirmPlayback(entry)
             updateAudioRequestMessage(null)
             controller?.pause()
-            playAudio(entry, uri, webResumeSeconds)
+            playAudio(entry, uri, webResumeSeconds, historyRecording)
         }
     }
 }
@@ -414,12 +419,12 @@ internal fun MainActivity.startPdfReader(entry: PanEntry, file: File) {
     val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
     // 渲染服务是 isolatedProcess，与 App 不同 UID，按包名显式授予读取权限
     grantUriPermission(packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    startActivity(Intent(this, PdfReaderActivity::class.java).apply {
+    launchPreview(Intent(this, PdfReaderActivity::class.java).apply {
         putExtra(PdfReaderActivity.EXTRA_URI, uri.toString())
         putExtra(PdfReaderActivity.EXTRA_TITLE, entry.name)
         putExtra(PdfReaderActivity.EXTRA_FILE, file.absolutePath)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    })
+    }, file)
     status.text = ""
 }
 
@@ -715,6 +720,7 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     // 底部传输组：循环 · 上一 · 大圆播放 · 下一 · 播放列表，左右对称（对齐竞品五行布局）
     val repeatButton = icon(R.drawable.ic_repeat).apply { contentDescription = "播放循环" }
     val playlistButton = icon(R.drawable.ic_playlist).apply { contentDescription = "播放列表" }
+    val sleepTimer = SleepTimer.audio
     // update() 每 500ms 跑一次，只在循环态真的翻转时重建 Drawable / 染色。
     var repeatLooping: Boolean? = null
     fun paintRepeat() {
@@ -726,6 +732,10 @@ internal fun MainActivity.showPlayback(player: MediaController) {
         repeatButton.contentDescription = if (looping) "单曲循环，点击关闭" else "播放循环，点击开启单曲循环"
     }
     repeatButton.setOnClickListener {
+        if (sleepTimer.stopAfterCurrent) {
+            toast("请先关闭「本集结束后停止」")
+            return@setOnClickListener
+        }
         val looping = player.repeatMode == Player.REPEAT_MODE_ONE
         player.repeatMode = if (looping) Player.REPEAT_MODE_OFF else Player.REPEAT_MODE_ONE
         paintRepeat()
@@ -751,32 +761,24 @@ internal fun MainActivity.showPlayback(player: MediaController) {
     }
     val timer = audioIconButton(R.drawable.ic_timer, "睡眠定时", color(R.color.ink3)) {}
     fun paintTimer() {
-        timer.setColorFilter(color(if (SleepTimer.isArmed()) R.color.accent else R.color.ink3))
-        val remaining = SleepTimer.remainingMs()
+        timer.setColorFilter(color(if (sleepTimer.isArmed() || sleepTimer.stopAfterCurrent) R.color.accent else R.color.ink3))
+        val remaining = sleepTimer.remainingMs()
         timer.contentDescription = when {
-            SleepTimer.isArmed() -> "睡眠定时，剩余 ${formatAudioTime((remaining / 1000).toInt())}"
-            SleepTimer.stopAfterCurrent -> "本集结束后停止"
+            sleepTimer.isArmed() -> "睡眠定时，剩余 ${formatAudioTime((remaining / 1000).toInt())}"
+            sleepTimer.stopAfterCurrent -> "本集结束后停止"
             else -> "睡眠定时"
         }
     }
     fun showTimerMenu(anchor: View) {
         val menu = PopupMenu(this, anchor, Gravity.END)
-        menu.menu.add(0, 0, 0, "关闭定时").isChecked = !SleepTimer.isArmed() && !SleepTimer.stopAfterCurrent
-        listOf(15, 30, 45, 60).forEachIndexed { index, minutes ->
-            menu.menu.add(0, index + 1, index + 1, "$minutes 分钟")
+        menu.menu.add(0, 0, 0, "关闭定时").isChecked = !sleepTimer.isArmed() && !sleepTimer.stopAfterCurrent
+        listOf(15, 30, 45, 60).forEach { minutes ->
+            menu.menu.add(0, minutes, minutes, "$minutes 分钟")
         }
-        menu.menu.add(0, 99, 99, "本集结束后停止")
+        menu.menu.add(0, SleepTimer.AFTER_CURRENT, 99, "本集结束后停止").isChecked = sleepTimer.stopAfterCurrent
         menu.menu.setGroupCheckable(0, true, false)
         menu.setOnMenuItemClickListener { item ->
-            when (item.itemId) {
-                0 -> {
-                    SleepTimer.disarm()
-                    SleepTimer.consumeStopAfterCurrent()
-                    sendSleepTimer(0)
-                }
-                99 -> SleepTimer.armStopAfterCurrent()
-                else -> sendSleepTimer(listOf(15, 30, 45, 60)[item.itemId - 1])
-            }
+            sendSleepTimer(item.itemId)
             paintTimer()
             true
         }
@@ -1112,18 +1114,29 @@ internal fun MainActivity.startVideo(
     audioOnly: Boolean = false,
     fullscreen: Boolean = false,
     orientationBeforeFullscreen: Int = videoPage?.orientationBeforeFullscreen ?: requestedOrientation,
+    historyRecording: AudioHistory.Recording? = null,
 ) {
-    if (!activityVisible || !hasActiveSession(entry.provider)) {
+    val previousPage = videoPage
+    fun releaseIdlePreviousPage() {
+        if (videoPage === previousPage) previousPage?.releaseIdleAudioSession()
+    }
+    val canLoadInBackground = audioOnly && previousPage?.canPlayInBackground() == true
+    if ((!activityVisible && !canLoadInBackground) || !hasActiveSession(entry.provider)) {
         if (activityVisible) toast("请先确认网盘登录后重试")
+        if (videoLoading == null) releaseIdlePreviousPage()
         return
     }
     val quark = entry.provider == SourceProvider.QUARK
     videoToRestore = null
     val account = playbackAccount(entry)
+    val recording = historyRecording ?: videoHistory.scoped(account).begin(entry)
     val key = mediaCacheKey(account, entry)
+    // 取址期间旧播放器可能已经到点暂停，换页也要遵守本次切换开始时的截止时间。
+    val sleepDeadline = videoSleepTimer.deadlineElapsedMs
+    dismissVideoOpenError()
     pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
     loadingVideo = VideoPlaybackPage.Snapshot(
-        entry, account, positionMs, playWhenReady, audioOnly, fullscreen, orientationBeforeFullscreen,
+        entry, account, positionMs, playWhenReady, audioOnly, fullscreen, orientationBeforeFullscreen, recording,
     )
     cancelPendingAudioRequest()
     controller?.pause()
@@ -1139,36 +1152,44 @@ internal fun MainActivity.startVideo(
             loadingVideo = null
             pendingQueue = null
             videoResolver.cancel()
+            releaseIdlePreviousPage()
         }
     }
     videoLoading = loading
-    loading.show()
+    if (activityVisible) loading.show()
     fun openStream(result: Result<MediaSource>) {
         if (videoLoading !== loading) return
         videoLoading = null
         loadingVideo = null
         loading.dismiss()
-        if (isDestroyed || isFinishing || account != playbackAccount(entry)) return
+        if (isDestroyed || isFinishing || account != playbackAccount(entry) ||
+            (!activityVisible && videoPage?.canPlayInBackground() != true)
+        ) {
+            releaseIdlePreviousPage()
+            return
+        }
         result.onSuccess { source ->
             confirmPlayback(entry)
-            val previousPage = videoPage
             val courseListKey = PlaybackQueueState.listKey
             videoPage = VideoPlaybackPage(
                 this, entry, source,
                 account = account,
-                history = AudioHistory(getSharedPreferences("video_history", android.content.Context.MODE_PRIVATE), account),
+                historyRecording = recording,
                 startPositionMs = positionMs,
-                playWhenReady = playWhenReady,
+                playWhenReady = playWhenReady &&
+                    (sleepDeadline == 0L || android.os.SystemClock.elapsedRealtime() < sleepDeadline),
                 retryOnExpiredLink = retryOnExpiredLink,
                 startAudioOnly = audioOnly,
                 startFullscreen = fullscreen,
                 orientationBeforeFullscreen = orientationBeforeFullscreen,
+                sleepTimer = videoSleepTimer,
                 onRetry = { snapshot, automatic ->
                     if (videoLoading == null && account == playbackAccount(entry)) {
                         if (!quark) mediaAddresses.clearPlaylist(key)
                         startVideo(
                             entry, snapshot.positionMs, snapshot.playWhenReady, retryOnExpiredLink = !automatic,
                             audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
+                            historyRecording = snapshot.historyRecording,
                         )
                     }
                 },
@@ -1191,10 +1212,17 @@ internal fun MainActivity.startVideo(
                 onSwitch = { delta, snapshot -> playSibling(entry, delta, videoState = snapshot) },
                 onEnded = { snapshot ->
                     val endedPage = videoPage
-                    advanceAfterEnd(entry, isCurrent = {
-                        activityVisible && videoLoading == null && videoPage === endedPage &&
-                            endedPage?.canAutoAdvance() == true
-                    }) {
+                    advanceAfterEnd(
+                        entry,
+                        isCurrent = {
+                            (activityVisible || endedPage?.canPlayInBackground() == true) &&
+                                videoLoading == null && videoPage === endedPage &&
+                                endedPage?.canAutoAdvance() == true
+                        },
+                        onUnavailable = {
+                            if (videoLoading == null && videoPage === endedPage) endedPage?.releaseIdleAudioSession()
+                        },
+                    ) {
                         playSibling(entry, 1, automatic = true, videoState = snapshot)
                     }
                 },
@@ -1208,13 +1236,16 @@ internal fun MainActivity.startVideo(
                 onClose = { closed ->
                     if (videoPage === closed) {
                         videoPage = null
+                        videoSleepTimer.set(0)
                         if (!isDestroyed) renderHomeSections()
                     }
                 },
             )
+            if (!activityVisible) stoppedVideo = videoPage?.snapshot()
             previousPage?.close(keepOrientation = fullscreen)
         }.onFailure {
-            AlertDialog.Builder(this)
+            releaseIdlePreviousPage()
+            val error = AlertDialog.Builder(this)
                 .setTitle("无法原生播放")
                 .setMessage((it as? QuarkLoginRequired)?.message
                     ?: (it as? IllegalStateException)?.message ?: "读取视频播放地址失败。")
@@ -1223,9 +1254,13 @@ internal fun MainActivity.startVideo(
                     startVideo(
                         entry, positionMs, playWhenReady, audioOnly = audioOnly, fullscreen = fullscreen,
                         orientationBeforeFullscreen = orientationBeforeFullscreen,
+                        historyRecording = recording,
                     )
                 }
-                .show()
+                .create()
+            videoOpenError = error
+            error.setOnDismissListener { if (videoOpenError === error) videoOpenError = null }
+            if (activityVisible) error.show()
         }
     }
     fun mediaItem(uri: Uri) = MediaItem.Builder().setUri(uri)
@@ -1263,7 +1298,12 @@ internal fun MainActivity.playbackError(error: PlaybackException): String {
 }
 
 
-internal fun MainActivity.playAudio(entry: PanEntry, uri: Uri, resumeSeconds: Int?) {
+internal fun MainActivity.playAudio(
+    entry: PanEntry,
+    uri: Uri,
+    resumeSeconds: Int?,
+    historyRecording: AudioHistory.Recording?,
+) {
     val account = verifiedAccount
     val source = JSONObject.quote(uri.toString())
     var webAudioEnded = false
@@ -1288,6 +1328,7 @@ internal fun MainActivity.playAudio(entry: PanEntry, uri: Uri, resumeSeconds: In
     )
     audioControls = controls
     val playbackHistory = AudioHistory(getSharedPreferences("audio_history", android.content.Context.MODE_PRIVATE), verifiedAccount)
+    val recording = historyRecording ?: playbackHistory.begin(entry)
     val previous = playbackHistory.find(entry)
     val startAt = resumeSeconds ?: previous?.takeUnless { it.completed }?.seconds ?: 0
     var lastSavedSeconds = startAt
@@ -1296,7 +1337,7 @@ internal fun MainActivity.playAudio(entry: PanEntry, uri: Uri, resumeSeconds: In
     fun saveProgress(seconds: Int, completed: Boolean, duration: Int = 0) {
         if (seconds <= 0 || (seconds < startAt && !completed)) return
         if (seconds == lastSavedSeconds && completed == lastCompleted) return
-        playbackHistory.save(entry, seconds, completed, duration)
+        recording.save(seconds, completed, duration)
         lastSavedSeconds = seconds
         lastSavedAt = SystemClock.elapsedRealtime()
         lastCompleted = completed
@@ -1432,7 +1473,10 @@ internal fun MainActivity.playAudio(entry: PanEntry, uri: Uri, resumeSeconds: In
             if ((error == 2 || error == 4) && resumeSeconds == null && hasVerifiedAccount() && account == verifiedAccount) {
                 val position = maxOf(startAt, lastSavedSeconds, state?.optInt(4) ?: 0)
                 dialog.dismiss()
-                requestMediaLink(entry, account, PlaybackRoute.WEB_AUDIO, webResumeSeconds = position)
+                requestMediaLink(
+                    entry, account, PlaybackRoute.WEB_AUDIO, webResumeSeconds = position,
+                    historyRecording = recording,
+                )
                 return@evaluateJavascript
             }
             if (error != 0 || (!ready && SystemClock.elapsedRealtime() >= deadline)) {

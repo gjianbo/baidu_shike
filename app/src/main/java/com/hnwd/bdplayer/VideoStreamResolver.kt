@@ -96,6 +96,7 @@ internal class VideoStreamResolver {
         val json = runCatching { JSONObject(body) }.getOrNull()
         val errno = json?.optInt("errno")
         val errorCode = json?.optInt("error_code")
+        val reportedCode = errno?.takeUnless { it == 0 } ?: errorCode?.takeUnless { it == 0 }
         return IllegalStateException(when {
             errno == -6 -> "请重新登录百度网盘后再试。"
             errno == -20 || errorCode == -20 -> {
@@ -108,6 +109,7 @@ internal class VideoStreamResolver {
             errorCode == 31023 -> "网盘取址参数有误，请重新打开。"
             code == 401 || code == 403 -> "播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）。"
             code != 200 -> "播放清单请求失败（HTTP $code）。"
+            reportedCode != null -> "百度网盘未返回可播放的点播清单（错误码 $reportedCode）。"
             else -> "网盘未返回可播放的点播清单。"
         })
     }

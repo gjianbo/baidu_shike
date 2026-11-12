@@ -4,6 +4,8 @@ import android.content.SharedPreferences
 import org.json.JSONArray
 import org.json.JSONObject
 import androidx.core.content.edit
+import java.util.UUID
+import java.util.WeakHashMap
 
 internal data class AudioHistoryItem(
     val entry: PanEntry,
@@ -26,6 +28,8 @@ internal fun formatAudioTime(seconds: Int): String =
     "${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
 
 internal class AudioHistory(private val preferences: SharedPreferences, private val account: String? = null) {
+    fun scoped(account: String) = AudioHistory(preferences, account)
+
     private fun bucket(entry: PanEntry) =
         if (entry.origin == EntryOrigin.DISK) DISK_SOURCE_ID else entry.gid
 
@@ -80,11 +84,24 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
             }
     }.getOrDefault(emptyMap())
 
-    fun save(entry: PanEntry, seconds: Int, completed: Boolean, duration: Int = 0) {
+    fun begin(entry: PanEntry): Recording = synchronized(recordings) {
+        val scope = account ?: AccountScope.current
+        Recording(scoped(scope), entry, scope).also { recordings[it] = Unit }
+    }
+
+    private fun save(entry: PanEntry, seconds: Int, completed: Boolean, duration: Int) {
         val newest = AudioHistoryItem(entry, seconds, completed, System.currentTimeMillis(), duration)
         val bucket = bucket(entry)
         val items = (listOf(newest) + recentBucket(bucket).filterNot { sameFile(it.entry, entry) })
             .take(MAX_ITEMS)
+        writeBucket(bucket, items)
+    }
+
+    private fun writeBucket(bucket: String, items: List<AudioHistoryItem>) {
+        if (items.isEmpty()) {
+            preferences.edit { remove(storageKey(bucket)) }
+            return
+        }
         val data = JSONArray()
         items.forEach { item ->
             data.put(JSONObject()
@@ -104,18 +121,88 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
         preferences.edit { putString(storageKey(bucket), data.toString()) }
     }
 
-    fun clear() {
+    fun remove(entry: PanEntry, videoProgress: SharedPreferences? = null) = synchronized(recordings) {
+        val scope = account ?: AccountScope.current
+        val history = scoped(scope)
+        recordings.keys.removeAll { it.matches(preferences, scope) && sameFile(it.entry, entry) }
+        val bucket = bucket(entry)
+        val items = history.recentBucket(bucket)
+        val remaining = items.filterNot { sameFile(it.entry, entry) }
+        if (remaining.size != items.size) history.writeBucket(bucket, remaining)
+        videoProgress?.edit {
+            remove(AccountScope.key(entryKey(entry), scope))
+            if (!entry.isDisk) remove(legacyVideoKey(entry, scope))
+        }
+        Unit
+    }
+
+    fun clear(videoProgress: SharedPreferences? = null) = synchronized(recordings) {
+        val scope = account ?: AccountScope.current
+        recordings.keys.removeAll { it.matches(preferences, scope) }
+        val prefix = AccountScope.prefix(scope)
         preferences.edit {
-            val prefix = AccountScope.prefix(account ?: AccountScope.current)
             PrefIndex.keys(preferences).filter { it.startsWith(prefix) }.forEach { remove(it) }
         }
+        videoProgress?.edit {
+            PrefIndex.keys(videoProgress).filter { it.startsWith(prefix) }.forEach { remove(it) }
+        }
+        Unit
     }
 
     private fun sameFile(first: PanEntry, second: PanEntry): Boolean =
         first.origin == second.origin && first.gid == second.gid &&
             first.messageId == second.messageId && first.fileId == second.fileId
 
-    private companion object {
-        const val MAX_ITEMS = 300
+    internal class Recording internal constructor(
+        private val history: AudioHistory,
+        val entry: PanEntry,
+        private val account: String,
+    ) {
+        val id: String = UUID.randomUUID().toString()
+        private val progressKey = AccountScope.key(entryKey(entry), account)
+        private val legacyProgressKey = legacyVideoKey(entry, account)
+
+        fun matches(preferences: SharedPreferences, account: String): Boolean =
+            history.preferences === preferences && this.account == account
+
+        fun save(seconds: Int, completed: Boolean, duration: Int): Unit = synchronized(recordings) {
+            if (this in recordings) history.save(entry, seconds, completed, duration)
+        }
+
+        fun saveVideo(progress: SharedPreferences, positionMs: Long, completed: Boolean, duration: Int) =
+            synchronized(recordings) {
+                if (this !in recordings) return@synchronized
+                progress.edit {
+                    if (completed) {
+                        remove(progressKey)
+                        if (!entry.isDisk) remove(legacyProgressKey)
+                    } else putLong(progressKey, positionMs)
+                }
+                history.save(entry, (positionMs / 1000).toInt(), completed, duration)
+            }
+
+        fun videoPosition(progress: SharedPreferences): Long = synchronized(recordings) {
+            if (this !in recordings) return@synchronized 0L
+            val saved = progress.getLong(progressKey, 0L)
+            if (saved > 0 || entry.isDisk) return@synchronized saved
+            val legacy = progress.getLong(legacyProgressKey, 0L)
+            if (legacy > 0) {
+                progress.edit { putLong(progressKey, legacy).remove(legacyProgressKey) }
+            }
+            legacy
+        }
+    }
+
+    companion object {
+        private const val MAX_ITEMS = 300
+        // 已删除的播放会话不再写入，主动重新打开文件会创建新的会话。
+        private val recordings = WeakHashMap<Recording, Unit>()
+
+        fun canResumeRecording(id: String?): Boolean = synchronized(recordings) {
+            recordings.keys.any { it.id == id }
+        }
+
+        private fun legacyVideoKey(entry: PanEntry, account: String) =
+            AccountScope.key("${entry.gid}:${entry.messageId}:${entry.fileId}", account)
     }
 }

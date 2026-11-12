@@ -16,10 +16,11 @@ import androidx.core.content.edit
  */
 
 internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean = false) {
-    if ((screen != Screen.HOME || folders.isNotEmpty()) && homeCheckInFlight) {
+    if ((!isHomeRoot() || homeRefreshFeedback?.refreshing == true) && homeCheckInFlight) {
         homeCheckToken++
         homeCheckInFlight = false
     }
+    homeRefreshFeedback?.clear()
     if (screen == Screen.FAVORITES) {
         refreshFavoritesPage()
         return
@@ -487,30 +488,43 @@ internal fun MainActivity.renderDiskMore(dir: String, cacheKey: String) {
 }
 
 
-internal fun MainActivity.loadRoots(key: String, page: Int = 1, cursor: String = "", previousButton: View? = null) {
+internal fun MainActivity.loadRoots(
+    key: String,
+    page: Int = 1,
+    cursor: String = "",
+    previousButton: View? = null,
+    onRefresh: ((String?) -> Unit)? = null,
+) {
     val group = gid
-    val homeDirectory = showingHomeDirectory
+    val homeDirectory = showingHomeDirectory || onRefresh != null
     load(
         PanApi.roots(group, cursor),
         post = isContactSource(group),
         statusHint = if (homeDirectory) "正在读取文件库…"
         else if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else null,
-        onCancelled = { previousButton?.isEnabled = true },
+        onCancelled = {
+            previousButton?.isEnabled = true
+            onRefresh?.invoke(null)
+        },
         onFailure = {
             previousButton?.isEnabled = true
             if (page == 1) {
                 cacheFailure(key)
-                renderRootMore(key)
+                if (onRefresh == null) renderRootMore(key)
             }
+            onRefresh?.invoke(HOME_REFRESH_FAILED)
         },
     ) { json ->
         val entries = PanApi.parseRoots(json, group)
         val next = nextRootCursor(json, group, cursor)
+        val message = onRefresh?.let { homeRefreshMessage(key, entries) }
         courseCache.writeIfChanged(key, page, entries, next)
         courseCache.clearAfter(key, page)
         cacheNote = "已同步 ${courseCache.syncLabel(key)}"
         if (homeDirectory) {
-            renderHomeDirectory(key)
+            val scrollY = contentScroll.scrollY
+            renderHomeDirectory(key, preserveMediaFilter = onRefresh != null)
+            if (onRefresh != null) scrollAfterLayout(scrollY)
         } else {
             content.removeAllViews()
             renderSourcePicker()
@@ -521,6 +535,7 @@ internal fun MainActivity.loadRoots(key: String, page: Int = 1, cursor: String =
         if (next.isEmpty() && PanApi.hasMore(pagination)) {
             status.text = "网盘未返回可用的分页游标，请刷新后重试。"
         }
+        onRefresh?.invoke(message)
     }
 }
 
@@ -544,10 +559,15 @@ internal fun MainActivity.nextRootCursor(json: JSONObject, sourceId: String, cur
  * 夸克来源的目录列表（群组/首页的「监控目录」）。走 QuarkPersonalDrive 原生 HTTP，
  * 结果转 PanEntry 后复用百度侧的缓存/渲染（CourseCache/display/renderCourse）。
  */
-internal fun MainActivity.loadQuarkRoots(key: String, page: Int = 1, previousButton: View? = null) {
+internal fun MainActivity.loadQuarkRoots(
+    key: String,
+    page: Int = 1,
+    previousButton: View? = null,
+    onRefresh: ((String?) -> Unit)? = null,
+) {
     val sourceId = gid
     if (providerOfSourceId(sourceId) != SourceProvider.QUARK) {
-        loadRoots(key)
+        loadRoots(key, onRefresh = onRefresh)
         return
     }
     status.text = if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else "正在读取夸克目录…"
@@ -559,28 +579,39 @@ internal fun MainActivity.loadQuarkRoots(key: String, page: Int = 1, previousBut
         }
         runOnUiThread {
             previousButton?.isEnabled = true
-            if (token != requestId) return@runOnUiThread
+            if (token != requestId || isDestroyed || isFinishing) {
+                onRefresh?.invoke(null)
+                return@runOnUiThread
+            }
             result.onFailure { error ->
-                if (page == 1) cacheFailure(key)
                 status.text = when (error) {
                     is QuarkLoginRequired -> "请先登录夸克网盘"
                     is IllegalStateException -> error.message ?: "读取夸克目录失败"
                     else -> "读取夸克目录失败，请稍后重试"
                 }
-                if (page == 1) renderRootMore(key)
+                if (page == 1) {
+                    cacheFailure(key)
+                    if (onRefresh == null) renderRootMore(key)
+                }
+                onRefresh?.invoke(HOME_REFRESH_FAILED)
             }.onSuccess { pageData ->
                 val entries = pageData.items.map { quarkEntry(it, sourceId) }
+                val message = onRefresh?.let { homeRefreshMessage(key, entries) }
                 courseCache.writeIfChanged(key, page, entries, if (pageData.hasMore) "more" else "")
                 if (!pageData.hasMore) courseCache.clearAfter(key, page)
                 cacheNote = "已同步 ${courseCache.syncLabel(key)}"
-                if (showingHomeDirectory) renderHomeDirectory(key)
-                else {
+                if (showingHomeDirectory || onRefresh != null) {
+                    val scrollY = contentScroll.scrollY
+                    renderHomeDirectory(key, preserveMediaFilter = onRefresh != null)
+                    if (onRefresh != null) scrollAfterLayout(scrollY)
+                } else {
                     content.removeAllViews()
                     renderSourcePicker()
                     display(courseCache.readAll(key))
                     status.text = cacheNote
                 }
                 renderRootMore(key)
+                onRefresh?.invoke(message)
             }
         }
     }
@@ -647,6 +678,7 @@ internal fun MainActivity.renderRootMore(key: String) {
 
 
 internal fun MainActivity.invalidateAccount() {
+    homeRefreshFeedback?.clear()
     pdfPreviewRef?.close()
     imagePreviewRef?.close()
     accountProbeId++
@@ -676,6 +708,7 @@ internal fun MainActivity.invalidateAccount() {
     renewalResolver.cancel()
     videoLoading?.dismiss()
     videoLoading = null
+    dismissVideoOpenError()
 }
 
 
@@ -869,12 +902,12 @@ internal fun MainActivity.renderSourcePicker() {
 }
 
 
-internal fun MainActivity.display(entries: List<PanEntry>) {
+internal fun MainActivity.display(entries: List<PanEntry>, preserveMediaFilter: Boolean = false) {
     if (screen == Screen.HOME && folders.isEmpty()) homeDisplayedEntries = entries
     status.text = if (entries.isEmpty()) "文件库暂无内容" else cacheNote
     sectionTitle.text = when {
         screen == Screen.HOME -> "群组"
         else -> "文件"
     }
-    addFilteredCourseRows(entries, sortable = listSortable())
+    addFilteredCourseRows(entries, sortable = listSortable(), preserveMediaFilter = preserveMediaFilter)
 }

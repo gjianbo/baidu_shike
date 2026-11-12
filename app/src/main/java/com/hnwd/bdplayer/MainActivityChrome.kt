@@ -100,9 +100,10 @@ internal fun MainActivity.updateFilterChips() {
 }
 
 
-internal fun MainActivity.showAvailableMediaFilters(kinds: Set<MediaKind>) {
+internal fun MainActivity.showAvailableMediaFilters(kinds: Set<MediaKind>, includeSelected: Boolean = false) {
     MediaFilter.entries.forEach { filter ->
-        val available = filter == MediaFilter.ALL || kinds.any(filter::includes)
+        val available = filter == MediaFilter.ALL || (includeSelected && filter == mediaFilter) ||
+            kinds.any(filter::includes)
         mediaChips[filter.ordinal].visibility = if (available) View.VISIBLE else View.GONE
     }
 }
@@ -386,9 +387,11 @@ internal fun MainActivity.updateWindowLayout() {
     }
     listOf(shell.findViewById<View>(R.id.titleRow), appSub, historyPanel, sectionRow, filterBar, status, content)
         .forEach { it.setPaddingRelative(pagePad, it.paddingTop, pagePad, it.paddingBottom) }
-    courseSwitch.layoutParams = (courseSwitch.layoutParams as LinearLayout.LayoutParams).apply {
-        marginStart = pagePad
-        marginEnd = pagePad
+    listOf(courseSwitch, shell.findViewById<View>(R.id.homeRefreshNotice)).forEach { view ->
+        view.layoutParams = (view.layoutParams as LinearLayout.LayoutParams).apply {
+            marginStart = pagePad
+            marginEnd = pagePad
+        }
     }
     nowPlaying.layoutParams = nowPlaying.layoutParams.apply {
         width = resources.getDimensionPixelSize(R.dimen.mini_player_width)

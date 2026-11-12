@@ -74,6 +74,7 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var native: LinearLayout
     internal lateinit var content: LinearLayout
     internal lateinit var contentScroll: ScrollView
+    internal var homeRefreshFeedback: HomeRefreshFeedback? = null
     internal lateinit var status: TextView
     internal lateinit var title: TextView
     internal lateinit var appSub: TextView
@@ -159,19 +160,25 @@ class MainActivity : AppCompatActivity() {
     internal var diskRenewAttempts = 0
     internal var lastDiskRenewAt = 0L
     internal val mediaAddresses by lazy { MediaAddressCache(this) }
-    internal val imageViewerLauncher =
+    private var launchedPreviewFile: File? = null
+    private val previewLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            launchedPreviewFile?.let(PreviewCache.get(this)::release)
+            launchedPreviewFile = null
             if (result.resultCode != RESULT_OK) return@registerForActivityResult
             val index = result.data?.getIntExtra(ImageViewerActivity.EXTRA_SWITCH_INDEX, -1) ?: -1
             val entry = imagePreview.galleryEntry(index) ?: return@registerForActivityResult
             val original = result.data?.getBooleanExtra(ImageViewerActivity.EXTRA_OPEN_ORIGINAL, false) == true
+            val saveOriginal = result.data?.getBooleanExtra(ImageViewerActivity.EXTRA_SAVE_ORIGINAL, false) == true
             native.post {
-                if (original) imagePreview.openOriginal(entry)
+                if (original) imagePreview.openOriginal(entry, save = saveOriginal)
                 else imagePreview.open(entry, imagePreview.entries())
             }
         }
-        internal var videoLoading: AlertDialog? = null
+    internal var videoLoading: AlertDialog? = null
+    internal var videoOpenError: AlertDialog? = null
     internal var videoPage: VideoPlaybackPage? = null
+    internal val videoSleepTimer = SleepTimer()
     internal var controllerFuture: ListenableFuture<MediaController>? = null
     internal var controller: MediaController? = null
     internal val uiExecutor = Executor { runOnUiThread(it) }
@@ -254,7 +261,7 @@ class MainActivity : AppCompatActivity() {
     internal val sheetHeights = java.util.WeakHashMap<Dialog, (Int) -> Int>()
     internal var activityVisible = false
     internal var ready = false
-    internal var requestId = 0
+    @Volatile internal var requestId = 0
     internal var gid = ""
     /** 网盘页当前网盘，与首页/群组的来源状态相互独立（v0.3 §8 #7）。 */
     internal var diskProvider = SourceProvider.BAIDU
@@ -309,8 +316,7 @@ class MainActivity : AppCompatActivity() {
             isAppearanceLightStatusBars = !ThemeStore.isDark(this@MainActivity)
             isAppearanceLightNavigationBars = !ThemeStore.isDark(this@MainActivity)
         }
-        PdfCache.prune(this)
-        ImageCache.prune(this)
+        PreviewCache.get(this).scheduleTrim()
         AccountScope.init(this)
         DriveSourceRouter.bindActiveSource(this) { gid }
         diskProvider = runCatching {
@@ -518,6 +524,7 @@ class MainActivity : AppCompatActivity() {
                 if (oldScrollY > dp(24) && scrollY <= dp(24)) refreshHistoryIfPending()
             }
         }
+        homeRefreshFeedback = HomeRefreshFeedback(this, shell.findViewById(R.id.homeRefreshNotice))
         courseSwitch = shell.findViewById(R.id.courseSwitch)
         btnPrev = shell.findViewById(R.id.btnPrev)
         btnNext = shell.findViewById(R.id.btnNext)
@@ -527,13 +534,7 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { searchSection.show() }
         }
         refreshButton = shell.findViewById(R.id.btnRefresh)
-        refreshButton.setOnClickListener {
-            when {
-                currentPageProvider() == SourceProvider.QUARK || hasActiveSession() -> refresh(force = true)
-                ready && !checkingAccount -> verifyAndRefresh(force = true)
-                !ready -> showApp()
-            }
-        }
+        refreshButton.setOnClickListener { requestBrowseRefresh() }
         sortButton.setOnClickListener { showCourseSort() }
         btnSelect = shell.findViewById(R.id.btnSelect)
         batchBar = shell.findViewById(R.id.batchBar)
@@ -841,6 +842,8 @@ class MainActivity : AppCompatActivity() {
         if (videoToRestore == null && videoPage == null && videoLoading == null) videoToRestore = loadingVideo
         nowPlaying.post(nowPlayingTicker)
         restoreVideoIfReady()
+        videoLoading?.show()
+        videoOpenError?.show()
         // controller 与账号校验可能都还没就绪；openCurrentPlayback 只在守卫成立时
         // 才展开并清零，否则保留标志，等 controller 回调 / updateNowPlaying 继续重试。
         retryOpenPlayerIfPending()
@@ -855,13 +858,18 @@ class MainActivity : AppCompatActivity() {
         nowPlaying.removeCallbacks(nowPlayingTicker)
         stoppedVideo = videoPage?.snapshot()
         videoPage?.pauseForBackground()
-        videoResolver.cancel()
+        if (videoOpenError?.isShowing == true) dismissVideoOpenError()
         videoLoading?.dismiss()
-        videoLoading = null
+        if (loadingVideo?.audioOnly != true || videoPage?.canPlayInBackground() != true) {
+            videoResolver.cancel()
+            videoLoading = null
+        }
         super.onStop()
     }
 
     override fun onDestroy() {
+        dismissVideoOpenError()
+        homeRefreshFeedback?.clear()
         searchSectionRef?.dismiss()
         requestId++
         audioPlayToken?.let(AudioPlayRequestGate::cancel)
@@ -872,6 +880,8 @@ class MainActivity : AppCompatActivity() {
         videoPage?.close()
         pdfPreviewRef?.release()
         imagePreviewRef?.release()
+        launchedPreviewFile?.let(PreviewCache.get(this)::release)
+        launchedPreviewFile = null
         closeAudioPage()
         controllerFuture?.let(MediaController::releaseFuture)
         controller = null
@@ -881,6 +891,12 @@ class MainActivity : AppCompatActivity() {
         web.destroy()
         DriveSourceRouter.unbind(this)
         super.onDestroy()
+    }
+
+    internal fun dismissVideoOpenError() {
+        val error = videoOpenError
+        videoOpenError = null
+        error?.dismiss()
     }
 
     /** 账号失效或切换时清掉写操作锁（锁本身在 DiskMutationSection 内部）。 */
@@ -1023,10 +1039,14 @@ class MainActivity : AppCompatActivity() {
                     val json = JSONObject(body)
                     val errno = json.getInt("errno")
                     if (errno == -6) {
+                        val wasRefreshingHome = homeRefreshFeedback?.refreshing == true
                         invalidateAccount()
                         refresh()
                         val message = apiError(url, errno, json)
                         status.text = message
+                        if (wasRefreshingHome && isHomeRoot()) {
+                            homeRefreshFeedback?.showResult("登录已失效，请重新登录百度网盘")
+                        }
                         if (lane == RequestLane.AUDIO) updateAudioRequestMessage(message)
                         onCancelled()
                         return@evaluateJavascript
@@ -1109,6 +1129,7 @@ class MainActivity : AppCompatActivity() {
             snapshot.entry, snapshot.positionMs, snapshot.playWhenReady,
             audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
             orientationBeforeFullscreen = snapshot.orientationBeforeFullscreen,
+            historyRecording = snapshot.historyRecording,
         )
     }
 
@@ -1200,8 +1221,23 @@ class MainActivity : AppCompatActivity() {
         override fun refresh() = this@MainActivity.refresh()
     }
 
+    /** 查看器启动是异步的，父页面保留文件直至预览返回。 */
+    internal fun launchPreview(intent: Intent, file: File?) {
+        val cache = PreviewCache.get(this)
+        if (file != null) check(cache.retain(file)) { "预览缓存已失效，请重新打开。" }
+        launchedPreviewFile?.let(cache::release)
+        launchedPreviewFile = file
+        try {
+            previewLauncher.launch(intent)
+        } catch (error: RuntimeException) {
+            file?.let(cache::release)
+            launchedPreviewFile = null
+            throw error
+        }
+    }
+
     // ===================== ImagePreviewHost =====================
-    // 图片预览需要的最小宿主能力；导航只经 launchViewer 交给已注册的 launcher。
+    // 图片预览需要的最小宿主能力。
 
     internal inner class ImagePreviewHostAdapter : ImagePreviewHost {
         override val hostActivity: android.app.Activity get() = this@MainActivity
@@ -1209,6 +1245,8 @@ class MainActivity : AppCompatActivity() {
         override fun setStatus(message: String) {
             status.text = message
         }
+
+        override fun say(message: String) = hostActivity.toast(message)
 
         override fun isVisible() = activityVisible
         override fun isDestroyed() = this@MainActivity.isDestroyed
@@ -1231,7 +1269,7 @@ class MainActivity : AppCompatActivity() {
             web.evaluateJavascript(script, onResult)
         }
 
-        override fun launchViewer(intent: Intent) = imageViewerLauncher.launch(intent)
+        override fun launchViewer(intent: Intent, cachedFile: File?) = launchPreview(intent, cachedFile)
 
         override fun fetchJson(
             url: String,

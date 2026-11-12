@@ -41,7 +41,9 @@ class AudioPlaybackService : MediaSessionService() {
     private var entry: PanEntry? = null
     private var hasPlayed = false
     private var lastSaved: Pair<Int, Boolean>? = null
+    private var historyRecording: AudioHistory.Recording? = null
     private val handler = Handler(Looper.getMainLooper())
+    private val sleepTimer = SleepTimer.audio
     private val checkpoint = object : Runnable {
         override fun run() {
             saveProgress()
@@ -51,9 +53,9 @@ class AudioPlaybackService : MediaSessionService() {
     /** v0.2 睡眠定时：每秒轮询 SleepTimer，到点暂停并停止。 */
     private val sleepTick = object : Runnable {
         override fun run() {
-            if (!SleepTimer.isArmed()) return
-            if (SleepTimer.remainingMs() <= 0L) {
-                SleepTimer.disarm()
+            if (!sleepTimer.isArmed()) return
+            if (sleepTimer.remainingMs() <= 0L) {
+                sleepTimer.clearDeadline()
                 player.pause()
             } else {
                 handler.postDelayed(this, 1_000L)
@@ -90,7 +92,10 @@ class AudioPlaybackService : MediaSessionService() {
                 }
 
                 override fun onPlaybackStateChanged(playbackState: Int) {
-                    if (playbackState == Player.STATE_ENDED) saveProgress()
+                    if (playbackState == Player.STATE_ENDED) {
+                        if (sleepTimer.consumeStopAfterCurrent()) pause()
+                        saveProgress()
+                    }
                 }
             })
         }
@@ -136,6 +141,9 @@ class AudioPlaybackService : MediaSessionService() {
                     if (playerCommand == Player.COMMAND_PLAY_PAUSE || playerCommand == Player.COMMAND_STOP) {
                         AudioPlayRequestGate.cancelCurrent()
                     }
+                    if (playerCommand == Player.COMMAND_SET_REPEAT_MODE && sleepTimer.stopAfterCurrent) {
+                        return SessionResult.RESULT_ERROR_INVALID_STATE
+                    }
                     return SessionResult.RESULT_SUCCESS
                 }
 
@@ -157,8 +165,9 @@ class AudioPlaybackService : MediaSessionService() {
                         customCommand == SLEEP_TIMER -> {
                             val minutes = args.getInt("minutes", 0)
                             handler.removeCallbacks(sleepTick)
-                            SleepTimer.arm(minutes)
-                            if (minutes > 0) handler.postDelayed(sleepTick, 1_000L)
+                            sleepTimer.set(minutes)
+                            if (sleepTimer.stopAfterCurrent) player.repeatMode = Player.REPEAT_MODE_OFF
+                            if (sleepTimer.isArmed()) handler.postDelayed(sleepTick, 1_000L)
                             SessionResult.RESULT_SUCCESS
                         }
                         customCommand == CLEAR_FILE -> {
@@ -197,11 +206,13 @@ class AudioPlaybackService : MediaSessionService() {
             return SessionResult.RESULT_ERROR_BAD_VALUE
         }
         if (!isAudioSource(next, uri, playlist)) return SessionResult.RESULT_ERROR_BAD_VALUE
-        clearFile()
+        clearFile(keepEndTimer = entry != null && playbackAccount == account)
         entry = next
         playbackAccount = account
         val playbackHistory = AudioHistory(getSharedPreferences("audio_history", MODE_PRIVATE), account)
         history = playbackHistory
+        val recording = playbackHistory.begin(next)
+        historyRecording = recording
         val previous = playbackHistory.find(next)?.takeUnless { it.completed }
         lastSaved = previous?.let { it.seconds to false }
         val metadata = MediaMetadata.Builder().setTitle(next.name)
@@ -217,6 +228,7 @@ class AudioPlaybackService : MediaSessionService() {
                 putString("path", next.path)
                 putString("size", next.size)
                 putString("playbackId", UUID.randomUUID().toString())
+                putString(HISTORY_RECORDING_ID, recording.id)
                 putBoolean("hls", playlist != null)
             }).build()
         val item = MediaItem.Builder().setUri(uri).setMediaId(next.fileId)
@@ -307,14 +319,15 @@ class AudioPlaybackService : MediaSessionService() {
         }
     }
 
-    private fun clearFile() {
+    private fun clearFile(keepEndTimer: Boolean = false) {
         saveProgress()
         hasPlayed = false
         entry = null
         history = null
+        historyRecording = null
         playbackAccount = ""
         handler.removeCallbacks(sleepTick)
-        SleepTimer.disarm()
+        if (keepEndTimer) sleepTimer.clearDeadline() else sleepTimer.set(0)
         session.player.stop()
         session.player.clearMediaItems()
     }
@@ -331,7 +344,7 @@ class AudioPlaybackService : MediaSessionService() {
         if (progress == lastSaved) return
         val durationMs = player.duration
         val duration = if (durationMs > 0) (durationMs / 1000).toInt() else 0
-        history?.save(current, progress.first, progress.second, duration)
+        historyRecording?.save(progress.first, progress.second, duration)
         lastSaved = progress
     }
 
@@ -340,6 +353,7 @@ class AudioPlaybackService : MediaSessionService() {
     override fun onDestroy() {
         handler.removeCallbacks(checkpoint)
         handler.removeCallbacks(sleepTick)
+        sleepTimer.set(0)
         saveProgress()
         session.player.release()
         session.release()
@@ -347,6 +361,7 @@ class AudioPlaybackService : MediaSessionService() {
     }
 
     companion object {
+        internal const val HISTORY_RECORDING_ID = "historyRecordingId"
         internal val PLAY_FILE = SessionCommand("com.hnwd.bdplayer.PLAY_FILE", Bundle.EMPTY)
         internal val RENEW_FILE = SessionCommand("com.hnwd.bdplayer.RENEW_FILE", Bundle.EMPTY)
         internal val RENEW_HLS = SessionCommand("com.hnwd.bdplayer.RENEW_HLS", Bundle.EMPTY)

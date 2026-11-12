@@ -15,6 +15,7 @@ internal interface ImagePreviewHost {
     val hostActivity: Activity
 
     fun setStatus(message: String)
+    fun say(message: String)
     fun isVisible(): Boolean
     fun isDestroyed(): Boolean
     fun isReady(): Boolean
@@ -27,7 +28,7 @@ internal interface ImagePreviewHost {
     fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit)
     fun evaluateJavascript(script: String, onResult: (String?) -> Unit)
     /** 交给宿主注册的 ActivityResultLauncher，切图结果要能回传到同一份列表。 */
-    fun launchViewer(intent: Intent)
+    fun launchViewer(intent: Intent, cachedFile: File? = null)
 
     fun fetchJson(
         url: String,
@@ -54,7 +55,9 @@ internal class ImagePreviewSection(
     private val addresses: MediaAddressCache,
 ) {
     private val activity: Activity get() = host.hostActivity
+    private val cache by lazy { PreviewCache.get(activity) }
     private var openId = 0
+    private var saveOriginal = false
     private var loading: AlertDialog? = null
     private var gallery: List<PanEntry> = emptyList()
     private val fetcher by lazy { ImageFileFetcher(host.hostActivity) }
@@ -67,6 +70,7 @@ internal class ImagePreviewSection(
     /** 账号失效 / 页面不可见：中止进行中的下载。 */
     fun close() {
         openId++
+        saveOriginal = false
         fetcher.cancel()
         loading?.dismiss()
         loading = null
@@ -102,20 +106,22 @@ internal class ImagePreviewSection(
         host.setStatus("")
     }
 
-    fun openOriginal(entry: PanEntry) {
+    fun openOriginal(entry: PanEntry, save: Boolean = false) {
+        close()
+        saveOriginal = save
         if (!host.accountVerified()) {
-            host.setStatus("请确认网盘登录后重试。")
+            showOriginalFailure("请确认网盘登录后重试。")
             return
         }
-        close()
         val id = openId
         host.bumpListRequest()
         mediaLinks.dismissCaptcha(RequestLane.LIST)
         val account = host.playbackAccount(entry)
         val key = mediaCacheKey(account, entry)
         val ext = ImageTypes.ext(entry.name)
-        ImageCache.find(activity, key, ext)?.let {
-            startImageViewer(entry, it)
+        val cacheName = "$key.$ext"
+        cache.acquire(PreviewCache.Kind.IMAGE, cacheName)?.let { file ->
+            openCachedImage(entry, file)
             return
         }
         addresses.link(key)?.let {
@@ -123,7 +129,7 @@ internal class ImagePreviewSection(
             return
         }
         if (!host.isReady()) {
-            host.setStatus("请确认网盘登录后重试。")
+            showOriginalFailure("请确认网盘登录后重试。")
             return
         }
         host.setStatus("正在确认网盘账号…")
@@ -135,10 +141,13 @@ internal class ImagePreviewSection(
             if (viewer != null && isNumericUk(viewer)) {
                 requestImageLink(entry, viewer, id)
             } else {
-                host.fetchJson(PanApi.viewer(), lane = RequestLane.LIST) { json ->
+                host.fetchJson(PanApi.viewer(), lane = RequestLane.LIST, onFailure = {
+                    if (isCurrentImage(id, account)) showOriginalFailure(VIEWER_UK_ERROR)
+                }) { json ->
                     if (!isCurrentImage(id, account)) return@fetchJson
-                    val uk = requireViewerUk(viewerUkFromJson(json))
-                    requestImageLink(entry, uk, id)
+                    val uk = viewerUkFromJson(json)
+                    if (isNumericUk(uk)) requestImageLink(entry, uk, id)
+                    else showOriginalFailure(VIEWER_UK_ERROR)
                 }
             }
         }
@@ -147,13 +156,14 @@ internal class ImagePreviewSection(
     /** 图片不走 docview/docpreview（PDF 专用），直接取原文件 dlink：群组 sharedownload，我的网盘 /api/download。 */
     private fun requestImageLink(entry: PanEntry, viewer: String, id: Int) {
         if (viewer != host.account()) {
+            if (saveOriginal) showOriginalFailure(VIEWER_UK_ERROR)
             host.verifyAccount()
             return
         }
         val key = mediaCacheKey(viewer, entry)
         fun isCurrent() = isCurrentImage(id, viewer)
         fun fail() {
-            if (isCurrent()) host.setStatus("图片打开失败，请重试。")
+            if (isCurrent()) showOriginalFailure("无法获取原图地址，请重试。")
         }
         fun receive(link: Uri) {
             if (!isCurrent()) return
@@ -203,14 +213,14 @@ internal class ImagePreviewSection(
                 loading = null
             }
             if (!isCurrentImage(id, account)) {
-                result.getOrNull()?.let(ImageCache::discard)
+                result.getOrNull()?.let(cache::discard)
                 return
             }
             result.mapCatching { temp ->
                 try {
-                    startImageViewer(entry, ImageCache.publish(activity, key, ext, temp))
+                    openCachedImage(entry, cache.publish(PreviewCache.Kind.IMAGE, "$key.$ext", temp))
                 } finally {
-                    ImageCache.discard(temp)
+                    cache.discard(temp)
                 }
             }.onFailure {
                 val plan = imageFailurePlan(it is InvalidImageLink, { host.isReady() }, fromCache)
@@ -219,10 +229,24 @@ internal class ImagePreviewSection(
                     requestImageLink(entry, account, id)
                     return@onFailure
                 }
-                host.setStatus(imageFailureMessage(it))
+                showOriginalFailure(imageFailureMessage(it))
             }
         }
         fetcher.start(link, ::complete)
+    }
+
+    private fun showOriginalFailure(reason: String) {
+        val message = if (saveOriginal) "保存原图失败：$reason" else reason
+        host.setStatus(message)
+        if (saveOriginal) host.say(message)
+    }
+
+    private fun openCachedImage(entry: PanEntry, file: File) {
+        try {
+            startImageViewer(entry, file)
+        } finally {
+            cache.release(file)
+        }
     }
 
     private fun startImageViewer(entry: PanEntry, file: File) {
@@ -236,7 +260,8 @@ internal class ImagePreviewSection(
             putExtra(ImageViewerActivity.EXTRA_MIME, ImageTypes.mime(ImageTypes.ext(entry.name)))
             putExtra(ImageViewerActivity.EXTRA_INDEX, index)
             putExtra(ImageViewerActivity.EXTRA_COUNT, images.size)
-        })
+            putExtra(ImageViewerActivity.EXTRA_SAVE_ORIGINAL, saveOriginal)
+        }, cachedFile = file)
         host.setStatus("")
     }
 

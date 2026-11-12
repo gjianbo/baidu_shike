@@ -14,11 +14,11 @@ import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.PopupMenu
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import java.net.URL
 import androidx.core.graphics.createBitmap
-import androidx.core.content.edit
 
 /**
  * 首页：收藏、最近播放、历史与账号头像。
@@ -158,17 +158,84 @@ internal fun MainActivity.openSourceDirectory(entry: PanEntry) {
 }
 
 
+internal const val HOME_REFRESH_FAILED = "刷新失败，请重试"
+
+internal fun MainActivity.isHomeRoot() = screen == Screen.HOME && folders.isEmpty()
+
+internal fun MainActivity.requestBrowseRefresh() {
+    if (isHomeRoot()) {
+        val feedback = homeRefreshFeedback ?: return
+        if (feedback.refreshing) return
+        if (gid.isEmpty()) {
+            feedback.showResult("请先选择文件库")
+            return
+        }
+        if (hasActiveSession()) {
+            val onRefresh = feedback.begin()
+            val rootKey = "roots:$gid"
+            if (isContactSource(gid)) {
+                loadHomeDirectory(rootKey, force = true, onRefresh = onRefresh)
+            } else {
+                val recentKey = "recent:$gid"
+                startHomeCheck(
+                    force = true,
+                    cacheKey = recentKey,
+                    homeRootKey = rootKey,
+                    cached = emptyList(),
+                    recentIsEmpty = false,
+                    onRefresh = onRefresh,
+                )
+            }
+            return
+        }
+        if (currentPageProvider() == SourceProvider.QUARK) {
+            feedback.showResult("请先登录夸克网盘")
+            return
+        }
+    }
+    when {
+        currentPageProvider() == SourceProvider.QUARK || hasActiveSession() -> refresh(force = true)
+        ready && !checkingAccount -> verifyAndRefresh(force = true)
+        !ready -> showApp()
+    }
+}
+
+internal fun MainActivity.homeRefreshMessage(
+    key: String,
+    fresh: List<PanEntry>,
+): String {
+    if (courseCache.readPage(key, 1) == null) return "同步完成"
+    return homeRefreshMessage(newHomeEntries(fresh, courseCache.readAll(key)))
+}
+
+private fun newHomeEntries(fresh: List<PanEntry>, previous: List<PanEntry>): List<PanEntry> {
+    val previousIds = previous.mapTo(HashSet(), ::entryKey)
+    return fresh.distinctBy(::entryKey).filter { entryKey(it) !in previousIds }
+}
+
+private fun MainActivity.homeRefreshMessage(added: List<PanEntry>?): String {
+    if (added == null) return "同步完成"
+    if (added.isEmpty()) return "暂无新内容"
+    val hidden = added.count { !matchesHomeFilter(it) }
+    return when (hidden) {
+        0 -> "新增 ${added.size} 条"
+        added.size -> "新增 ${added.size} 条，已被当前筛选隐藏"
+        else -> "新增 ${added.size} 条，其中 $hidden 条被当前筛选隐藏"
+    }
+}
+
 internal fun MainActivity.startHomeCheck(
     force: Boolean,
     cacheKey: String,
     homeRootKey: String,
     cached: List<PanEntry>,
     recentIsEmpty: Boolean,
+    onRefresh: ((String?) -> Unit)? = null,
 ) {
     val checkToken = ++homeCheckToken
     homeCheckInFlight = true
     if (providerOfSourceId(gid) == SourceProvider.QUARK) {
-        startQuarkHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty, checkToken)
+        startQuarkHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty, checkToken, onRefresh)
         return
     }
     load(
@@ -176,10 +243,14 @@ internal fun MainActivity.startHomeCheck(
         statusHint = "正在检查最近更新…",
         onCancelled = {
             if (checkToken == homeCheckToken) homeCheckInFlight = false
+            onRefresh?.invoke(null)
         },
         onFailure = {
             if (checkToken == homeCheckToken) homeCheckInFlight = false
-            if (recentIsEmpty) {
+            if (onRefresh != null) {
+                cacheFailure(cacheKey)
+                onRefresh(HOME_REFRESH_FAILED)
+            } else if (recentIsEmpty) {
                 loadHomeDirectory(homeRootKey, force = false)
             } else if (cached.isEmpty()) {
                 status.text = "无法加载群内更新，请稍后重试"
@@ -187,14 +258,13 @@ internal fun MainActivity.startHomeCheck(
             } else cacheFailure(cacheKey)
         },
     ) { json ->
-        applyHomeRecentEntries(PanApi.parseRecent(json), cacheKey, homeRootKey, force, checkToken)
+        applyHomeRecentEntries(PanApi.parseRecent(json), cacheKey, homeRootKey, force, checkToken, onRefresh)
     }
 }
 
 
 /**
- * 夸克没有 recent 接口：直接列监控目录第一层，按 mtime 客户端倒序取 Top N。
- * 结果与百度侧走同一个 [applyHomeRecentEntries]，渲染路径完全复用。
+ * 夸克按名称分页，读完监控目录第一层后再按更新时间排序。
  */
 internal fun MainActivity.startQuarkHomeCheck(
     force: Boolean,
@@ -203,29 +273,48 @@ internal fun MainActivity.startQuarkHomeCheck(
     cached: List<PanEntry>,
     recentIsEmpty: Boolean,
     checkToken: Int,
+    onRefresh: ((String?) -> Unit)?,
 ) {
     val sourceId = gid
+    val request = ++requestId
     AppIo.execute {
         val result = runCatching {
             val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
-            val page = session.execute(session.list(rawSourceId(sourceId), 1, 50))
-            page.items
+            val directory = rawSourceId(sourceId)
+            val files = LinkedHashMap<String, QuarkFile>()
+            var pageNumber = 1
+            do {
+                check(request == requestId) { "已取消目录刷新" }
+                val page = session.execute(session.list(directory, pageNumber++, 100))
+                val previousSize = files.size
+                page.items.forEach { files[it.id] = it }
+                check(!page.hasMore || files.size > previousSize) { "夸克未返回下一页文件" }
+            } while (page.hasMore)
+            files.values
                 .sortedByDescending { it.mtime }
-                .take(50)
                 .map { quarkEntry(it, sourceId) }
         }
         runOnUiThread {
-            if (checkToken != homeCheckToken || isDestroyed || isFinishing) return@runOnUiThread
+            if (checkToken != homeCheckToken || request != requestId || isDestroyed || isFinishing) {
+                if (checkToken == homeCheckToken) homeCheckInFlight = false
+                onRefresh?.invoke(null)
+                return@runOnUiThread
+            }
             result.onFailure {
                 homeCheckInFlight = false
-                if (recentIsEmpty) {
+                if (onRefresh != null) {
+                    status.text = "无法加载监控目录更新，请稍后重试"
+                    cacheFailure(cacheKey)
+                    onRefresh(HOME_REFRESH_FAILED)
+                } else if (recentIsEmpty) {
                     loadHomeDirectory(homeRootKey, force = false)
                 } else if (cached.isEmpty()) {
                     status.text = "无法加载监控目录更新，请稍后重试"
                     content.addView(headAction("打开文件库") { showScreen(Screen.GROUPS) })
                 } else cacheFailure(cacheKey)
             }.onSuccess { entries ->
-                applyHomeRecentEntries(entries, cacheKey, homeRootKey, force, checkToken)
+                applyHomeRecentEntries(entries, cacheKey, homeRootKey, force, checkToken, onRefresh,
+                    directorySnapshot = true)
             }
         }
     }
@@ -234,7 +323,9 @@ internal fun MainActivity.startQuarkHomeCheck(
 
 internal fun MainActivity.maybeCheckHomeInBackground() {
     if (!hasActiveSession() || screen != Screen.HOME || folders.isNotEmpty()) return
-    if (isContactSource(gid) || homeCheckInFlight || pendingHomeUpdate != null) return
+    if (isContactSource(gid) || homeCheckInFlight || homeRefreshFeedback?.refreshing == true ||
+        pendingHomeUpdate != null
+    ) return
     if (System.currentTimeMillis() - lastHomeCheckAt < HOME_RECHECK_COOLDOWN_MS) return
     val cacheKey = "recent:$gid"
     val cached = courseCache.readAll(cacheKey)
@@ -251,38 +342,44 @@ internal fun MainActivity.applyHomeRecentEntries(
     homeRootKey: String,
     force: Boolean,
     checkToken: Int,
+    onRefresh: ((String?) -> Unit)?,
+    directorySnapshot: Boolean = false,
 ) {
     if (checkToken == homeCheckToken) {
         homeCheckInFlight = false
         lastHomeCheckAt = System.currentTimeMillis()
     }
-    clearHomeUpdatePrompt()
     val previous = homeDisplayedEntries
-    val previousIds = previous.map(::entryKey).toHashSet()
-    val changed = courseCache.writeNewFirst(cacheKey, 1, fresh)
-    if (fresh.isEmpty()) {
-        homeDisplayedEntries = emptyList()
-        loadHomeDirectory(homeRootKey, force)
+    val hadPendingUpdate = pendingHomeUpdate != null
+    val wasShowingDirectory = showingHomeDirectory
+    val previousPage = if (onRefresh != null) courseCache.readPage(cacheKey, 1) else null
+    val previousFileIds = if (onRefresh != null && directorySnapshot) courseCache.readDirectoryFileIds(cacheKey) else null
+    clearHomeUpdatePrompt()
+    val changed = if (directorySnapshot) courseCache.writeRecentDirectory(cacheKey, fresh)
+    else courseCache.writeNewFirst(cacheKey, 1, fresh)
+    if (fresh.isEmpty() && !directorySnapshot) {
+        if (onRefresh == null) homeDisplayedEntries = emptyList()
+        loadHomeDirectory(homeRootKey, force, onRefresh)
         return
     }
-    val wasShowingDirectory = showingHomeDirectory
     showingHomeDirectory = false
     cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
     val merged = courseCache.readAll(cacheKey)
-    val newEntries = if (previous.isNotEmpty()) {
-        fresh.filter { entryKey(it) !in previousIds }
-    } else {
-        emptyList()
-    }
+    val displayed = previous.takeIf { it.isNotEmpty() && !wasShowingDirectory }
+    val newEntries = displayed?.let { newHomeEntries(merged, it) }.orEmpty()
     val visibleNew = newEntries.filter(::matchesHomeFilter)
-    if (wasShowingDirectory || contentScroll.scrollY <= dp(6)) {
-        if (changed || previous.isEmpty()) {
+    if (onRefresh != null || wasShowingDirectory || merged.isEmpty() || contentScroll.scrollY <= dp(6)) {
+        if (changed || previous.isEmpty() || wasShowingDirectory || hadPendingUpdate ||
+            (onRefresh != null && merged != previous)
+        ) {
+            val scrollY = contentScroll.scrollY
             content.removeAllViews()
             renderSourcePicker()
-            display(merged)
-            contentScroll.scrollTo(0, 0)
+            display(merged, preserveMediaFilter = onRefresh != null)
+            if (onRefresh != null) scrollAfterLayout(scrollY) else contentScroll.scrollTo(0, 0)
         }
         status.text = when {
+            onRefresh != null -> cacheNote
             previous.isEmpty() -> cacheNote
             visibleNew.isNotEmpty() -> "$cacheNote · 新增 ${visibleNew.size} 条"
             newEntries.isNotEmpty() -> "$cacheNote · 有 ${newEntries.size} 条新内容被当前筛选隐藏"
@@ -293,6 +390,18 @@ internal fun MainActivity.applyHomeRecentEntries(
         showHomeUpdatePrompt(visibleNew.size, merged, cacheNote)
     } else {
         status.text = if (!changed) "$cacheNote · 无更新" else cacheNote
+    }
+    if (onRefresh != null) {
+        val added = if (directorySnapshot) {
+            previousFileIds?.let { knownIds ->
+                val cachedIds = previousPage?.entries.orEmpty().mapTo(HashSet()) { it.fileId }
+                val unappliedIds = newEntries.filter { it.fileId in cachedIds }.mapTo(HashSet()) { it.fileId }
+                fresh.filter { it.fileId !in knownIds || it.fileId in unappliedIds }
+            }
+        } else {
+            (displayed ?: previousPage?.entries)?.let { newHomeEntries(merged, it) }
+        }
+        onRefresh(homeRefreshMessage(added))
     }
 }
 
@@ -336,7 +445,12 @@ internal fun MainActivity.matchesHomeFilter(entry: PanEntry): Boolean =
     mediaFilter.includes(PanApi.kindOf(entry))
 
 
-internal fun MainActivity.loadHomeDirectory(key: String, force: Boolean) {
+internal fun MainActivity.loadHomeDirectory(key: String, force: Boolean, onRefresh: ((String?) -> Unit)? = null) {
+    if (onRefresh != null) {
+        if (providerOfSourceId(gid) == SourceProvider.QUARK) loadQuarkRoots(key, onRefresh = onRefresh)
+        else loadRoots(key, onRefresh = onRefresh)
+        return
+    }
     if (!showingHomeDirectory) renderHomeDirectory(key)
     else status.text = if (courseCache.readPage(key, 1)?.entries?.isEmpty() == true) "文件库暂无内容" else ""
     if (!force && courseCache.isFresh(key, CACHE_TTL_MS) && courseCache.readPage(key, 1)?.nextCursor != null) {
@@ -349,14 +463,15 @@ internal fun MainActivity.loadHomeDirectory(key: String, force: Boolean) {
 }
 
 
-internal fun MainActivity.renderHomeDirectory(key: String) {
+internal fun MainActivity.renderHomeDirectory(key: String, preserveMediaFilter: Boolean = false) {
     showingHomeDirectory = true
+    homeDisplayedEntries = emptyList()
     redrawFilteredRows = null
     content.removeAllViews()
     renderSourcePicker()
     sectionTitle.text = "群组"
     val entries = courseCache.readAll(key)
-    addFilteredCourseRows(entries, sortable = false)
+    addFilteredCourseRows(entries, sortable = false, preserveMediaFilter = preserveMediaFilter)
     status.text = if (courseCache.readPage(key, 1) != null && entries.isEmpty()) "文件库暂无内容" else ""
 }
 
@@ -474,12 +589,16 @@ internal fun MainActivity.renderAudioHistory(allowUnverified: Boolean = false) {
 
 internal fun MainActivity.showPlayHistory() {
     if (!hasVerifiedAccount() || screen != Screen.HOME || folders.isNotEmpty()) return
-    val items = currentHistoryItems().take(10)
+    val account = AccountScope.current
+    var items = currentHistoryItems()
     if (items.isEmpty()) return
     val sourceNames = shareSources().associate { it.id to it.name }
     val view = layoutInflater.inflate(R.layout.dialog_play_history, null, false)
-    view.findViewById<TextView>(R.id.historySubtitle).text = "最近 ${items.size} 条 · 点选继续播放"
+    val subtitle = view.findViewById<TextView>(R.id.historySubtitle)
+    fun updateSubtitle() { subtitle.text = "${items.size} 条 · 点选继续播放" }
+    updateSubtitle()
     val list = view.findViewById<ListView>(R.id.historyList)
+    val dialog = Dialog(this)
     val adapter = object : BaseAdapter() {
         override fun getCount() = items.size
         override fun getItem(position: Int) = items[position]
@@ -492,11 +611,38 @@ internal fun MainActivity.showPlayHistory() {
             row.findViewById<TextView>(R.id.historyMeta).text = historyMeta(item, sourceNames)
             row.findViewById<View>(R.id.historyDivider).visibility =
                 if (position == items.lastIndex) View.GONE else View.VISIBLE
+            row.findViewById<View>(R.id.historyMore).apply {
+                contentDescription = "${item.entry.name}，更多操作"
+                setOnClickListener { anchor ->
+                    PopupMenu(dialog.context, anchor, Gravity.END).apply {
+                        menu.add("删除记录")
+                        setOnMenuItemClickListener {
+                            if (account == AccountScope.current && hasVerifiedAccount()) {
+                                val entry = item.entry
+                                if (PanApi.kindOf(entry) == MediaKind.VIDEO) {
+                                    val progress = getSharedPreferences("video_progress", android.content.Context.MODE_PRIVATE)
+                                    videoHistory.scoped(account).remove(entry, progress)
+                                } else {
+                                    audioHistory.scoped(account).remove(entry)
+                                }
+                                content.findViewWithTag<View>(entryKey(entry))
+                                    ?.findViewById<View>(R.id.itemFoot)?.visibility = View.GONE
+                                items = currentHistoryItems()
+                                updateSubtitle()
+                                notifyDataSetChanged()
+                                renderHomeSections()
+                                if (items.isEmpty()) dialog.dismiss()
+                                toast("已删除播放记录")
+                            }
+                            true
+                        }
+                    }.show()
+                }
+            }
             return row
         }
     }
     list.adapter = adapter
-    val dialog = Dialog(this)
     dialog.setContentView(view)
     sizeSheet(dialog) { available ->
         val maxHeight = sheetMaxHeight(available)
@@ -514,7 +660,7 @@ internal fun MainActivity.showPlayHistory() {
     list.setOnItemClickListener { _, _, position, _ ->
         val item = items.getOrNull(position) ?: return@setOnItemClickListener
         dialog.dismiss()
-        resumeFromHistory(item.entry)
+        if (account == AccountScope.current && hasVerifiedAccount()) resumeFromHistory(item.entry)
     }
     dialog.show()
 }
@@ -606,24 +752,19 @@ internal fun MainActivity.letterAvatar(initial: String): android.graphics.Bitmap
 
 
 internal fun MainActivity.confirmClearHistory() {
+    val account = AccountScope.current
     AlertDialog.Builder(this)
         .setTitle("清除播放记录")
         .setMessage("将清除当前账号在本机的播放记录和音视频续播点。网盘文件会保留。")
         .setNegativeButton("取消", null)
         .setPositiveButton("清除") { _, _ ->
-            // 清记录要遍历整表，放后台避免主线程拷贝大 Map；键集合走 PrefIndex
-            // 只读快照，命中期间不再重复拷贝。toast / refresh 必须等清理落盘后
-            // 再回主线程，否则会读到旧记录。
+            if (account != AccountScope.current) return@setPositiveButton
             AppIo.execute {
-                audioHistory.clear()
-                videoHistory.clear()
+                audioHistory.scoped(account).clear()
                 val progress = getSharedPreferences("video_progress", android.content.Context.MODE_PRIVATE)
-                progress.edit {
-                    val prefix = AccountScope.prefix()
-                    PrefIndex.keys(progress).filter { it.startsWith(prefix) }.forEach { remove(it) }
-                }
+                videoHistory.scoped(account).clear(progress)
                 runOnUiThread {
-                    if (isDestroyed || isFinishing) return@runOnUiThread
+                    if (isDestroyed || isFinishing || account != AccountScope.current) return@runOnUiThread
                     toast("播放记录已清除")
                     refresh()
                 }

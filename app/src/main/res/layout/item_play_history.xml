@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:background="?attr/selectableItemBackground"
@@ -54,13 +55,17 @@
         </LinearLayout>
 
         <ImageView
-            android:layout_width="16dp"
-            android:layout_height="16dp"
-            android:layout_marginStart="8dp"
-            android:layout_marginTop="11dp"
-            android:alpha="0.55"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_chevron_right" />
+            android:id="@+id/historyMore"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="更多操作"
+            android:focusable="false"
+            android:importantForAccessibility="yes"
+            android:padding="12dp"
+            android:src="@drawable/ic_more_horiz"
+            app:tint="@color/ink3" />
     </LinearLayout>
 
     <View
