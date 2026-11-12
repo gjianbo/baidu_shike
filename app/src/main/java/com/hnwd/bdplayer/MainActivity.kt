@@ -1,8 +1,10 @@
 package com.hnwd.bdplayer
 
+import android.Manifest
 import android.app.Dialog
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.BitmapFactory
@@ -34,6 +36,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.PopupMenu
+import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
@@ -41,6 +44,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.doOnPreDraw
 import androidx.core.view.WindowInsetsControllerCompat
@@ -97,7 +101,7 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var batchMove: TextView
     internal lateinit var batchCopy: TextView
     internal lateinit var batchDelete: TextView
-    internal lateinit var btnDiskNewFolder: View
+    internal lateinit var fabAdd: View
     internal lateinit var crumbsScroll: View
     internal lateinit var crumbsRow: LinearLayout
     internal lateinit var filterBar: View
@@ -218,6 +222,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    internal val uploadLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+            if (uris.isNotEmpty()) startUpload(uris)
+        }
+
+    /**
+     * 通知权限只决定进度通知能否出现在通知抽屉；前台服务本身不依赖它。
+     * 上传不等这个回调，避免权限弹窗期间 Activity 被切走导致文件丢失。
+     */
+    internal val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private var uploadObserver: ((UploadCenter.State) -> Unit)? = null
+
     internal var mediaFilter = MediaFilter.ALL
     internal var redrawFilteredRows: (() -> Unit)? = null
     internal var showingHomeDirectory = false
@@ -257,6 +274,8 @@ class MainActivity : AppCompatActivity() {
     internal val nowPlayingTicker = object : Runnable {
         override fun run() {
             updateNowPlaying()
+            updateFabPosition()
+            updateDownloadBadge()
             nowPlaying.postDelayed(this, 1_000)
         }
     }
@@ -563,8 +582,8 @@ class MainActivity : AppCompatActivity() {
         batchMove.setOnClickListener { diskWrites.batchMoveSelected() }
         batchCopy.setOnClickListener { diskWrites.batchCopySelected() }
         batchDelete.setOnClickListener { diskWrites.batchDeleteSelected() }
-        btnDiskNewFolder = shell.findViewById(R.id.btnDiskNewFolder)
-        btnDiskNewFolder.setOnClickListener { diskWrites.promptNewFolder() }
+        fabAdd = shell.findViewById(R.id.fabAdd)
+        fabAdd.setOnClickListener { showAddSheet() }
         nowPlaying.setOnClickListener { controller?.let { showPlayback(it) } }
         nowPlaying.findViewById<View>(R.id.miniClose).setOnClickListener { stopBackgroundAudio() }
         nowPlaying.findViewById<View>(R.id.miniPlay).setOnClickListener {
@@ -880,6 +899,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        uploadObserver?.let { UploadCenter.removeListener(it) }
+        uploadObserver = null
         dismissVideoOpenError()
         homeRefreshFeedback?.clear()
         searchSectionRef?.dismiss()
@@ -921,7 +942,18 @@ class MainActivity : AppCompatActivity() {
     // 由类内 helper 暴露，语义与原检查完全一致。
     internal fun batchBarReady() = ::batchBar.isInitialized
     internal fun batchMoveReady() = ::batchMove.isInitialized
-    internal fun diskNewFolderReady() = ::btnDiskNewFolder.isInitialized
+    internal fun fabReady() = ::fabAdd.isInitialized
+
+    /** 迷你播放条占据右下角时把 FAB 上移，避免两个浮层叠在一起。 */
+    internal fun updateFabPosition() {
+        if (!fabReady() || !::nowPlaying.isInitialized) return
+        val params = fabAdd.layoutParams as? FrameLayout.LayoutParams ?: return
+        val target = dp(if (nowPlaying.visibility == View.VISIBLE) 88 else 18)
+        if (params.bottomMargin != target) {
+            params.bottomMargin = target
+            fabAdd.layoutParams = params
+        }
+    }
 
     internal fun apiError(url: String, errno: Int, json: JSONObject): String {
         val path = url.toUri().path.orEmpty()
@@ -1182,7 +1214,7 @@ class MainActivity : AppCompatActivity() {
         override fun openDownloads() = this@MainActivity.openDownloads()
 
         override fun downloadSummary(): String =
-            DownloadCenter.activeCount(this@MainActivity).takeIf { it > 0 }?.let { "$it 个进行中" } ?: ""
+            transferActiveCount().takeIf { it > 0 }?.let { "$it 个进行中" } ?: ""
 
         override fun appVersionLine(): String {
             val version = runCatching {
@@ -1435,13 +1467,56 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent(this, DownloadActivity::class.java))
     }
 
-    /** 顶栏下载图标常显，有进行中任务时带数量角标。 */
+    /** 系统文件选择器可多选；任务交给 UploadCenter 串行队列，本页只给一条可点提示。 */
+    internal fun startUpload(sources: List<Uri>) {
+        if (sources.isEmpty()) return
+        showUploadSnackbar(sources.size)
+        UploadCenter.enqueue(this, sources, currentDiskDir())
+        // 前台服务只负责保活与通知；权限弹窗顺带申请，拒绝也不影响上传。
+        UploadForegroundService.start(this)
+        val needsNotificationPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        if (needsNotificationPermission) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    /**
+     * 上传不再弹模态进度框：进度统一在通知栏与「传输」页，主界面只留一条 Snackbar，
+     * 这样上传期间顶栏、列表仍然可操作，也支持一次排队多个文件。
+     */
+    private fun showUploadSnackbar(count: Int) {
+        Snackbar.make(shell, "已加入上传队列（$count 个文件）", Snackbar.LENGTH_LONG)
+            .setAction("查看进度") { openDownloads() }
+            .show()
+        if (uploadObserver != null) return
+        var seenRunning = false
+        val observer: (UploadCenter.State) -> Unit = { state ->
+            if (state.running) seenRunning = true
+            if (state.finished && seenRunning) {
+                seenRunning = false
+                android.util.Log.i("ShikeUpload", state.message)
+                if (!isFinishing && !isDestroyed) {
+                    toast(state.message)
+                    if (state.success) refresh()
+                }
+            }
+        }
+        uploadObserver = observer
+        UploadCenter.addListener(observer)
+    }
+
+    /** 顶栏传输图标常显，下载与上传的「进行中」合计显示数量角标。 */
     internal fun updateDownloadBadge() {
         if (!::downloadBadge.isInitialized) return
-        val count = DownloadCenter.activeCount(this)
+        val count = transferActiveCount()
         downloadBadge.text = count.toString()
         downloadBadge.visibility = if (count > 0) View.VISIBLE else View.GONE
     }
+
+    private fun transferActiveCount(): Int =
+        DownloadCenter.activeCount(this) + UploadStore.activeCount(this)
 
     // ===================== SearchHost =====================
     // 搜索模块需要的最小宿主能力。与 MutationHost 同样用私有 inner class，

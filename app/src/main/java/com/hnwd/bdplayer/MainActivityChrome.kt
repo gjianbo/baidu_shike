@@ -158,9 +158,10 @@ internal fun MainActivity.updateNav() {
         (screen == Screen.DISK || (screen == Screen.GROUPS && gid.isNotEmpty() &&
             currentPageProvider() == SourceProvider.BAIDU && !isContactSource(gid)))
     ) View.VISIBLE else View.GONE
-    if (diskNewFolderReady()) {
+    if (fabReady()) {
         val diskManage = screen == Screen.DISK && hasActiveSession()
-        btnDiskNewFolder.visibility = if (diskManage) View.VISIBLE else View.GONE
+        fabAdd.visibility = if (diskManage) View.VISIBLE else View.GONE
+        updateFabPosition()
     }
     title.setTextSize(
         if (screen == Screen.HOME ||

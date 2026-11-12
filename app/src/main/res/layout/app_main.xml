@@ -50,7 +50,7 @@
             <ImageView
                 android:layout_width="44dp"
                 android:layout_height="44dp"
-                android:contentDescription="下载管理"
+                android:contentDescription="传输管理"
                 android:padding="10dp"
                 android:src="@drawable/ic_download" />
 
@@ -114,16 +114,6 @@
             android:contentDescription="搜索文件"
             android:padding="10dp"
             android:src="@drawable/ic_search"
-            android:visibility="gone" />
-
-        <ImageView
-            android:id="@+id/btnDiskNewFolder"
-            android:layout_width="44dp"
-            android:layout_height="44dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="新建文件夹"
-            android:padding="10dp"
-            android:src="@drawable/ic_folder_add"
             android:visibility="gone" />
 
         <ImageView
@@ -499,6 +489,27 @@
             android:layout_gravity="bottom|end"
             android:layout_marginEnd="14dp"
             android:layout_marginBottom="14dp" />
+
+        <!-- 网盘页「添加」浮动按钮；迷你播放条出现时由 updateFabPosition() 上移避让。 -->
+        <FrameLayout
+            android:id="@+id/fabAdd"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:layout_gravity="bottom|end"
+            android:layout_marginEnd="18dp"
+            android:layout_marginBottom="18dp"
+            android:background="@drawable/bg_fab"
+            android:clickable="true"
+            android:focusable="true"
+            android:visibility="gone">
+
+            <ImageView
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_gravity="center"
+                android:contentDescription="添加"
+                android:src="@drawable/ic_add" />
+        </FrameLayout>
     </FrameLayout>
 
     <include

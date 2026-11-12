@@ -18,10 +18,12 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * 下载管理页：进行中（多任务 + 实时进度）与历史两个 Tab。
+ * 传输中心：进行中 / 历史两个 Tab，同时展示下载与上传。
  *
- * 传输与后台保活由系统 DownloadManager 负责，本页只按 1 秒轮询查询进度；
- * 因此不持有下载线程，退出页面或退出 App 都不会中断任务。
+ * - 下载：传输与后台保活由系统 DownloadManager 负责，本页按 1 秒轮询 Query；
+ * - 上传：真相源是进程级的 UploadCenter，历史落在 UploadStore，本页只读记录。
+ *
+ * 两条链路都不挂在本 Activity 上，退出页面或退到后台都不会中断任务。
  */
 class DownloadActivity : AppCompatActivity() {
     private lateinit var taskList: LinearLayout
@@ -30,7 +32,9 @@ class DownloadActivity : AppCompatActivity() {
     private lateinit var tabHistory: TextView
 
     private var showingHistory = false
+    private var historyFilter = HistoryFilter.ALL
     private var tasks: List<DownloadTask> = emptyList()
+    private var uploads: List<UploadRecord> = emptyList()
     private var speeds: Map<Long, Double> = emptyMap()
     private var lastBytes: Map<Long, Long> = emptyMap()
     private var lastSampleAt = 0L
@@ -42,6 +46,7 @@ class DownloadActivity : AppCompatActivity() {
     private val ticker = object : Runnable {
         override fun run() {
             tasks = DownloadCenter.refresh(this@DownloadActivity)
+            uploads = UploadStore.records(this@DownloadActivity)
             sampleSpeeds()
             tick++
             // 历史页不需要每秒重绘，仍保持轮询以便任务完成时状态能落到历史里。
@@ -66,6 +71,7 @@ class DownloadActivity : AppCompatActivity() {
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<View>(R.id.btnClear).setOnClickListener {
             DownloadCenter.clearFinished(this)
+            UploadStore.clearFinished(this)
             refreshNow()
             toast("已清空已完成记录")
         }
@@ -93,6 +99,7 @@ class DownloadActivity : AppCompatActivity() {
 
     private fun refreshNow() {
         tasks = DownloadCenter.refresh(this)
+        uploads = UploadStore.records(this)
         sampleSpeeds()
         render(force = true)
     }
@@ -120,47 +127,128 @@ class DownloadActivity : AppCompatActivity() {
     }
 
     private fun render(force: Boolean = false) {
-        val key = "$showingHistory|$tasks|$speeds"
+        val key = "$showingHistory|$historyFilter|$tasks|$speeds|$uploads"
         if (!force && key == lastRenderKey) return
         lastRenderKey = key
-        val active = tasks.filter {
+        val activeDownloads = tasks.filter {
             it.state == DownloadState.QUEUED || it.state == DownloadState.RUNNING
         }.sortedByDescending { it.createdAt }
-        val finished = tasks.filter {
+        val finishedDownloads = tasks.filter {
             it.state == DownloadState.SUCCESS || it.state == DownloadState.FAILED
         }.sortedByDescending { it.finishedAt }
-        tabActive.text = "进行中 ${active.size}"
-        tabHistory.text = "历史 ${finished.size}"
+        val activeUploads = uploads.filter(UploadRecordLogic::isActive).sortedByDescending { it.createdAt }
+        val runningUploads = activeUploads.filter { it.state == UploadRecordState.RUNNING }
+        val queuedUploads = activeUploads.filter(UploadRecordLogic::isQueued)
+        val finishedUploads = uploads.filterNot(UploadRecordLogic::isActive).sortedByDescending { it.finishedAt }
+        val counts = TransferFilter.counts(
+            finishedDownloads.map { it.state }, finishedUploads.map { it.state },
+        )
+        tabActive.text = "进行中 ${activeDownloads.size + activeUploads.size}"
+        tabHistory.text = "历史 ${counts.all}"
         taskList.removeAllViews()
         if (showingHistory) {
-            if (finished.isEmpty()) {
-                addEmpty("还没有下载记录")
+            addFilterChips(counts)
+            val history = (
+                finishedDownloads
+                    .filter { TransferFilter.keepDownload(it.state, historyFilter) }
+                    .map { HistoryEntry.Down(it) } +
+                    finishedUploads
+                        .filter { TransferFilter.keepUpload(it.state, historyFilter) }
+                        .map { HistoryEntry.Up(it) }
+                ).sortedByDescending { it.time }
+            if (history.isEmpty()) {
+                addEmpty(TransferFilter.emptyText(historyFilter))
             } else {
-                finished.groupBy { dayLabel(it.finishedAt) }.forEach { (label, items) ->
+                history.groupBy { dayLabel(it.time) }.forEach { (label, items) ->
                     addSection(label)
-                    items.forEach { addHistoryRow(it) }
+                    items.forEach { entry ->
+                        when (entry) {
+                            is HistoryEntry.Down -> addHistoryRow(entry.task)
+                            is HistoryEntry.Up -> addUploadHistoryRow(entry.record)
+                        }
+                    }
                 }
             }
         } else {
-            addSummary(active)
-            if (active.isEmpty()) {
-                addEmpty("当前没有下载任务")
-            } else {
-                addSection("正在下载")
-                active.forEach { addActiveRow(it) }
+            addSummary(activeDownloads, runningUploads.size, queuedUploads.size)
+            if (activeDownloads.isEmpty() && activeUploads.isEmpty()) {
+                addEmpty("当前没有传输任务")
             }
-            val failed = finished.filter { it.state == DownloadState.FAILED }
+            if (runningUploads.isNotEmpty()) {
+                addSection("正在上传")
+                runningUploads.forEach { addUploadActiveRow(it) }
+            }
+            if (queuedUploads.isNotEmpty()) {
+                addSection("排队中 ${queuedUploads.size}")
+                queuedUploads.forEach { addQueuedUploadRow(it) }
+            }
+            if (activeDownloads.isNotEmpty()) {
+                addSection("正在下载")
+                activeDownloads.forEach { addActiveRow(it) }
+            }
+            val failed = finishedDownloads.filter { it.state == DownloadState.FAILED }
             if (failed.isNotEmpty()) {
                 addSection("需要重试")
                 failed.forEach { addActiveRow(it) }
             }
         }
-        storageHint.text = "保存到 下载 / ${DownloadLogic.FOLDER}/ · 共 ${tasks.size} 条记录 · 删除记录不会删除本机文件"
+        storageHint.text =
+            "下载保存到 下载 / ${DownloadLogic.FOLDER}/ · 上传保存到 百度网盘当前目录\n" +
+                "共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
     }
 
-    private fun addSummary(active: List<DownloadTask>) {
+    /** 历史页把两类终态记录按完成时间混排，再按天分组。 */
+    private sealed class HistoryEntry {
+        abstract val time: Long
+
+        data class Down(val task: DownloadTask) : HistoryEntry() {
+            override val time: Long get() = task.finishedAt
+        }
+
+        data class Up(val record: UploadRecord) : HistoryEntry() {
+            override val time: Long get() = record.finishedAt
+        }
+    }
+
+    /** 历史页顶部的二级状态筛选；chip 上的计数基于全量，不随当前筛选缩水。 */
+    private fun addFilterChips(counts: TransferFilter.Counts) {
+        val row = horizontal().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            (layoutParams as LinearLayout.LayoutParams).bottomMargin = dp(6)
+        }
+        HistoryFilter.entries.forEach { filter ->
+            val selected = filter == historyFilter
+            val chip = TextView(this).apply {
+                text = TransferFilter.label(filter, counts)
+                textSize = 11f
+                gravity = Gravity.CENTER
+                setTextColor(color(if (selected) R.color.accentInk else R.color.ink3))
+                setBackgroundResource(if (selected) R.drawable.bg_chip_on else R.drawable.bg_chip)
+                setPadding(dp(6), dp(7), dp(6), dp(7))
+                isClickable = true
+                isFocusable = true
+                setOnClickListener {
+                    if (historyFilter == filter) return@setOnClickListener
+                    historyFilter = filter
+                    render(force = true)
+                }
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { marginEnd = dp(6) }
+            }
+            row.addView(chip)
+        }
+        taskList.addView(row)
+    }
+
+    private fun addSummary(active: List<DownloadTask>, runningUploads: Int, queuedUploads: Int) {
         val running = active.count { it.state == DownloadState.RUNNING }
-        val queued = active.size - running
+        val queuedDownloads = active.size - running
+        val headline = buildString {
+            append("$running 个下载中")
+            if (queuedDownloads > 0) append(" · $queuedDownloads 个排队")
+            if (runningUploads > 0) append(" · $runningUploads 个上传中")
+            if (queuedUploads > 0) append(" · $queuedUploads 个待上传")
+        }
         val total = active.sumOf { if (it.bytesTotal > 0) it.bytesTotal else it.sizeBytes }
         val done = active.sumOf { it.bytesDone }
         val speed = active.sumOf { speeds[it.id] ?: 0.0 }
@@ -174,7 +262,7 @@ class DownloadActivity : AppCompatActivity() {
             ).apply { bottomMargin = dp(9) }
         }
         card.addView(horizontal().apply {
-            addView(summaryText("${running} 个下载中${if (queued > 0) " · $queued 个排队" else ""}", true))
+            addView(summaryText(headline, true))
             addView(summaryText(DownloadLogic.speedText(speed), false, R.color.accentInk))
         })
         val display = DownloadLogic.summaryProgress(active.size, running, done, total)
@@ -253,6 +341,98 @@ class DownloadActivity : AppCompatActivity() {
             }
         })
         taskList.addView(row)
+    }
+
+    /** 进行中的上传：只有「取消」，没有暂停（前台服务不提供 App 主动暂停）。 */
+    private fun addUploadActiveRow(record: UploadRecord) {
+        val row = card()
+        row.addView(typeIcon(record.name))
+        val main = vertical().apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(11) }
+        }
+        main.addView(title(record.name))
+        main.addView(
+            meta(
+                listOfNotNull(
+                    UploadRecordLogic.SOURCE_LABEL,
+                    record.dir.takeIf { it.isNotBlank() },
+                    DownloadLogic.formatBytes(record.sizeBytes),
+                ).joinToString(" · "),
+            ),
+        )
+        main.addView(progressBar(record.percent.coerceIn(0, 100), false))
+        main.addView(meta("${record.percent.coerceIn(0, 100)}% · ${record.label}"))
+        row.addView(main)
+        row.addView(action("取消") {
+            UploadCenter.cancel(this, record.id)
+            toast("已取消上传")
+            refreshNow()
+        })
+        taskList.addView(row)
+    }
+
+    /** 排队中的上传：不画进度条，可单独移出队列。 */
+    private fun addQueuedUploadRow(record: UploadRecord) {
+        val row = card()
+        row.addView(typeIcon(record.name))
+        val main = vertical().apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(11) }
+        }
+        main.addView(title(record.name))
+        main.addView(
+            meta(
+                listOfNotNull(
+                    UploadRecordLogic.SOURCE_LABEL,
+                    record.dir.takeIf { it.isNotBlank() },
+                    DownloadLogic.formatBytes(record.sizeBytes),
+                    "等待中",
+                ).joinToString(" · "),
+            ),
+        )
+        row.addView(main)
+        row.addView(action("移除") {
+            UploadCenter.cancel(this, record.id)
+            toast("已移出队列")
+            refreshNow()
+        })
+        taskList.addView(row)
+    }
+
+    /** 上传历史：文件在网盘而不是本机，所以没有「打开」；失败也不能页内重试（源文件已删）。 */
+    private fun addUploadHistoryRow(record: UploadRecord) {
+        val row = card()
+        row.addView(typeIcon(record.name))
+        val main = vertical().apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(11) }
+        }
+        main.addView(title(record.name))
+        // 成功时 message 是「已上传：文件名」，与标题重复；只有失败原因才值得占这一行。
+        val detail = listOfNotNull(
+            UploadRecordLogic.SOURCE_LABEL,
+            DownloadLogic.formatBytes(record.sizeBytes),
+            timeLabel(record.finishedAt),
+            record.message.takeIf { it.isNotBlank() && record.state == UploadRecordState.FAILED },
+        ).joinToString(" · ")
+        main.addView(
+            meta(detail, if (record.state == UploadRecordState.FAILED) R.color.danger else R.color.ink3),
+        )
+        row.addView(main)
+        row.addView(tag(if (record.state == UploadRecordState.SUCCESS) "已上传" else "失败"))
+        taskList.addView(row)
+    }
+
+    private fun tag(label: String) = TextView(this).apply {
+        text = label
+        textSize = 10.5f
+        setTextColor(color(R.color.ink3))
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+        ).apply { marginStart = dp(10) }
     }
 
     private fun queuedAhead(task: DownloadTask): Int =

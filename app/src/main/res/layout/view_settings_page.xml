@@ -322,14 +322,14 @@
                     style="@style/SettingTitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="下载管理" />
+                    android:text="传输管理" />
 
                 <TextView
                     style="@style/SettingSub"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
-                    android:text="下载进度、多任务与历史记录" />
+                    android:text="上传与下载的进度、多任务与历史" />
             </LinearLayout>
 
             <TextView
