@@ -935,6 +935,8 @@ class MainActivity : AppCompatActivity() {
         retryOpenPlayerIfPending()
         updateDownloadBadge()
         maybeCheckHomeInBackground()
+        // 24h 节流在 UpdateManager 内，每次回前台调用也不会重复联网。
+        checkAppUpdate()
     }
 
     override fun onStop() {
@@ -1286,6 +1288,8 @@ class MainActivity : AppCompatActivity() {
             }.getOrDefault("")
             return "${getString(R.string.app_name)} $version · $packageName"
         }
+
+        override fun checkAppUpdate() = this@MainActivity.checkAppUpdate(force = true)
 
         override fun quarkLoggedIn() = this@MainActivity.quarkLoggedIn()
         override fun markQuarkEverLogged() = this@MainActivity.markQuarkEverLogged()

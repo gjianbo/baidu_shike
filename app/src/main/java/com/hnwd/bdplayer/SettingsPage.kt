@@ -31,6 +31,8 @@ internal interface SettingsHost {
     fun openDownloads()
     fun downloadSummary(): String
     fun appVersionLine(): String
+    /** 关于行点击：手动检查 GitHub 新版本（跳过 24h 节流）。 */
+    fun checkAppUpdate()
 
     /** 夸克会话是否有效（Cookie 判定归宿主，设置页只读结果）。 */
     fun quarkLoggedIn(): Boolean
@@ -82,7 +84,9 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setBackupRow).setOnClickListener { host.launchBackup() }
         page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
-        page.findViewById<TextView>(R.id.setAbout).text = host.appVersionLine()
+        val about = page.findViewById<TextView>(R.id.setAbout)
+        about.text = host.appVersionLine() + "\n点击检查更新"
+        about.setOnClickListener { host.checkAppUpdate() }
         host.addPage(page)
         bindPreviewCache(page)
         host.renderCourseSwitch()
