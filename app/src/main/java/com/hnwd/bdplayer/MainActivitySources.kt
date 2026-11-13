@@ -190,63 +190,73 @@ internal fun MainActivity.manageBaiduDirectorySources() {
         toast("请先确认百度网盘登录")
         return
     }
-    ensureBdstoken(
-        onReady = { token ->
-            val request = BaiduPersonalDrive(token).list("/", 1, 200)
-            load(
-                // 不用 LIST：load() 对 LIST 会写 status.text 并 ++requestId，会与首页
-                // startHomeCheck（默认 LIST）抢通道，导致目录请求被顶掉、状态栏残留提示。
-                request.url, lane = RequestLane.COURSE,
-                statusHint = null,
-                onCancelled = { toast("读取目录已取消") },
-                onFailure = { toast("读取网盘目录失败，请重试") },
-            ) { json ->
-                val page = runCatching { request.decode(json) }.getOrNull()
-                if (page == null) {
-                    toast("解析网盘目录失败")
-                    return@load
-                }
-                val dirs = page.items.filter { it.directory }
-                if (dirs.isEmpty()) {
-                    toast("我的网盘根目录没有子文件夹")
-                    return@load
-                }
-                showBaiduDirectorySheet(dirs)
+    val account = verifiedAccount
+    val probe = accountProbeId
+    val browseRequest = requestId
+    fun sameAccount() = probe == accountProbeId && account == verifiedAccount && hasVerifiedAccount()
+    fun isCurrent() = !isDestroyed && !isFinishing && sameAccount() && browseRequest == requestId
+    val listing = BaiduDirectoryListing()
+    fun failed() {
+        if (isCurrent()) toast("读取网盘目录失败，请重试")
+    }
+    fun loadPage(drive: BaiduPersonalDrive, number: Int) {
+        val request = drive.list("/", number, 100)
+        load(
+            request.url, lane = RequestLane.DIRECTORY_PICKER,
+            onFailure = ::failed, requestCurrent = ::isCurrent,
+        ) { json ->
+            val page = runCatching { request.decode(json) }.getOrNull()
+            when (page?.let(listing::addPage)) {
+                null -> failed()
+                BaiduDirectoryListing.NextPage.CONTINUE -> loadPage(drive, number + 1)
+                BaiduDirectoryListing.NextPage.COMPLETE -> showBaiduDirectorySheet(listing.directories, ::sameAccount)
+                BaiduDirectoryListing.NextPage.INCOMPLETE ->
+                    showBaiduDirectorySheet(listing.directories, ::sameAccount, incomplete = true)
             }
-        },
-        onFailure = { toast("无法获取网盘会话，请重新登录") },
+        }
+    }
+    ensureBdstoken(
+        onReady = { token -> loadPage(BaiduPersonalDrive(token), 1) },
+        onFailure = { if (isCurrent()) toast("无法获取网盘会话，请重新登录") },
+        lane = RequestLane.DIRECTORY_PICKER,
+        requestCurrent = ::isCurrent,
     )
 }
 
 /** 与 [manageQuarkSources] 同形态：根目录一层多选，已配置的一级目录预勾选。 */
-private fun MainActivity.showBaiduDirectorySheet(dirs: List<PanEntry>) {
-    val configuredIds = shareSources().filter {
+private fun MainActivity.showBaiduDirectorySheet(
+    dirs: Collection<PanEntry>,
+    sameAccount: () -> Boolean,
+    incomplete: Boolean = false,
+) {
+    val configured = shareSources().filter {
         it.provider == SourceProvider.BAIDU && sourceKindOf(it.id) == SourceKind.DIRECTORY
-    }.map { it.id }.toSet()
+    }
+    val choices = baiduDirectoryChoices(dirs, configured, incomplete)
+    val incompleteMessage = "根目录只读取了部分内容，请稍后重试"
+    if (choices.isEmpty()) {
+        toast(if (incomplete) incompleteMessage else "我的网盘根目录没有子文件夹")
+        return
+    }
+    val instructions = "勾选要关注的目录（最多 $MAX_BAIDU_DIR_SOURCES 个，仅根目录一层）"
     showChoiceSheet(
         title = "百度网盘目录",
-        subtitle = "勾选要关注的目录（最多 $MAX_BAIDU_DIR_SOURCES 个，仅根目录一层）",
-        choices = dirs.map { entry ->
-            SheetChoice(
-                entry.name,
-                meta = "百度 · 目录",
-                checked = directorySourceId(entry.path) in configuredIds,
-                tag = entry,
-            )
-        },
+        subtitle = if (incomplete) "$instructions\n$incompleteMessage" else instructions,
+        choices = choices,
         multi = true,
         confirmLabel = "保存",
+        maxSelections = MAX_BAIDU_DIR_SOURCES,
         onConfirm = { selected ->
-            val paths = selected.mapNotNull { it.tag as? PanEntry }.map { it.path }
-            saveBaiduDirectorySources(directorySelectionOf(paths))
+            if (sameAccount()) {
+                val paths = selected.mapNotNull { it.tag as? String }
+                saveBaiduDirectorySources(directorySelectionOf(paths))
+            }
         },
     )
 }
 
 private fun MainActivity.saveBaiduDirectorySources(selected: Map<String, String>) {
     val merged = mergeDirectorySources(shareSources(), selected)
-    // 第 4 步接入目录浏览链路前不主动切到目录来源，避免活跃来源落进旧群共享链路；
-    // 只有当前活跃来源恰好被这次取消勾选时才回退到一个仍存在的来源。
     val next = gid.takeIf { current -> merged.any { it.id == current } }
         ?: merged.firstOrNull { sourceKindOf(it.id) != SourceKind.DIRECTORY }?.id
         ?: merged.firstOrNull()?.id.orEmpty()

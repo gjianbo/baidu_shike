@@ -16,6 +16,33 @@ package com.hnwd.bdplayer
 internal fun homeSourceKeyOf(sourceId: String, kind: SourceKind): String =
     if (kind == SourceKind.CONTACT) "roots:$sourceId" else "recent:$sourceId"
 
+/** 关注目录属于个人网盘，使用播放器和网盘写操作都能识别的缓存键。 */
+internal fun sourceRootCacheKey(sourceId: String): String =
+    if (providerOfSourceId(sourceId) == SourceProvider.BAIDU && isDirectorySource(sourceId)) {
+        "disk:dir:${rawSourceId(sourceId)}"
+    } else "roots:$sourceId"
+
+internal fun sourceFolderCacheKey(sourceId: String, folder: PanEntry): String =
+    if (folder.isDisk && folder.provider == SourceProvider.BAIDU && isDirectorySource(sourceId)) {
+        "disk:dir:${folder.fileId}"
+    } else "dir:${folder.gid}:${folder.messageId}:${folder.fileId}"
+
+internal fun sourceFolderTrailMatches(sourceId: String, trail: List<PanEntry>): Boolean {
+    if (providerOfSourceId(sourceId) != SourceProvider.BAIDU || !isDirectorySource(sourceId)) {
+        return trail.all { it.gid == sourceId }
+    }
+    var parent = directorySourcePath(sourceId)
+    if (!parent.startsWith('/')) return false
+    for (folder in trail) {
+        if (!folder.directory || !folder.isDisk || folder.provider != SourceProvider.BAIDU ||
+            !folder.path.startsWith('/') || folder.path == parent ||
+            folder.path.substringBeforeLast('/').ifEmpty { "/" } != parent
+        ) return false
+        parent = folder.path
+    }
+    return true
+}
+
 /** 联系人根目录接口需要 POST；群组与网盘目录是 GET。 */
 internal fun rootNeedsPost(kind: SourceKind): Boolean = kind == SourceKind.CONTACT
 
@@ -62,6 +89,43 @@ internal const val MAX_BAIDU_DIR_SOURCES = 5
 /** 目录路径 → 显示名：取最后一段，根目录显示 "/" 。 */
 internal fun directorySourceName(path: String): String =
     path.trimEnd('/').substringAfterLast('/').ifEmpty { "/" }
+
+/** 记录根目录分页的进度。文件也参与去重，只有文件的页面仍可继续翻页。 */
+internal class BaiduDirectoryListing {
+    enum class NextPage { CONTINUE, COMPLETE, INCOMPLETE }
+
+    private val seen = HashSet<String>()
+    private val folders = LinkedHashMap<String, PanEntry>()
+    val directories: Collection<PanEntry> get() = folders.values
+
+    fun addPage(page: DrivePage<PanEntry>): NextPage {
+        val before = seen.size
+        for (entry in page.items) {
+            seen.add(entry.fileId)
+            if (entry.directory) folders[entry.path] = entry
+        }
+        return when {
+            !page.hasMore -> NextPage.COMPLETE
+            seen.size > before -> NextPage.CONTINUE
+            else -> NextPage.INCOMPLETE
+        }
+    }
+}
+
+internal fun baiduDirectoryChoices(
+    directories: Collection<PanEntry>,
+    configured: List<ShareSource>,
+    incomplete: Boolean = false,
+): List<SheetChoice> {
+    val saved = configured.associateBy { directorySourcePath(it.id) }
+    val choices = directories.associateBy { it.path }
+    return choices.map { (path, entry) ->
+        SheetChoice(entry.name, meta = "百度 · 目录", checked = path in saved, tag = path)
+    } + saved.filterKeys { it !in choices }.map { (path, source) ->
+        val meta = if (incomplete) "已关注 · 本次未列出" else "已关注 · 根目录未找到"
+        SheetChoice(source.name, meta = meta, checked = true, tag = path)
+    }
+}
 
 /**
  * 用本次勾选的目录覆盖已有的百度目录来源，其余来源（群组 / 联系人 / 夸克）原样保留。

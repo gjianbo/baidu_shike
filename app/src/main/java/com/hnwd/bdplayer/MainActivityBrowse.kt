@@ -16,7 +16,9 @@ import androidx.core.content.edit
  */
 
 internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean = false) {
-    if ((!isHomeRoot() || homeRefreshFeedback?.refreshing == true) && homeCheckInFlight) {
+    if (homeCheckInFlight &&
+        (!isHomeRoot() || homeRefreshFeedback?.refreshing == true || isDirectorySource(gid))
+    ) {
         homeCheckToken++
         homeCheckInFlight = false
     }
@@ -95,10 +97,10 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
     updateNowPlaying()
     val parent = folders.lastOrNull()
     val cacheKey = when {
-        parent != null -> "dir:${parent.gid}:${parent.messageId}:${parent.fileId}"
+        parent != null -> sourceFolderCacheKey(gid, parent)
         screen == Screen.FAVORITES || screen == Screen.SETTINGS -> ""
         screen == Screen.HOME -> homeSourceKey
-        else -> "roots:$gid"
+        else -> sourceRootCacheKey(gid)
     }
     val key = parent?.let { "${it.gid}:${it.messageId}:${it.fileId}" }.orEmpty()
     if (key != courseParentKey) {
@@ -138,7 +140,9 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
     }
     val cached = if (cacheKey.isNotEmpty()) courseCache.readAll(cacheKey) else emptyList()
     val contactHome = screen == Screen.HOME && parent == null && sourceKindOf(gid) == SourceKind.CONTACT
-    val homeRootKey = if (screen == Screen.HOME && !contactHome && parent == null && gid.isNotEmpty()) "roots:$gid" else null
+    val homeRootKey = if (screen == Screen.HOME && !contactHome && parent == null && gid.isNotEmpty()) {
+        sourceRootCacheKey(gid)
+    } else null
     showingHomeDirectory = contactHome
     if (contactHome) sectionTitle.text = "群组"
     val recentPage = homeRootKey?.let { courseCache.readPage(cacheKey, 1) }
@@ -403,15 +407,20 @@ internal fun MainActivity.loadQuarkDiskPage(dirFid: String, parentPath: String, 
 }
 
 
-internal fun MainActivity.ensureBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) {
+internal fun MainActivity.ensureBdstoken(
+    onReady: (String) -> Unit,
+    onFailure: () -> Unit,
+    lane: RequestLane = RequestLane.LIST,
+    requestCurrent: () -> Boolean = { true },
+) {
     if (bdstoken.isNotEmpty()) {
         onReady(bdstoken)
         return
     }
     val account = verifiedAccount
     load(
-        PanApi.groupListSession(), lane = RequestLane.LIST, statusHint = "正在连接我的网盘…",
-        onCancelled = onFailure, onFailure = onFailure,
+        PanApi.groupListSession(), lane = lane, statusHint = "正在连接我的网盘…",
+        onCancelled = onFailure, onFailure = onFailure, requestCurrent = requestCurrent,
     ) { json ->
         val session = json.getJSONObject("result")
         if (session.optString("uk") != account) {
@@ -421,7 +430,7 @@ internal fun MainActivity.ensureBdstoken(onReady: (String) -> Unit, onFailure: (
         }
         val token = session.optString("bdstoken")
         if (token.isBlank() || session.isNull("bdstoken")) {
-            status.text = "网盘会话参数缺失，请重新登录。"
+            if (lane == RequestLane.LIST) status.text = "网盘会话参数缺失，请重新登录。"
             onFailure()
         } else {
             bdstoken = token

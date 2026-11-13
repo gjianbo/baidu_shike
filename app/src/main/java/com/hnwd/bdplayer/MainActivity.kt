@@ -266,6 +266,7 @@ class MainActivity : AppCompatActivity() {
     internal var searchRequestId = 0
 
     internal var courseRequestId = 0
+    private var directoryPickerRequestId = 0
     internal var automaticCourseLoad: PanEntry? = null
     internal var historyRefreshScheduled = false
     internal var historyRefreshPending = false
@@ -1035,9 +1036,10 @@ class MainActivity : AppCompatActivity() {
         onCaptcha: ((JSONObject, () -> Boolean) -> Unit)? = null,
         onCurrentResult: ((JSONObject, () -> Boolean) -> Unit)? = null,
         acceptAnyErrno: Boolean = false,
+        requestCurrent: () -> Boolean = { true },
         onResult: (JSONObject) -> Unit,
     ) {
-        if (!ready || !hasVerifiedAccount()) {
+        if (!ready || !hasVerifiedAccount() || !requestCurrent()) {
             onCancelled()
             return
         }
@@ -1045,6 +1047,7 @@ class MainActivity : AppCompatActivity() {
             RequestLane.LIST -> ++requestId
             RequestLane.SEARCH -> ++searchRequestId
             RequestLane.COURSE -> ++courseRequestId
+            RequestLane.DIRECTORY_PICKER -> ++directoryPickerRequestId
             RequestLane.AUDIO -> ++audioRequestId
             RequestLane.RENEWAL -> ++renewalRequestId
             RequestLane.WRITE -> ++writeRequestId
@@ -1061,19 +1064,20 @@ class MainActivity : AppCompatActivity() {
                 RequestLane.LIST -> requestId
                 RequestLane.SEARCH -> searchRequestId
                 RequestLane.COURSE -> courseRequestId
+                RequestLane.DIRECTORY_PICKER -> directoryPickerRequestId
                 RequestLane.AUDIO -> audioRequestId
                 RequestLane.RENEWAL -> renewalRequestId
                 RequestLane.WRITE -> writeRequestId
                 RequestLane.DELETE_CHECK -> deleteCheckRequestId
                 RequestLane.DOWNLOAD -> downloadRequestId
             }
-        ) && (playToken == null || AudioPlayRequestGate.isCurrent(playToken))
+        ) && (playToken == null || AudioPlayRequestGate.isCurrent(playToken)) && requestCurrent()
         fun showError(message: String?) {
             val text = message ?: "网盘请求失败，请重试。"
             when (lane) {
                 RequestLane.LIST -> status.text = text
                 RequestLane.AUDIO -> failAudioRequest(text)
-                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.RENEWAL, RequestLane.WRITE,
+                RequestLane.SEARCH, RequestLane.COURSE, RequestLane.DIRECTORY_PICKER, RequestLane.RENEWAL, RequestLane.WRITE,
                 RequestLane.DELETE_CHECK, RequestLane.DOWNLOAD -> Unit
             }
         }

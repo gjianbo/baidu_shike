@@ -9,9 +9,22 @@ import android.view.View
  * BaiduPersonalDrive.list（/api/list?dir=）列**第一层、不递归**，与夸克监控目录同口径。
  * 结果转 PanEntry 后复用 CourseCache / display / renderCourse，播放下载仍靠 isDisk 链路。
  *
- * 判据一律看活跃来源 id 的 [sourceKindOf]，不依赖 PanEntry.gid —— parseDiskList 产物的
- * gid 为空，改它会牵动播放 / 音频历史等一堆既有判断。
+ * 百度个人网盘条目的 gid 为空。浏览时用活跃来源确定关注目录，用文件路径读取子目录。
  */
+
+/** 切页、切目录或切账号后，作废浏览请求及其取会话参数的请求。 */
+private fun MainActivity.baiduDirectoryRequestGuard(): () -> Boolean {
+    val request = requestId
+    val account = accountProbeId
+    return { request == requestId && account == accountProbeId && !isDestroyed && !isFinishing }
+}
+
+private fun CourseCache.writeBaiduDirectoryPage(key: String, page: Int, data: DrivePage<PanEntry>): Boolean {
+    val hasMore = data.hasMore && data.items.isNotEmpty()
+    val changed = writeIfChanged(key, page, data.items, if (hasMore) "more" else "")
+    if (changed || !hasMore) clearAfter(key, page)
+    return changed
+}
 
 /** 首页「群最新更新」：目录第一层按修改时间倒序当快照，复用夸克的 directorySnapshot 分支。 */
 internal fun MainActivity.startBaiduDirectoryHomeCheck(
@@ -24,12 +37,18 @@ internal fun MainActivity.startBaiduDirectoryHomeCheck(
     onRefresh: ((String?) -> Unit)?,
 ) {
     val dir = directorySourcePath(gid)
+    val browseCurrent = baiduDirectoryRequestGuard()
+    fun isCurrent() = checkToken == homeCheckToken && browseCurrent()
     fun cancelled() {
         if (checkToken == homeCheckToken) homeCheckInFlight = false
         onRefresh?.invoke(null)
     }
     fun failed() {
-        if (checkToken == homeCheckToken) homeCheckInFlight = false
+        if (!isCurrent()) {
+            cancelled()
+            return
+        }
+        homeCheckInFlight = false
         if (onRefresh != null) {
             cacheFailure(cacheKey)
             onRefresh(HOME_REFRESH_FAILED)
@@ -50,12 +69,14 @@ internal fun MainActivity.startBaiduDirectoryHomeCheck(
             load(
                 request.url, lane = RequestLane.COURSE, statusHint = null,
                 onCancelled = { cancelled() }, onFailure = { failed() },
+                requestCurrent = ::isCurrent,
             ) { json ->
                 val page = runCatching { request.decode(json) }.getOrNull()
                 if (page == null) {
                     failed()
                     return@load
                 }
+                courseCache.writeBaiduDirectoryPage(homeRootKey, 1, page)
                 val fresh = page.items.sortedByDescending { it.modifiedAt }
                 applyHomeRecentEntries(
                     fresh, cacheKey, homeRootKey, force, checkToken, onRefresh,
@@ -64,6 +85,8 @@ internal fun MainActivity.startBaiduDirectoryHomeCheck(
             }
         },
         onFailure = { failed() },
+        lane = RequestLane.COURSE,
+        requestCurrent = ::isCurrent,
     )
 }
 
@@ -75,11 +98,16 @@ internal fun MainActivity.loadBaiduDirectoryRoots(
     onRefresh: ((String?) -> Unit)? = null,
 ) {
     val dir = directorySourcePath(gid)
+    val isCurrent = baiduDirectoryRequestGuard()
     fun done() {
         previousButton?.isEnabled = true
     }
     fun failed() {
         done()
+        if (!isCurrent()) {
+            onRefresh?.invoke(null)
+            return
+        }
         if (page == 1) {
             cacheFailure(key)
             if (onRefresh == null) renderRootMore(key)
@@ -98,6 +126,7 @@ internal fun MainActivity.loadBaiduDirectoryRoots(
                 request.url, lane = RequestLane.COURSE, statusHint = null,
                 onCancelled = { done(); onRefresh?.invoke(null) },
                 onFailure = { failed() },
+                requestCurrent = isCurrent,
             ) { json ->
                 done()
                 val pageData = runCatching { request.decode(json) }.getOrNull()
@@ -107,8 +136,7 @@ internal fun MainActivity.loadBaiduDirectoryRoots(
                 }
                 val entries = pageData.items
                 val message = onRefresh?.let { homeRefreshMessage(key, entries) }
-                courseCache.writeIfChanged(key, page, entries, if (pageData.hasMore) "more" else "")
-                if (!pageData.hasMore) courseCache.clearAfter(key, page)
+                courseCache.writeBaiduDirectoryPage(key, page, pageData)
                 cacheNote = "已同步 ${courseCache.syncLabel(key)}"
                 if (showingHomeDirectory || onRefresh != null) {
                     val scrollY = contentScroll.scrollY
@@ -125,6 +153,8 @@ internal fun MainActivity.loadBaiduDirectoryRoots(
             }
         },
         onFailure = { failed() },
+        lane = RequestLane.COURSE,
+        requestCurrent = isCurrent,
     )
 }
 
@@ -133,16 +163,17 @@ internal fun MainActivity.loadBaiduDirectoryChildren(
     parent: PanEntry,
     page: Int,
     previousButton: View? = null,
-    cacheKey: String = "",
+    cacheKey: String = sourceFolderCacheKey(gid, parent),
 ) {
-    val key = cacheKey.ifEmpty { "dir:${parent.gid}:${parent.messageId}:${parent.fileId}" }
     val dir = parent.path
+    val isCurrent = baiduDirectoryRequestGuard()
     fun done() {
         previousButton?.isEnabled = true
     }
     fun failed() {
         done()
-        if (page == 1) cacheFailure(key)
+        if (!isCurrent()) return
+        if (page == 1) cacheFailure(cacheKey)
         status.text = "读取网盘目录失败，请重试"
     }
     if (dir.isEmpty()) {
@@ -155,6 +186,7 @@ internal fun MainActivity.loadBaiduDirectoryChildren(
             load(
                 request.url, lane = RequestLane.COURSE, statusHint = null,
                 onCancelled = { done() }, onFailure = { failed() },
+                requestCurrent = isCurrent,
             ) { json ->
                 done()
                 val pageData = runCatching { request.decode(json) }.getOrNull()
@@ -162,18 +194,17 @@ internal fun MainActivity.loadBaiduDirectoryChildren(
                     failed()
                     return@load
                 }
-                val entries = pageData.items
-                val hasMore = pageData.hasMore && entries.isNotEmpty()
-                val changed = courseCache.writeIfChanged(key, page, entries, if (hasMore) "more" else "")
-                if (changed || !hasMore) courseCache.clearAfter(key, page)
+                val changed = courseCache.writeBaiduDirectoryPage(cacheKey, page, pageData)
                 courseEntries.clear()
-                courseEntries.addAll(courseCache.readAll(key))
-                cacheNote = "已同步 ${courseCache.syncLabel(key)}"
+                courseEntries.addAll(courseCache.readAll(cacheKey))
+                cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
                 renderCourse()
                 if (!changed) status.text = "$cacheNote · 无更新"
-                renderChildMore(parent, key)
+                renderChildMore(parent, cacheKey)
             }
         },
         onFailure = { failed() },
+        lane = RequestLane.COURSE,
+        requestCurrent = isCurrent,
     )
 }

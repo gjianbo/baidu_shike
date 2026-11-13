@@ -33,7 +33,7 @@ internal enum class CourseOrder(val label: String) {
 }
 
 /** 请求通道：同一通道的新请求会作废旧请求的回调。 */
-internal enum class RequestLane { LIST, SEARCH, COURSE, AUDIO, RENEWAL, WRITE, DELETE_CHECK, DOWNLOAD }
+internal enum class RequestLane { LIST, SEARCH, COURSE, DIRECTORY_PICKER, AUDIO, RENEWAL, WRITE, DELETE_CHECK, DOWNLOAD }
 
 internal enum class SearchScope(val label: String) { DISK("我的网盘"), GROUP("群组"), ALL("全部") }
 

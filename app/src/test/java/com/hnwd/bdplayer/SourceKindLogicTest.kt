@@ -1,5 +1,6 @@
 package com.hnwd.bdplayer
 
+import com.hnwd.bdplayer.BaiduDirectoryListing.NextPage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -17,6 +18,9 @@ class SourceKindLogicTest {
 
     private fun src(id: String, provider: SourceProvider = SourceProvider.BAIDU) =
         ShareSource(id, "name", provider = provider, kind = inferSourceKind(id, provider))
+
+    private fun diskEntry(id: String, path: String, directory: Boolean = false) =
+        PanEntry("", "", "", id, path.substringAfterLast('/'), path, "0", directory, EntryOrigin.DISK)
 
     @Test
     fun `首页缓存 key 群组走 recent 其余走 roots`() {
@@ -168,5 +172,77 @@ class SourceKindLogicTest {
         assertEquals("2026 归档", source.name)
         assertTrue(isShareSourceId(source.id))
         assertEquals(path, directorySourcePath(source.id))
+    }
+
+    @Test
+    fun `根目录分页跳过纯文件页 发现后续文件夹并检测重复页`() {
+        val listing = BaiduDirectoryListing()
+        val files = DrivePage(listOf(diskEntry("1", "/一.mp4")), hasMore = true)
+        assertEquals(NextPage.CONTINUE, listing.addPage(files))
+        assertTrue(listing.directories.isEmpty())
+        val directory = diskEntry("2", "/资料", directory = true)
+        val next = DrivePage(listOf(directory), hasMore = true)
+        assertEquals(NextPage.CONTINUE, listing.addPage(next))
+        assertEquals(NextPage.INCOMPLETE, listing.addPage(next))
+        assertEquals(listOf(directory), listing.directories.toList())
+        assertEquals(NextPage.COMPLETE, listing.addPage(DrivePage(emptyList(), hasMore = false)))
+    }
+
+    @Test
+    fun `根目录未找到的已关注项仍可取消或保存`() {
+        val visible = diskEntry("1", "/已关注", directory = true)
+        val newFolder = diskEntry("2", "/待选", directory = true)
+        val missing = "/暂不可见"
+        val configured = listOf(src(directorySourceId(visible.path)), src(directorySourceId(missing)))
+        val choices = baiduDirectoryChoices(listOf(visible, newFolder), configured)
+        assertEquals(listOf(visible.path, newFolder.path, missing), choices.map { it.tag })
+        assertEquals(listOf(visible.path, missing), choices.filter { it.checked }.map { it.tag })
+        assertTrue(baiduDirectoryChoices(emptyList(), configured).all { it.checked })
+    }
+
+    @Test
+    fun `根目录返回重复页时保留已读取和已关注的目录`() {
+        val listing = BaiduDirectoryListing()
+        val folder = diskEntry("1", "/本次找到", directory = true)
+        val saved = "/后续页的已关注目录"
+        val page = DrivePage(listOf(folder), hasMore = true)
+        assertEquals(NextPage.CONTINUE, listing.addPage(page))
+        assertEquals(NextPage.INCOMPLETE, listing.addPage(page))
+
+        val choices = baiduDirectoryChoices(listing.directories, listOf(src(directorySourceId(saved))), incomplete = true)
+        assertEquals(listOf(folder.path, saved), choices.map { it.tag })
+        assertFalse(choices.first().checked)
+        assertTrue(choices.last().checked)
+        assertEquals("已关注 · 本次未列出", choices.last().meta)
+    }
+
+    @Test
+    fun `播放可从关注根目录和子目录的同一份分页缓存读取`() {
+        val root = "/课程 + 100%"
+        val source = directorySourceId(root)
+        val rootCache = sourceRootCacheKey(source)
+        val folder = diskEntry("123", "$root/第一章", directory = true)
+        val childCache = sourceFolderCacheKey(source, folder)
+        assertEquals("disk:dir:$source", rootCache)
+        assertEquals("disk:dir:123", childCache)
+        assertEquals(rootCache, directoryCacheKey(diskEntry("2", "$root/课.mp3"), diskPlaybackListKey(rootCache)))
+        assertEquals(childCache, directoryCacheKey(
+            diskEntry("3", "${folder.path}/课.mp3"), diskPlaybackListKey(childCache),
+        ))
+        assertEquals("roots:$group", sourceRootCacheKey(group))
+    }
+
+    @Test
+    fun `恢复关注目录只接受该来源的连续百度网盘目录`() {
+        val source = directorySourceId("/资料")
+        val first = diskEntry("1", "/资料/第一章", directory = true)
+        val next = diskEntry("2", "/资料/第一章/音频 + 100%", directory = true)
+        assertTrue(sourceFolderTrailMatches(source, decodeEntries(encodeEntries(listOf(first, next)))))
+        assertFalse(sourceFolderTrailMatches(directorySourceId("/资料集"), listOf(first)))
+        assertFalse(sourceFolderTrailMatches(source, listOf(next)))
+        assertFalse(sourceFolderTrailMatches(source, listOf(first, first)))
+        assertFalse(sourceFolderTrailMatches(source, listOf(first.copy(directory = false))))
+        assertFalse(sourceFolderTrailMatches(source, listOf(first.copy(gid = DISK_SOURCE_ID))))
+        assertTrue(sourceFolderTrailMatches(group, listOf(first.copy(gid = group, origin = EntryOrigin.GROUP))))
     }
 }

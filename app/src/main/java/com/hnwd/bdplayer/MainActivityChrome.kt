@@ -39,7 +39,7 @@ internal fun MainActivity.restoreNavigationState(state: Bundle?) {
     folders.clear()
     if (restored == Screen.DISK || restored == Screen.GROUPS || restored == Screen.HOME) {
         val trail = decodeEntries(state.getString(MainActivity.STATE_FOLDERS))
-        if (restored == Screen.DISK || trail.all { it.gid == gid }) folders.addAll(trail)
+        if (restored == Screen.DISK || sourceFolderTrailMatches(gid, trail)) folders.addAll(trail)
     }
 }
 
@@ -240,6 +240,7 @@ internal fun MainActivity.showChoiceSheet(
     onSelect: ((SheetChoice) -> Unit)? = null,
     onConfirm: ((List<SheetChoice>) -> Unit)? = null,
     footerActions: List<Pair<String, () -> Unit>> = emptyList(),
+    maxSelections: Int? = null,
 ) {
     if (choices.isEmpty()) return
     val checked = BooleanArray(choices.size) { choices[it].checked }
@@ -283,7 +284,7 @@ internal fun MainActivity.showChoiceSheet(
     val footer = view.findViewById<LinearLayout>(R.id.choiceFooter)
     val actions = view.findViewById<LinearLayout>(R.id.choiceActions)
     var footerHeight = 0
-    fun addAction(label: String, primary: Boolean, action: () -> Unit) {
+    fun addAction(label: String, primary: Boolean, enabledToConfirm: () -> Boolean = { true }, action: () -> Unit) {
         val button = TextView(this@showChoiceSheet).apply {
             text = label
             textSize = 13f
@@ -301,6 +302,7 @@ internal fun MainActivity.showChoiceSheet(
             isClickable = true
             isFocusable = true
             setOnClickListener {
+                if (!enabledToConfirm()) return@setOnClickListener
                 dialog.dismiss()
                 action()
             }
@@ -311,7 +313,11 @@ internal fun MainActivity.showChoiceSheet(
     }
     if (multi && confirmLabel != null) {
         addAction("取消", false) { }
-        addAction(confirmLabel, true) {
+        addAction(confirmLabel, true, enabledToConfirm = {
+            val withinLimit = maxSelections == null || checked.count { it } <= maxSelections
+            if (!withinLimit) toast("最多选择 $maxSelections 项")
+            withinLimit
+        }) {
             onConfirm?.invoke(choices.filterIndexed { index, _ -> checked[index] })
         }
         footer.visibility = View.VISIBLE
@@ -326,6 +332,10 @@ internal fun MainActivity.showChoiceSheet(
     list.setOnItemClickListener { _, _, position, _ ->
         val choice = choices[position]
         if (multi) {
+            if (!checked[position] && maxSelections != null && checked.count { it } >= maxSelections) {
+                toast("最多选择 $maxSelections 项")
+                return@setOnItemClickListener
+            }
             checked[position] = !checked[position]
             adapter.notifyDataSetChanged()
         } else {

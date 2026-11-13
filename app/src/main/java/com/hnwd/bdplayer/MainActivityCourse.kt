@@ -88,7 +88,7 @@ internal fun MainActivity.currentDirectoryKey(): String? {
         parent != null && parent.isDisk -> "disk:dir:${parent.fileId}"
         parent != null -> "dir:${parent.gid}:${parent.messageId}:${parent.fileId}"
         screen == Screen.DISK -> "disk:roots"
-        screen == Screen.GROUPS -> "roots:$gid"
+        screen == Screen.GROUPS -> sourceRootCacheKey(gid)
         else -> null
     }
 }
@@ -195,8 +195,7 @@ internal fun MainActivity.playbackDirectory(entry: PanEntry, listKey: String?): 
         ?: return null
     val media = sameMediaKind(entry, courseCache.readAll(key))
     val queueKey = when {
-        key == "disk:roots" -> "D:root"
-        key.startsWith("disk:dir:") -> "D:${key.removePrefix("disk:dir:")}"
+        key == "disk:roots" || key.startsWith("disk:dir:") -> diskPlaybackListKey(key)
         key.startsWith("roots:") -> "G:${entry.gid}"
         key.startsWith("dir:") -> "G:${key.removePrefix("dir:")}"
         else -> if (entry.isDisk) "D:root" else "G:${entry.gid}"
@@ -300,7 +299,8 @@ internal fun MainActivity.loadMoreDiskCourses(
                     done(null)
                     return@load
                 }
-                courseCache.writeIfChanged(key, page + 1, files, if (hasMore) "more" else "")
+                val hasNewFiles = files.isNotEmpty() && files.map { it.fileId } != cached.entries.map { it.fileId }
+                courseCache.writeIfChanged(key, page + 1, files, if (hasMore && hasNewFiles) "more" else "")
                 diskIndexCache = null
                 PlaybackQueueState.updateEntries(
                     sameMediaKind(entry, courseCache.readAll(key)),
@@ -323,7 +323,11 @@ internal fun MainActivity.hasMoreCourses(entry: PanEntry, listKey: String?): Boo
 }
 
 
-internal fun MainActivity.directoryCacheKey(entry: PanEntry, listKey: String?): String? = when {
+internal fun diskPlaybackListKey(cacheKey: String): String =
+    if (cacheKey == "disk:roots") "D:root" else "D:${cacheKey.removePrefix("disk:dir:")}"
+
+
+internal fun directoryCacheKey(entry: PanEntry, listKey: String?): String? = when {
     listKey == "D:root" && entry.isDisk -> "disk:roots"
     listKey?.startsWith("D:") == true && entry.isDisk -> "disk:dir:${listKey.removePrefix("D:")}"
     listKey == "G:${entry.gid}" -> "roots:${entry.gid}"
@@ -442,6 +446,8 @@ internal fun MainActivity.currentPlaybackListKey(): String {
         parent != null && parent.isDisk -> "D:${parent.fileId}"
         parent != null -> "G:${parent.gid}:${parent.messageId}:${parent.fileId}"
         screen == Screen.DISK -> "D:root"
+        isDirectorySource(gid) && (screen == Screen.HOME || screen == Screen.GROUPS) ->
+            diskPlaybackListKey(sourceRootCacheKey(gid))
         screen == Screen.GROUPS || showingHomeDirectory -> "G:$gid"
         else -> "${screen}:$gid"
     }

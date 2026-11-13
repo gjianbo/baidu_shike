@@ -172,10 +172,9 @@ internal fun MainActivity.requestBrowseRefresh() {
         }
         if (hasActiveSession()) {
             val onRefresh = feedback.begin()
-            val rootKey = "roots:$gid"
+            val rootKey = sourceRootCacheKey(gid)
             when (sourceKindOf(gid)) {
                 SourceKind.CONTACT -> loadHomeDirectory(rootKey, force = true, onRefresh = onRefresh)
-                // 网盘目录的完整链路在第 4 步接入 diskList；第 3 步之前无法创建目录来源，不会触发。
                 SourceKind.GROUP, SourceKind.DIRECTORY -> {
                     val recentKey = "recent:$gid"
                     startHomeCheck(
