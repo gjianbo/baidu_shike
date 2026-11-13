@@ -33,6 +33,7 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                     .getOrDefault(EntryOrigin.GROUP),
                 item.optString("md5"),
                 if (previewFresh) item.optString("preview") else "",
+                item.optLong("modifiedAt"),
             )
         }, syncedAt, data.optString("nextCursor").takeIf { data.has("nextCursor") },
             data.optBoolean("latestEmpty"),
@@ -96,7 +97,8 @@ internal class CourseCache(private val preferences: SharedPreferences) {
                 .put("directory", it.directory)
                 .put("origin", it.origin.name)
                 .put("md5", it.md5)
-                .put("preview", it.previewUrl))
+                .put("preview", it.previewUrl)
+                .put("modifiedAt", it.modifiedAt))
         }
         preferences.edit {
             putString(

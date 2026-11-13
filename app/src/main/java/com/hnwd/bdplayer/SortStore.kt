@@ -2,22 +2,16 @@ package com.hnwd.bdplayer
 
 import android.content.Context
 import androidx.core.content.edit
+import org.json.JSONObject
 
-/**
- * 排序偏好存储：列表页与播放页各记一份，同一目录互不覆盖。
- *
- * 键 = 作用域前缀（list: / play:）+ 目录身份。目录身份沿用课程缓存的目录键
- * （dir:gid:msg:file / roots:gid / disk:dir:<id>），与播放页历史上的键一致，
- * 所以老版本写在 playback_order 里的偏好不用迁移也能继续读到。
- *
- * 读取顺序由调用方决定：播放页「本作用域 -> 列表侧 -> 全局默认」，
- * 这样没单独设过的地方跟随另一侧，单独改过的地方各自独立。
- */
+/** 目录、音频和视频各自记忆排序。旧版共用的播放排序用作音视频各自的初始偏好。 */
 internal object SortStore {
     private const val PREFS = "sort_order"
     private const val LEGACY_PREFS = "playback_order"
     private const val LIST = "list:"
     private const val PLAY = "play:"
+    val playbackOrders = listOf(CourseOrder.ASCENDING, CourseOrder.DESCENDING, CourseOrder.NETWORK, CourseOrder.NEWEST)
+    private val playbackKinds = listOf(MediaKind.AUDIO, MediaKind.VIDEO)
 
     fun list(context: Context, directory: String?): CourseOrder? =
         read(context, LIST, directory, legacy = false)
@@ -25,11 +19,56 @@ internal object SortStore {
     fun setList(context: Context, directory: String?, order: CourseOrder) =
         write(context, LIST, directory, order)
 
-    fun playback(context: Context, directory: String?): CourseOrder? =
-        read(context, PLAY, directory, legacy = true)
+    fun playback(context: Context, kind: MediaKind, directory: String?, path: String?): CourseOrder =
+        (read(context, playbackScope(kind), directory, legacy = false)
+            ?: read(context, playbackScope(kind), path, legacy = false)
+            ?: read(context, PLAY, directory, legacy = true)
+            ?: read(context, PLAY, path, legacy = true))
+            ?.takeIf { it in playbackOrders } ?: CourseOrder.ASCENDING
 
-    fun setPlayback(context: Context, directory: String?, order: CourseOrder) =
-        write(context, PLAY, directory, order)
+    fun setPlayback(context: Context, kind: MediaKind, directory: String, order: CourseOrder) =
+        write(context, playbackScope(kind), directory, order)
+
+    fun backupPlayback(context: Context, account: String): JSONObject =
+        encodePlaybackBackup(
+            PrefIndex.snapshot(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)), account,
+        )
+
+    fun restorePlayback(context: Context, backup: JSONObject, account: String) {
+        val entries = playbackBackupEntries(backup, account)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {
+            entries.forEach { (key, value) -> putString(key, value) }
+        }
+    }
+
+    internal fun encodePlaybackBackup(prefs: Map<String, Any?>, account: String): JSONObject = JSONObject().apply {
+        for (kind in playbackKinds) {
+            val prefix = playbackScope(kind) + AccountScope.prefix(account)
+            val orders = JSONObject()
+            prefs.forEach { (key, raw) ->
+                if (key.startsWith(prefix) && key.length > prefix.length && isPlaybackOrder(raw)) {
+                    orders.put(key.removePrefix(prefix), raw)
+                }
+            }
+            if (orders.length() > 0) put(kind.name, orders)
+        }
+    }
+
+    internal fun playbackBackupEntries(backup: JSONObject, account: String): Map<String, String> = buildMap {
+        for (kind in playbackKinds) {
+            val orders = backup.optJSONObject(kind.name) ?: continue
+            orders.keys().forEach { directory ->
+                val order = orders.opt(directory) as? String
+                if (directory.isNotBlank() && order != null && isPlaybackOrder(order)) {
+                    put(playbackScope(kind) + AccountScope.key(directory, account), order)
+                }
+            }
+        }
+    }
+
+    fun isPlaybackOrder(value: Any?): Boolean = playbackOrders.any { it.name == value }
+
+    private fun playbackScope(kind: MediaKind): String = "$PLAY${kind.name}:"
 
     private fun read(context: Context, scope: String, directory: String?, legacy: Boolean): CourseOrder? {
         val dir = directory?.takeIf { it.isNotEmpty() } ?: return null

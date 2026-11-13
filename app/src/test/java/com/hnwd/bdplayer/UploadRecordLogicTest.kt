@@ -27,7 +27,14 @@ class UploadRecordLogicTest {
 
     @Test
     fun encodeDecode_roundTripKeepsChineseNamesAndAllFields() {
-        val original = listOf(record(1), record(2, UploadRecordState.SUCCESS, 5_000L))
+        val interrupted = record(1).copy(
+            sourceUri = "content://documents/test",
+            folderId = "folder-id",
+            provider = SourceProvider.QUARK,
+            accountId = "quark-session-id",
+            source = UploadRecordLogic.SOURCE_QUARK,
+        )
+        val original = listOf(interrupted, record(2, UploadRecordState.SUCCESS, 5_000L))
         val decoded = UploadRecordLogic.decode(UploadRecordLogic.encode(original))
         assertEquals(original, decoded)
     }
@@ -97,5 +104,19 @@ class UploadRecordLogicTest {
         assertEquals(9_999L, idle.records[0].finishedAt)
         assertEquals(UploadRecordState.SUCCESS, idle.records[2].state)
         assertEquals(UploadRecordState.FAILED, idle.records[3].state)
+    }
+    @Test
+    fun recoveryDistinguishesAcceptedAndUncertainSubmissions() {
+        val record = record(8).copy(sourceUri = "content://documents/test", accountId = "account")
+        val submitting = record.copy(commitState = UploadCommitState.SUBMITTING)
+        val accepted = record.copy(commitState = UploadCommitState.ACCEPTED, remoteFileId = "987")
+        val restored = UploadRecordLogic.decode(UploadRecordLogic.encode(listOf(submitting, accepted)))
+        val result = UploadRecordLogic.reconcileInterrupted(restored, emptySet(), 5000).records
+        assertEquals(UploadRecordLogic.UNCONFIRMED, result[0].message)
+        assertFalse(UploadRecordLogic.canRetry(result[0]))
+        assertEquals(UploadRecordState.SUCCESS, result[1].state)
+        assertEquals("987", result[1].remoteFileId)
+        assertEquals("", result[1].sourceUri)
+        assertTrue(UploadRecordLogic.canRetry(UploadRecordLogic.finish(record, false, "网络错误", 5000)))
     }
 }

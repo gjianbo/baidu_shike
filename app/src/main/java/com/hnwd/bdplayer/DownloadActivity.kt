@@ -1,5 +1,6 @@
 package com.hnwd.bdplayer
 
+import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Typeface
 import android.os.Bundle
@@ -126,6 +127,7 @@ class DownloadActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        DownloadCenter.resume(this)
         handler.removeCallbacks(ticker)
         handler.post(ticker)
     }
@@ -341,6 +343,8 @@ class DownloadActivity : AppCompatActivity() {
         if (display.visible) main.addView(progressBar(display.percent, display.indeterminate))
         val foot = when {
             task.state == DownloadState.FAILED -> task.error.ifBlank { "下载失败" }
+            task.publishing -> "正在保存到下载目录…"
+            task.state == DownloadState.QUEUED && task.downloadId >= 0 -> "等待系统下载"
             task.state == DownloadState.QUEUED -> "等待中 · 前面还有 ${queuedAhead(task)} 个"
             percent < 0 -> "正在连接…"
             else -> "$percent% · ${DownloadLogic.etaText(
@@ -350,17 +354,45 @@ class DownloadActivity : AppCompatActivity() {
         }
         main.addView(meta(foot, if (task.state == DownloadState.FAILED) R.color.danger else R.color.ink3))
         row.addView(main)
-        row.addView(action(if (task.state == DownloadState.FAILED) "重试" else "取消") {
+        if (task.state == DownloadState.FAILED || !task.publishing &&
+            (task.downloadId < 0 || task.stagingName.isNotBlank())
+        ) row.addView(action(if (task.state == DownloadState.FAILED) retryLabel(task) else "取消") {
             if (task.state == DownloadState.FAILED) {
-                if (!DownloadCenter.retry(this, task.id)) toast("链接已失效，请回到文件列表重新下载")
-                refreshNow()
+                retryDownload(task)
             } else {
-                DownloadCenter.cancel(this, task.id)
-                toast("已取消下载")
+                val cancelled = DownloadCenter.cancel(this, task.id)
                 refreshNow()
+                toast(when {
+                    cancelled -> "已取消下载"
+                    tasks.any { it.id == task.id && (it.state == DownloadState.SUCCESS || it.publishing) } ->
+                        "文件已下载完成，正在保存到下载目录"
+                    else -> "无法取消下载，请稍后重试"
+                })
             }
         })
         taskList.addView(row)
+    }
+
+    private fun retryLabel(task: DownloadTask): String =
+        if (task.needsVerification) "验证" else "重试"
+
+    private fun retryDownload(task: DownloadTask) {
+        if (!task.publishing && !DownloadLogic.hasAccountBinding(task)) {
+            toast("旧记录缺少来源或账号，请回到文件列表重新下载")
+            return
+        }
+        if (task.needsVerification) {
+            startActivity(Intent(this, MainActivity::class.java)
+                .putExtra(EXTRA_VERIFY_DOWNLOAD, task.id)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+            return
+        }
+        if (DownloadCenter.retry(this, task.id)) {
+            switchTab(false)
+        } else {
+            toast("无法重新加入下载队列，请稍后重试")
+            refreshNow()
+        }
     }
 
     private fun addHistoryRow(task: DownloadTask) {
@@ -379,10 +411,9 @@ class DownloadActivity : AppCompatActivity() {
         ).joinToString(" · ")
         main.addView(meta(detail, if (task.state == DownloadState.FAILED) R.color.danger else R.color.ink3))
         row.addView(main)
-        row.addView(action(if (task.state == DownloadState.FAILED) "重试" else "打开") {
+        row.addView(action(if (task.state == DownloadState.FAILED) retryLabel(task) else "打开") {
             if (task.state == DownloadState.FAILED) {
-                if (!DownloadCenter.retry(this, task.id)) toast("链接已失效，请回到文件列表重新下载")
-                switchTab(false)
+                retryDownload(task)
             } else if (!DownloadCenter.open(this, task)) {
                 toast("没有可打开此文件的应用")
             }
@@ -412,8 +443,8 @@ class DownloadActivity : AppCompatActivity() {
         main.addView(meta("${record.percent.coerceIn(0, 100)}% · ${record.label}"))
         row.addView(main)
         row.addView(action("取消") {
-            UploadCenter.cancel(this, record.id)
-            toast("已取消上传")
+            if (UploadCenter.cancel(this, record.id)) toast("正在取消上传")
+            else toast("文件正在提交或已结束，请查看传输结果")
             refreshNow()
         })
         taskList.addView(row)
@@ -440,14 +471,13 @@ class DownloadActivity : AppCompatActivity() {
         )
         row.addView(main)
         row.addView(action("移除") {
-            UploadCenter.cancel(this, record.id)
-            toast("已移出队列")
+            if (UploadCenter.cancel(this, record.id)) toast("已处理取消请求")
             refreshNow()
         })
         taskList.addView(row)
     }
 
-    /** 上传历史：文件在网盘而不是本机，所以没有「打开」；失败也不能页内重试（源文件已删）。 */
+    /** 有持久读取授权的失败任务可以重新上传。 */
     private fun addUploadHistoryRow(record: UploadRecord) {
         val row = card()
         row.addView(typeIcon(record.name))
@@ -462,12 +492,31 @@ class DownloadActivity : AppCompatActivity() {
             DownloadLogic.formatBytes(record.sizeBytes),
             timeLabel(record.finishedAt),
             record.message.takeIf { it.isNotBlank() && record.state == UploadRecordState.FAILED },
+            "旧任务缺少账号，请重新选择文件".takeIf {
+                record.state == UploadRecordState.FAILED && record.sourceUri.isNotBlank() && record.accountId.isBlank()
+            },
         ).joinToString(" · ")
         main.addView(
             meta(detail, if (record.state == UploadRecordState.FAILED) R.color.danger else R.color.ink3),
         )
         row.addView(main)
-        row.addView(tag(if (record.state == UploadRecordState.SUCCESS) "已上传" else "失败"))
+        if (UploadRecordLogic.canRetry(record)) {
+            row.addView(action("重试") {
+                if (!UploadCenter.retry(this, record.id)) {
+                    toast("原文件授权已失效，请重新选择文件")
+                } else {
+                    try {
+                        UploadForegroundService.start(this)
+                        switchTab(false)
+                    } catch (error: IllegalStateException) {
+                        UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
+                        refreshNow()
+                    }
+                }
+            })
+        } else {
+            row.addView(tag(if (record.state == UploadRecordState.SUCCESS) "已上传" else "失败"))
+        }
         taskList.addView(row)
     }
 
@@ -484,7 +533,7 @@ class DownloadActivity : AppCompatActivity() {
 
     private fun queuedAhead(task: DownloadTask): Int =
         tasks.count {
-            it.state == DownloadState.QUEUED && it.downloadId < 0 && it.createdAt < task.createdAt
+            it.state == DownloadState.QUEUED && it.downloadId < 0 && it.id < task.id
         }
 
     // ===================== 视图小工具 =====================
@@ -627,8 +676,9 @@ class DownloadActivity : AppCompatActivity() {
     private fun timeLabel(time: Long): String =
         if (time <= 0) "" else SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(time))
 
-    private companion object {
-        const val MENU_CLEAR_SUCCESS = 1
-        const val MENU_CLEAR_FAILED = 2
+    companion object {
+        internal const val EXTRA_VERIFY_DOWNLOAD = "verify_download"
+        private const val MENU_CLEAR_SUCCESS = 1
+        private const val MENU_CLEAR_FAILED = 2
     }
 }

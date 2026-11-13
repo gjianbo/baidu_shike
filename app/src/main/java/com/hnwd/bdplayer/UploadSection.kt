@@ -7,7 +7,7 @@ import java.io.File
 import java.io.IOException
 
 /**
- * 上传编排：规划分片 → 预上传 → 逐片流式上传 → 创建文件 → 回读确认。
+ * 上传编排：规划分片 → 预上传 → 逐片流式上传 → 创建文件 → 保存服务端确认。
  *
  * 源文件是 [UploadCenter] 预先复制进私有缓存的 File，不再持有系统文件选择器的 Uri：
  * 前台 Activity 销毁后 Uri 的临时读取授权可能被回收，私有文件则不受影响。
@@ -16,13 +16,16 @@ import java.io.IOException
  */
 internal class UploadSection(
     context: Context,
+    session: TransferSession,
+    private val accountId: String,
     private val file: File,
     private val displayName: String,
     private val dir: String,
+    private val commit: UploadCommit,
     private val onProgress: (percent: Int, label: String) -> Unit,
     private val onResult: (success: Boolean, message: String) -> Unit,
 ) : UploadWorker {
-    private val uploader = PanUploader(context.applicationContext)
+    private val uploader = PanUploader(context.applicationContext, session)
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var cancelled = false
@@ -52,38 +55,46 @@ internal class UploadSection(
             }
             running = false
             val message = when {
-                cancelled -> "已取消上传"
                 result.isSuccess -> "已上传：${result.getOrNull()}"
+                cancelled -> "已取消上传"
                 else -> "上传失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
             }
-            main.post { onResult(result.isSuccess && !cancelled, message) }
+            main.post { onResult(result.isSuccess, message) }
         }
     }
 
+    private fun checkActive() {
+        if (cancelled) throw IOException("已取消")
+    }
+
     private fun doUpload(): String {
+        checkActive()
         val size = file.length()
-        val (token, vip) = uploader.session()
+        val (token, vip) = uploader.session(accountId)
         val plan = UploadLogic.plan(size, vip.toString())
         check(plan.allowed) { plan.reason }
         val path = PanApi.diskPath(dir, displayName)
         progress(0, "正在校验文件…")
 
-        val localMd5 = uploader.localMd5Parts(file, size)
+        val localMd5 = uploader.localMd5Parts(file, plan, ::checkActive)
+        checkActive()
         val host = uploader.locateHost()
+        checkActive()
         val pre = uploader.precreate(token, path, size, localMd5)
         val toUpload = UploadLogic.partsToUpload(plan.chunks, pre.returnType, pre.neededParts)
         val returnedMd5 = MutableList<String>(plan.chunks) { localMd5[it] }
         // 服务端已有的分片不需要重传，但它们的字节要算进进度起点，否则多分片会卡在 50%。
-        var doneBytes = UploadLogic.skippedBytes(size, plan.chunks, toUpload)
+        var doneBytes = UploadLogic.skippedBytes(size, plan.chunks, toUpload, plan.chunkBytes)
         // 99% 留给 create 阶段，字节传完不提前报 100%。
         if (doneBytes < size) {
             progress(UploadLogic.progress(doneBytes, size).coerceAtMost(99), "上传中 1/${plan.chunks}")
         }
 
         for (index in 0 until plan.chunks) {
-            if (cancelled) throw IOException("已取消")
+            checkActive()
             if (index !in toUpload) continue
-            val chunk = UploadLogic.chunkAt(size, index)
+            val chunk = UploadLogic.chunkAt(size, index, plan.chunkBytes)
+            val beforePart = doneBytes
             val md5 = uploader.uploadPart(
                 host, token, path, pre.uploadId, index, file,
                 chunk.offset, chunk.length, displayName,
@@ -94,12 +105,18 @@ internal class UploadSection(
                     "上传中 ${index + 1}/${plan.chunks}",
                 )
             }
+            doneBytes = beforePart + chunk.length
             returnedMd5[index] = md5
         }
-        if (cancelled) throw IOException("已取消")
+        commit.begin()
         progress(99, "正在创建文件…")
-        val fsId = uploader.create(token, path, size, pre.uploadId, returnedMd5)
-        check(uploader.exists(token, path, fsId)) { "已提交但未在目录中回读到文件，请刷新确认" }
+        val fsId = try {
+            uploader.create(token, path, size, pre.uploadId, returnedMd5)
+        } catch (rejected: PanUploader.Rejected) {
+            if (rejected.errno !in setOf(12, 111)) commit.rejected()
+            throw rejected
+        }
+        commit.accepted(fsId.takeIf { it > 0 }?.toString().orEmpty())
         progress(100, "完成")
         return displayName
     }

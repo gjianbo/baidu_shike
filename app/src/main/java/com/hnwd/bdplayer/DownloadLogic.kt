@@ -8,11 +8,7 @@ internal enum class DownloadRoute { BAIDU_GROUP, BAIDU_DISK, QUARK }
 
 internal enum class DownloadState { QUEUED, RUNNING, SUCCESS, FAILED }
 
-/**
- * 一条下载任务。[url] 是取址时拿到的临时直链（约 8h 有效），用于页内重试；
- * 它随任务记录一起落在本地 SharedPreferences（不写进备份快照、不打印日志），
- * 过期后重试会失败并提示回列表重新取址。[downloadId] 为 -1 表示还在排队、尚未交给系统下载器。
- */
+/** 下载记录保存来源标识，排到执行时才请求短期直链。 */
 internal data class DownloadTask(
     val id: Long,
     val name: String,
@@ -30,6 +26,13 @@ internal data class DownloadTask(
     val finishedAt: Long = 0,
     val error: String = "",
     val mediaType: String = "application/octet-stream",
+    val entry: PanEntry? = null,
+    val viewer: String = "",
+    val linkAttempts: Int = 0,
+    val needsVerification: Boolean = false,
+    val stagingName: String = "",
+    val outputUri: String = "",
+    val publishing: Boolean = false,
 )
 
 /**
@@ -139,6 +142,36 @@ internal object DownloadLogic {
         }
     }
 
+    fun hasAccountBinding(task: DownloadTask): Boolean =
+        task.viewer.isNotBlank() && task.entry?.provider == task.provider
+
+    fun isActive(task: DownloadTask): Boolean =
+        task.state == DownloadState.QUEUED || task.state == DownloadState.RUNNING
+
+    fun canRefreshLink(reason: Int): Boolean = when (reason) {
+        401, 403, 404, 410, 412, 1008 -> true // 1008: DownloadManager.ERROR_CANNOT_RESUME
+        else -> false
+    }
+
+    fun requeue(task: DownloadTask): DownloadTask = task.copy(
+        state = DownloadState.QUEUED, downloadId = -1, url = "", bytesDone = 0,
+        bytesTotal = -1, finishedAt = 0, error = "", needsVerification = false,
+        stagingName = "", outputUri = "", publishing = false,
+    )
+
+    fun acceptsResolution(task: DownloadTask, id: Long): Boolean =
+        task.id == id && task.state == DownloadState.QUEUED && task.downloadId < 0 &&
+            !task.publishing && hasAccountBinding(task)
+
+    fun publicationFailed(task: DownloadTask, stageLost: Boolean, now: Long): DownloadTask {
+        val retryTask = if (stageLost) requeue(task) else task
+        return retryTask.copy(
+            state = DownloadState.FAILED,
+            finishedAt = now,
+            error = if (stageLost) "下载暂存文件已丢失或不完整，请重试下载" else "文件已下载，保存失败，请重试",
+        )
+    }
+
     const val CANCELLED_ERROR = "已取消下载"
     const val LOST_RECORD_ERROR = "下载记录已丢失，请回到文件列表重新下载"
 
@@ -187,7 +220,7 @@ internal object DownloadLogic {
     /** 系统下载器失败原因 → 能动手重试的文案；夸克非会员大文件单独提示。 */
     fun failureText(reason: Int, route: DownloadRoute): String = when (reason) {
         403, 412 -> "网盘拒绝了下载（HTTP $reason），链接可能已过期"
-        404, 410 -> "文件地址已失效，请回到列表重新下载"
+        404, 410 -> "文件地址已失效，请重试"
         in 400..499 -> "下载失败（HTTP $reason）"
         else -> if (route == DownloadRoute.QUARK)
             "夸克下载失败，非会员单个文件上限约 50MB，或链接已过期"
@@ -230,6 +263,13 @@ internal object DownloadLogic {
         .put("finished", task.finishedAt)
         .put("error", task.error)
         .put("mime", task.mediaType)
+        .put("entry", task.entry?.let { encodeEntries(listOf(it)) })
+        .put("viewer", task.viewer)
+        .put("linkAttempts", task.linkAttempts)
+        .put("verification", task.needsVerification)
+        .put("staging", task.stagingName)
+        .put("output", task.outputUri)
+        .put("publishing", task.publishing)
 
     private fun fromJson(item: JSONObject) = DownloadTask(
         id = item.getLong("id"),
@@ -250,5 +290,12 @@ internal object DownloadLogic {
         finishedAt = item.optLong("finished", 0),
         error = item.optString("error"),
         mediaType = item.optString("mime").ifBlank { "application/octet-stream" },
+        entry = decodeEntries(item.optString("entry")).firstOrNull(),
+        viewer = item.optString("viewer"),
+        linkAttempts = item.optInt("linkAttempts"),
+        needsVerification = item.optBoolean("verification"),
+        stagingName = item.optString("staging"),
+        outputUri = item.optString("output"),
+        publishing = item.optBoolean("publishing"),
     )
 }

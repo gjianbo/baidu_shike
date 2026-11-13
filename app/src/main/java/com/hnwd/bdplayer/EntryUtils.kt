@@ -44,6 +44,7 @@ internal fun orderCourses(entries: List<PanEntry>, order: CourseOrder): List<Pan
     CourseOrder.ASCENDING -> entries.sortedWith { first, second -> compareCourseNames(first.name, second.name) }
     CourseOrder.DESCENDING -> entries.sortedWith { first, second -> compareCourseNames(second.name, first.name) }
     CourseOrder.NETWORK -> entries
+    CourseOrder.NEWEST -> entries.sortedByDescending { it.modifiedAt }
 }
 
 private val courseNameParts = Regex("[0-9]+|[^0-9]+")
@@ -112,7 +113,8 @@ internal fun encodeEntries(entries: List<PanEntry>): String = JSONArray().apply 
             .put("size", entry.size)
             .put("directory", entry.directory)
             .put("origin", entry.origin.name)
-            .put("md5", entry.md5))
+            .put("md5", entry.md5)
+            .put("modifiedAt", entry.modifiedAt))
     }
 }.toString()
 
@@ -137,4 +139,5 @@ private fun decodeEntry(item: JSONObject): PanEntry = PanEntry(
     runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
         .getOrDefault(EntryOrigin.GROUP),
     item.optString("md5"),
+    modifiedAt = item.optLong("modifiedAt", 0),
 )

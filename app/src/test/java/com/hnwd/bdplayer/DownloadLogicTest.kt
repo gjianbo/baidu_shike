@@ -158,6 +158,39 @@ class DownloadLogicTest {
     }
 
     @Test
+    fun retryKeepsSourceIdentityAndDiscardsExpiredLink() {
+        val entry = PanEntry("group", "message", "owner", "file", "原文件.zip", "", "123", false)
+        val failed = DownloadTask(
+            id = 42, name = entry.name, state = DownloadState.FAILED,
+            downloadId = 11, url = "https://example.com/expired", bytesDone = 5,
+            error = "expired", entry = entry, viewer = "123", needsVerification = true,
+        )
+        val restored = DownloadLogic.decodeTasks(DownloadLogic.encodeTasks(listOf(failed))).single()
+        assertEquals(failed, restored)
+        val retry = DownloadLogic.requeue(restored)
+        assertEquals(DownloadState.QUEUED, retry.state)
+        assertEquals(-1L, retry.downloadId)
+        assertEquals(0L, retry.bytesDone)
+        assertEquals("", retry.url)
+        assertEquals(entry, retry.entry)
+        assertEquals("123", retry.viewer)
+        assertFalse(retry.needsVerification)
+        assertTrue(DownloadLogic.canRefreshLink(412))
+        assertFalse(DownloadLogic.canRefreshLink(1006))
+    }
+
+    @Test
+    fun accountBindingRequiresMatchingProviderAndIdentity() {
+        val entry = PanEntry(DISK_SOURCE_ID, "", "", "file", "file.txt", "", "1", false, EntryOrigin.DISK)
+        val task = DownloadTask(id = 5, name = entry.name, provider = SourceProvider.QUARK, entry = entry)
+        assertFalse(DownloadLogic.hasAccountBinding(task))
+        assertFalse(DownloadLogic.hasAccountBinding(task.copy(provider = SourceProvider.BAIDU, viewer = "123")))
+        val bound = task.copy(viewer = "quark-session-id")
+        assertTrue(DownloadLogic.hasAccountBinding(bound))
+        assertEquals(bound.viewer, DownloadLogic.requeue(bound).viewer)
+    }
+
+    @Test
     fun decodeTasks_dropsOnlyCorruptedRecords() {
         val good = DownloadLogic.encodeTasks(listOf(DownloadTask(id = 1, name = "好文件.mp4")))
         val array = JSONArray(good).put(JSONObject().put("broken", true))
@@ -206,5 +239,43 @@ class DownloadLogicTest {
         val known = DownloadLogic.taskProgress(DownloadState.RUNNING, 25, 100)
         assertFalse(known.indeterminate)
         assertEquals(25, known.percent)
+    }
+    @Test
+    fun publicationFailureOnlyKeepsReusableStage() {
+        val entry = PanEntry("", "", "", "12", "file.txt", "/file.txt", "42", false, EntryOrigin.DISK)
+        val publishing = DownloadTask(
+            id = 7, name = entry.name, state = DownloadState.RUNNING, downloadId = 81,
+            bytesDone = 42, bytesTotal = 42, entry = entry, viewer = "123",
+            stagingName = "7-abcdef.part", outputUri = "content://media/downloads/81", publishing = true,
+        )
+
+        val saveAgain = DownloadLogic.publicationFailed(publishing, stageLost = false, now = 10)
+        assertEquals(DownloadState.FAILED, saveAgain.state)
+        assertTrue(saveAgain.publishing)
+        assertEquals(publishing.stagingName, saveAgain.stagingName)
+        assertEquals(publishing.outputUri, saveAgain.outputUri)
+
+        val downloadAgain = DownloadLogic.publicationFailed(publishing, stageLost = true, now = 10)
+        assertEquals(DownloadState.FAILED, downloadAgain.state)
+        assertFalse(downloadAgain.publishing)
+        assertEquals("", downloadAgain.stagingName)
+        assertEquals("", downloadAgain.outputUri)
+        assertEquals(-1L, downloadAgain.downloadId)
+        assertTrue(DownloadLogic.acceptsResolution(DownloadLogic.requeue(downloadAgain), publishing.id))
+    }
+
+    @Test
+    fun resolverUsesTaskIdentityAcrossMetadataRoundTrip() {
+        val entry = PanEntry("", "", "", "12", "file.txt", "/file.txt", "42", false, EntryOrigin.DISK,
+            modifiedAt = 1_760_000_000L)
+        val task = DownloadTask(id = 7, name = entry.name, entry = entry, viewer = "123")
+        val stored = DownloadLogic.decodeTasks(DownloadLogic.encodeTasks(listOf(task))).single()
+        assertEquals(entry.modifiedAt, stored.entry?.modifiedAt)
+        assertTrue(DownloadLogic.acceptsResolution(stored, 7))
+        assertFalse(DownloadLogic.acceptsResolution(stored, 8))
+        assertFalse(DownloadLogic.acceptsResolution(DownloadLogic.cancelledTask(stored, 10), 7))
+        val saving = stored.copy(stagingName = "7-test.part", outputUri = "content://downloads/1", publishing = true)
+        assertEquals(saving, DownloadLogic.decodeTasks(DownloadLogic.encodeTasks(listOf(saving))).single())
+        assertFalse(DownloadLogic.acceptsResolution(saving, 7))
     }
 }

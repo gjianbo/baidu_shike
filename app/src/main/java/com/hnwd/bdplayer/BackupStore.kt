@@ -167,9 +167,10 @@ internal object BackupStore {
             .put("videoHistory", stringMap(video))
             .put("videoProgress", longMap(progress))
             .put("playbackOrder", stringMap(prefs(context, "playback_order")))
+            .put("playbackSort", SortStore.backupPlayback(context, AccountScope.current))
             .put("prefs", JSONObject()
                 .put("appearance", settings.getString("appearance", ThemeStore.LIGHT))
-                .put("course_order", settings.getString("course_order", "ASCENDING")))
+                .put("course_order", ThemeStore.courseOrder(context)))
         return JSONObject()
             .put("schemaVersion", SCHEMA)
             .put("app", APP)
@@ -273,13 +274,15 @@ internal object BackupStore {
         data.optJSONObject("playbackOrder")?.let { orders ->
             prefs(context, "playback_order").edit {
                 orders.keys().forEach { key ->
-                    val order = orders.optString(key)
-                    if (order == "ASCENDING" || order == "DESCENDING") {
+                    val order = orders.opt(key) as? String
+                    if (key.isNotBlank() && order != null && SortStore.isPlaybackOrder(order)) {
                         putString(AccountScope.key(key, account), order)
                     }
                 }
             }
         }
+
+        data.optJSONObject("playbackSort")?.let { SortStore.restorePlayback(context, it, account) }
 
         data.optJSONObject("prefs")?.let { settings ->
             prefs(context, PREFS_SETTINGS).edit {
@@ -315,11 +318,13 @@ internal object BackupStore {
                         val duration = maxOf(existing.optInt("duration"), item.optInt("duration"))
                         val completed = existing.optBoolean("completed") || item.optBoolean("completed")
                         val updatedAt = maxOf(existing.optLong("updatedAt"), item.optLong("updatedAt"))
+                        val modifiedAt = maxOf(existing.optLong("modifiedAt"), item.optLong("modifiedAt"))
                         merged[key] = (if (updatedAt == item.optLong("updatedAt")) item else existing).apply {
                             put("seconds", seconds)
                             put("completed", completed)
                             put("duration", duration)
                             put("updatedAt", updatedAt)
+                            if (modifiedAt > 0) put("modifiedAt", modifiedAt)
                         }
                     }
                 }

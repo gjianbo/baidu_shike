@@ -156,7 +156,7 @@ internal fun MainActivity.updateNav() {
     refreshButton.visibility = if (browsing) View.VISIBLE else View.GONE
     searchButton.visibility = if (hasActiveSession() &&
         (screen == Screen.DISK || (screen == Screen.GROUPS && gid.isNotEmpty() &&
-            currentPageProvider() == SourceProvider.BAIDU && !isContactSource(gid)))
+            currentPageProvider() == SourceProvider.BAIDU && sourceKindOf(gid) == SourceKind.GROUP))
     ) View.VISIBLE else View.GONE
     if (fabReady()) {
         val diskManage = screen == Screen.DISK && hasActiveSession()
@@ -439,6 +439,11 @@ internal fun MainActivity.renderBatchBar() {
         batchCopy.visibility = if (diskSel) View.VISIBLE else View.GONE
         batchDelete.visibility = if (diskSel) View.VISIBLE else View.GONE
         batchFav.visibility = if (diskSel) View.GONE else View.VISIBLE
+        batchDownload.visibility = if (selectionMode && visibleSelectionEntries().any(DownloadLogic::canDownload)) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
     }
     batchBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
     if (selectionMode) {

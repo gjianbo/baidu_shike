@@ -388,76 +388,92 @@
                     </HorizontalScrollView>
                 </LinearLayout>
 
-                <LinearLayout
+                <HorizontalScrollView
                     android:id="@+id/batchBar"
                     android:layout_width="match_parent"
                     android:layout_height="48dp"
                     android:background="@color/surface2"
-                    android:gravity="center_vertical"
-                    android:orientation="horizontal"
+                    android:fillViewport="true"
+                    android:scrollbars="none"
                     android:paddingLeft="@dimen/page_pad"
                     android:paddingRight="@dimen/page_pad"
                     android:visibility="gone">
 
-                    <TextView
-                        android:id="@+id/batchCount"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="已选 0 项"
-                        android:textColor="@color/ink"
-                        android:textSize="13sp"
-                        android:textStyle="bold" />
-
-                    <TextView
-                        android:id="@+id/batchAll"
-                        style="@style/HeadAction"
+                    <LinearLayout
                         android:layout_width="wrap_content"
-                        android:layout_height="40dp"
-                        android:text="全选" />
+                        android:layout_height="match_parent"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
 
-                    <TextView
-                        android:id="@+id/batchMove"
-                        style="@style/HeadAction"
-                        android:layout_width="wrap_content"
-                        android:layout_height="40dp"
-                        android:text="移动"
-                        android:visibility="gone" />
+                        <TextView
+                            android:id="@+id/batchCount"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:paddingEnd="8dp"
+                            android:text="已选 0 项"
+                            android:textColor="@color/ink"
+                            android:textSize="13sp"
+                            android:textStyle="bold" />
 
-                    <TextView
-                        android:id="@+id/batchCopy"
-                        style="@style/HeadAction"
-                        android:layout_width="wrap_content"
-                        android:layout_height="40dp"
-                        android:layout_marginStart="8dp"
-                        android:text="复制"
-                        android:visibility="gone" />
+                        <TextView
+                            android:id="@+id/batchAll"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:text="全选" />
 
-                    <TextView
-                        android:id="@+id/batchDelete"
-                        style="@style/HeadAction"
-                        android:layout_width="wrap_content"
-                        android:layout_height="40dp"
-                        android:layout_marginStart="8dp"
-                        android:text="删除"
-                        android:visibility="gone" />
+                        <TextView
+                            android:id="@+id/batchMove"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:text="移动"
+                            android:visibility="gone" />
 
-                    <TextView
-                        android:id="@+id/batchFav"
-                        style="@style/HeadAction"
-                        android:layout_width="wrap_content"
-                        android:layout_height="40dp"
-                        android:layout_marginStart="8dp"
-                        android:text="收藏" />
+                        <TextView
+                            android:id="@+id/batchCopy"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:layout_marginStart="8dp"
+                            android:text="复制"
+                            android:visibility="gone" />
 
-                    <TextView
-                        android:id="@+id/batchDone"
-                        style="@style/HeadAction"
-                        android:layout_width="wrap_content"
-                        android:layout_height="40dp"
-                        android:layout_marginStart="8dp"
-                        android:text="完成" />
-                </LinearLayout>
+                        <TextView
+                            android:id="@+id/batchDelete"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:layout_marginStart="8dp"
+                            android:text="删除"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/batchFav"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:layout_marginStart="8dp"
+                            android:text="收藏" />
+
+                        <TextView
+                            android:id="@+id/batchDownload"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:layout_marginStart="8dp"
+                            android:text="下载"
+                            android:visibility="gone" />
+
+                        <TextView
+                            android:id="@+id/batchDone"
+                            style="@style/HeadAction"
+                            android:layout_width="wrap_content"
+                            android:layout_height="40dp"
+                            android:layout_marginStart="8dp"
+                            android:text="完成" />
+                    </LinearLayout>
+                </HorizontalScrollView>
 
                 <TextView
                     android:id="@+id/status"

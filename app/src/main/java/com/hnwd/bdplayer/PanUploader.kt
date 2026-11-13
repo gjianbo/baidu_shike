@@ -1,7 +1,6 @@
 package com.hnwd.bdplayer
 
 import android.content.Context
-import android.webkit.CookieManager
 import android.webkit.WebSettings
 import okhttp3.Call
 import okhttp3.FormBody
@@ -16,6 +15,7 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -34,34 +34,37 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * 与 [UploadLogic]（纯规划）和 [UploadSection]（编排）严格分开，便于单点替换。
  */
-internal class PanUploader(private val context: Context) {
+internal class PanUploader(context: Context, private val session: TransferSession) {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(90, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+    private val commitClient = client.newBuilder().retryOnConnectionFailure(false).followRedirects(false).build()
     private val currentCall = AtomicReference<Call?>(null)
+    @Volatile private var cancelled = false
     private val userAgent = WebSettings.getDefaultUserAgent(context)
 
-    private val cookie: String
-        get() = CookieManager.getInstance().getCookie("https://pan.baidu.com").orEmpty()
-
     fun cancel() {
+        cancelled = true
         currentCall.getAndSet(null)?.cancel()
     }
 
     private fun Request.Builder.common(pcs: Boolean = false): Request.Builder {
         header("User-Agent", userAgent)
-        header("Cookie", cookie)
+        header("Cookie", session.cookie)
         if (!pcs) header("Referer", "https://pan.baidu.com/disk/main")
         return this
     }
 
     private fun enc(value: String): String = URLEncoder.encode(value, "UTF-8")
 
-    private fun execute(request: Request): JSONObject {
-        val call = client.newCall(request)
+    class Rejected(val errno: Int) : IOException(UploadLogic.uploadError(errno, "网盘请求"))
+
+    private fun execute(request: Request, transport: OkHttpClient = client): JSONObject {
+        val call = transport.newCall(request)
         currentCall.set(call)
+        if (cancelled) call.cancel()
         try {
             call.execute().use { response ->
                 val body = response.body?.string().orEmpty()
@@ -70,7 +73,7 @@ internal class PanUploader(private val context: Context) {
                     .getOrElse { throw IOException("网盘响应不是 JSON：${body.take(160)}") }
                 val errno = json.optInt("errno", Int.MIN_VALUE)
                 if (errno != Int.MIN_VALUE && errno != 0) {
-                    throw IOException(UploadLogic.uploadError(errno, "网盘请求"))
+                    throw Rejected(errno)
                 }
                 return json
             }
@@ -80,12 +83,16 @@ internal class PanUploader(private val context: Context) {
     }
 
     /** bdstoken + 账号等级；等级决定单文件上限。 */
-    fun session(): Pair<String, Int> {
-        val fields = enc("[\"bdstoken\",\"is_vip\"]")
+    fun session(expectedAccount: String): Pair<String, Int> {
+        val fields = enc("[\"bdstoken\",\"is_vip\",\"uk\"]")
         val request = Request.Builder()
             .url("https://pan.baidu.com/api/gettemplatevariable?$COMMON&fields=$fields")
             .get().common().build()
-        return UploadLogic.parseSession(execute(request))
+        val json = execute(request)
+        TransferSession.requireAccount(
+            SourceProvider.BAIDU, expectedAccount, json.optJSONObject("result")?.optString("uk").orEmpty(),
+        )
+        return UploadLogic.parseSession(json)
     }
 
     /** 动态上传域名；实测返回 host=c.pcs.baidu.com，每次可能不同。 */
@@ -98,16 +105,17 @@ internal class PanUploader(private val context: Context) {
         return UploadLogic.parseUploadHost(json)
     }
 
-    /** 按 4MB 分片算本地 MD5，供 precreate 的 block_list 使用。源文件已在私有缓存里。 */
-    fun localMd5Parts(file: File, size: Long): List<String> {
+    /** 按上传规划算本地分片 MD5，供 precreate 的 block_list 使用。 */
+    fun localMd5Parts(file: File, plan: UploadLogic.Plan, checkActive: () -> Unit): List<String> {
         val digest = MessageDigest.getInstance("MD5")
         val buffer = ByteArray(64 * 1024)
-        val result = ArrayList<String>(UploadLogic.chunkCount(size))
+        val result = ArrayList<String>(plan.chunks)
         FileInputStream(file).use { stream ->
-            for (index in 0 until UploadLogic.chunkCount(size)) {
-                var remaining = UploadLogic.chunkAt(size, index).length
+            for (index in 0 until plan.chunks) {
+                var remaining = UploadLogic.chunkAt(plan.size, index, plan.chunkBytes).length
                 digest.reset()
                 while (remaining > 0) {
+                    checkActive()
                     val count = stream.read(buffer, 0, minOf(buffer.size, remaining))
                     if (count < 0) throw IOException("文件在读取过程中变短")
                     digest.update(buffer, 0, count)
@@ -143,14 +151,8 @@ internal class PanUploader(private val context: Context) {
             override fun contentType(): MediaType? = "application/octet-stream".toMediaType()
             override fun contentLength(): Long = length.toLong()
             override fun writeTo(sink: BufferedSink) {
-                FileInputStream(source).use { input ->
-                    val jump = ByteArray(64 * 1024)
-                    var skip = offset
-                    while (skip > 0) {
-                        val count = input.read(jump, 0, minOf(jump.size.toLong(), skip).toInt())
-                        if (count < 0) throw IOException("文件已变短")
-                        skip -= count
-                    }
+                RandomAccessFile(source, "r").use { input ->
+                    input.seek(offset)
                     val buffer = ByteArray(64 * 1024)
                     var remaining = length
                     while (remaining > 0) {
@@ -183,28 +185,9 @@ internal class PanUploader(private val context: Context) {
         val request = Request.Builder()
             .url("https://pan.baidu.com/api/create?$COMMON&channel=chunlei&bdstoken=${enc(token)}&isdir=0")
             .post(form).common().build()
-        return execute(request).optLong("fs_id", -1L)
-    }
-
-    /**
-     * create 的 errno 0 不代表一定落盘，回读目录确认。
-     *
-     * 同名冲突时 rtype=1 会让服务端把文件重命名（path 不再是原来的值），只按 path 找会
-     * 把「已经成功落盘」误判成失败。优先用 create 返回的 fs_id 精确匹配，path 只作兜底。
-     */
-    fun exists(token: String, path: String, fsId: Long): Boolean {
-        val dir = PanApi.parentPath(path)
-        val request = Request.Builder()
-            .url(
-                "https://pan.baidu.com/api/list?$COMMON&channel=chunlei&bdstoken=${enc(token)}" +
-                    "&dir=${enc(dir)}&order=time&desc=1&num=100&page=1",
-            )
-            .get().common().build()
-        val list = execute(request).optJSONArray("list") ?: return false
-        return (0 until list.length()).any {
-            val item = list.optJSONObject(it) ?: return@any false
-            (fsId > 0 && item.optLong("fs_id", -1L) == fsId) || item.optString("path") == path
-        }
+        val response = execute(request, commitClient)
+        check(response.optInt("errno", -1) == 0) { "未收到网盘提交确认" }
+        return response.optLong("fs_id", -1L)
     }
 
     private companion object {

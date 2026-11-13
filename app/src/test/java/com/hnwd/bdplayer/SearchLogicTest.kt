@@ -32,6 +32,19 @@ class SearchLogicTest {
     }
 
     @Test
+    fun `网盘目录来源不参与全局搜索`() {
+        val sources = listOf(
+            ShareSource("12345", "群 A"),
+            ShareSource(directorySourceId("/课程资料"), "课程资料"),
+            ShareSource("contact-678", "联系人"),
+        )
+        assertEquals(
+            listOf(SearchTarget(SearchScope.GROUP, "12345", "群 A")),
+            searchGroupTargets(sources),
+        )
+    }
+
+    @Test
     fun `没有来源时可搜索群组为空`() {
         assertTrue(searchGroupTargets(emptyList()).isEmpty())
     }

@@ -211,12 +211,13 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
         submit()
     }
 
-    private fun showCaptcha(
+    internal fun showCaptcha(
         lane: RequestLane,
         captcha: PanApi.MediaCaptcha,
         message: String,
         isCurrent: () -> Boolean,
         onCancelled: (String) -> Unit,
+        cookie: String? = null,
         onAnswer: (String) -> Unit,
     ) {
         if (captchaBlocked({ host.isVisible() }, { captchaDialog != null })) {
@@ -271,7 +272,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
         }
 
         val url = captcha.image.toString()
-        val cookie = CookieManager.getInstance().getCookie(url)
+        val requestCookie = cookie ?: CookieManager.getInstance().getCookie(url)
         val userAgent = host.userAgent()
         AppIo.execute {
             val bitmap = runCatching {
@@ -282,7 +283,7 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                     connection.readTimeout = 10_000
                     connection.useCaches = false
                     connection.setRequestProperty("User-Agent", userAgent)
-                    if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
+                    if (!requestCookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", requestCookie)
                     check(connection.responseCode == 200)
                     connection.inputStream.use { BitmapFactory.decodeStream(it) }
                 } finally {

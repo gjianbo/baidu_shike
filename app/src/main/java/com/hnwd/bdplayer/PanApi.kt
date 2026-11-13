@@ -2,6 +2,7 @@ package com.hnwd.bdplayer
 
 import android.net.Uri
 import android.util.Base64
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.security.MessageDigest
 import org.json.JSONArray
@@ -12,6 +13,15 @@ internal enum class EntryOrigin { GROUP, DISK }
 
 internal const val DISK_SOURCE_ID = "disk"
 internal const val CONTACT_SOURCE_PREFIX = "contact-"
+
+/**
+ * 网盘目录来源：与 contact- 平级的裸 id 前缀，后接 UTF-8 URL 编码的网盘绝对路径。
+ * 路径全部信息都编码进 id，因此备份恢复不依赖额外字段即可还原。
+ */
+internal const val DIR_SOURCE_PREFIX = "dir-"
+
+/** 来源的三种类型。群组 / 联系人保持原有链路不变，网盘目录为并列新增的第三类。 */
+internal enum class SourceKind { GROUP, CONTACT, DIRECTORY }
 
 /** 来源所属网盘。首版只支持百度 / 夸克两种。 */
 internal enum class SourceProvider { BAIDU, QUARK }
@@ -41,14 +51,43 @@ internal fun providerOfSourceId(id: String): SourceProvider =
 
 internal fun isContactSource(id: String) = rawSourceId(id).startsWith(CONTACT_SOURCE_PREFIX)
 
+internal fun isDirectorySource(id: String) = rawSourceId(id).startsWith(DIR_SOURCE_PREFIX)
+
+/** 从 id 判断类型。夸克 fid 无法从字面区分，交给 [inferSourceKind] 结合 provider 判。 */
+internal fun sourceKindOf(id: String): SourceKind = when {
+    isDirectorySource(id) -> SourceKind.DIRECTORY
+    isContactSource(id) -> SourceKind.CONTACT
+    else -> SourceKind.GROUP
+}
+
+/** 老备份 / 老 prefs 没有 kind 字段时按 id + provider 推断；夸克来源本来就是勾目录。 */
+internal fun inferSourceKind(id: String, provider: SourceProvider): SourceKind =
+    if (provider == SourceProvider.QUARK) SourceKind.DIRECTORY else sourceKindOf(id)
+
+/** 网盘绝对路径 → 来源 id。 */
+internal fun directorySourceId(path: String): String =
+    DIR_SOURCE_PREFIX + URLEncoder.encode(path, "UTF-8")
+
+/** 来源 id → 网盘绝对路径；非法编码返回空串，由调用方判空。 */
+internal fun directorySourcePath(id: String): String = runCatching {
+    URLDecoder.decode(rawSourceId(id).removePrefix(DIR_SOURCE_PREFIX), "UTF-8")
+}.getOrDefault("")
+
 /**
  * 来源 id 合法性：带前缀时按前缀校验本体，无前缀时走老规则。
- * 百度：可选 contact- 前缀 + 1~24 位数字；夸克：8~64 位十六进制 fid。
+ * 百度：群组为 1~24 位数字，联系人为 contact- + 数字，网盘目录为 dir- + 编码后的绝对路径；
+ * 夸克：8~64 位十六进制 fid。
  */
 internal fun isShareSourceId(id: String): Boolean {
     val raw = rawSourceId(id)
     return when {
         id.startsWith(PREFIX_QUARK) -> raw.matches(Regex("[0-9a-fA-F]{8,64}"))
+        isDirectorySource(id) -> {
+            val path = directorySourcePath(id)
+            // 根目录 "/" 是合法来源（目录浏览器允许关注根目录）；空串 / 相对路径 / 非法编码
+            // 解码后都不以 "/" 开头，会被拒绝。不要用 length > 1，会把 "/" 一起误杀。
+            path.startsWith("/") && !path.contains('\u0000')
+        }
         raw.matches(Regex("(?:contact-)?[0-9]{1,24}")) -> true
         else -> false
     }
@@ -67,13 +106,14 @@ internal data class PanEntry(
     val md5: String = "",
     /** 列表自带的免 Cookie 大图地址，缺失时可按文件取址。 */
     val previewUrl: String = "",
+    val modifiedAt: Long = 0,
 ) {
     val sourceId: String get() = if (origin == EntryOrigin.DISK) DISK_SOURCE_ID else gid
     val isDisk: Boolean get() = origin == EntryOrigin.DISK
     // 百度个人网盘的 gid 为空；夸克个人网盘的条目（含已保存的收藏）使用 disk。
     val provider: SourceProvider get() =
         if (isDisk && gid == DISK_SOURCE_ID) SourceProvider.QUARK else providerOfSourceId(gid)
-    val isContact: Boolean get() = isContactSource(gid)
+    val isContact: Boolean get() = sourceKindOf(gid) == SourceKind.CONTACT
 
     fun contactRecipient(viewer: String): String =
         if (owner == viewer) rawSourceId(gid).removePrefix(CONTACT_SOURCE_PREFIX) else viewer
@@ -122,6 +162,7 @@ internal fun quarkEntry(
     directory = file.directory,
     origin = origin,
     previewUrl = file.previewUrl,
+    modifiedAt = file.mtime,
 )
 
 internal data class PanSearchHit(
@@ -191,7 +232,7 @@ internal object PanApi {
     )
 
     fun roots(gid: String, cursor: String = ""): String {
-        if (isContactSource(gid)) {
+        if (sourceKindOf(gid) == SourceKind.CONTACT) {
             val query = mutableListOf("to_uk" to rawSourceId(gid).removePrefix(CONTACT_SOURCE_PREFIX), "type" to "2")
             if (cursor.isNotEmpty()) query.add("cursor" to cursor)
             return api("/mbox/msg/sessioninfo", *query.toTypedArray())
@@ -385,6 +426,7 @@ internal object PanApi {
             size = item.optString("size"), directory = item.optInt("isdir") == 1,
             origin = EntryOrigin.DISK, md5 = item.optString("md5"),
             previewUrl = previewUrlOf(item),
+            modifiedAt = item.optLong("server_mtime"),
         )
     }
 
@@ -399,9 +441,13 @@ internal object PanApi {
     fun diskAudioPlaylist(entry: PanEntry, token: String): Uri =
         diskStreaming(entry, "M3U8_MP3_128", token)
 
-    fun diskDownloadSession() = api(
+    fun diskDownloadSession(includeAccount: Boolean = false) = api(
         "/api/gettemplatevariable",
-        "fields" to "[\"sign1\",\"sign2\",\"sign3\",\"timestamp\",\"is_vip\"]",
+        "fields" to if (includeAccount) {
+            "[\"sign1\",\"sign2\",\"sign3\",\"timestamp\",\"is_vip\",\"uk\",\"bdstoken\"]"
+        } else {
+            "[\"sign1\",\"sign2\",\"sign3\",\"timestamp\",\"is_vip\"]"
+        },
     )
 
     fun diskDownload(entry: PanEntry, token: String, sign: String, timestamp: String, vip: String) = api(
@@ -685,7 +731,7 @@ internal object PanApi {
 
     fun parseRoots(json: JSONObject, gid: String): List<PanEntry> {
         val records = json.getJSONObject("records")
-        if (isContactSource(gid)) {
+        if (sourceKindOf(gid) == SourceKind.CONTACT) {
             // 联系人文件按消息分组返回，同一份文件常出现在多条消息里（重复发送 / 多次转发）。
             // 去重必须跨消息做，否则列表里会出现两行同一个文件、点哪行都进同一个目录。
             // key 用「发送者 + 文件 id」：fs_id 只在自己网盘内唯一，不同发送者可能撞号。
@@ -728,6 +774,7 @@ internal object PanApi {
             readablePath(item.getString("path")), item.optString("size", meta?.optString("size") ?: ""),
             item.getString("isdir") == "1", md5 = item.optString("md5", meta?.optString("md5") ?: ""),
             previewUrl = previewUrlOf(item),
+            modifiedAt = item.optLong("server_mtime", meta?.optLong("server_mtime") ?: 0L),
         )
     }
 

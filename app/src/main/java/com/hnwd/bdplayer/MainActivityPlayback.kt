@@ -91,7 +91,7 @@ internal fun MainActivity.syncAudioAnchor(player: Player) {
 
 internal fun MainActivity.confirmPlayback(entry: PanEntry) {
     pendingQueue?.takeIf { sameEntry(it.entry, entry) }?.let {
-        PlaybackQueueState.entries = it.entries
+        PlaybackQueueState.updateEntries(it.sourceEntries, playbackOrder(entry, it.listKey))
         PlaybackQueueState.listKey = it.listKey
         pendingQueue = null
     }
@@ -1091,9 +1091,7 @@ internal fun MainActivity.closeAudioPage() {
 
 internal fun MainActivity.stopBackgroundAudio() {
     pendingQueue = null
-    PlaybackQueueState.anchor = null
-    PlaybackQueueState.entries = emptyList()
-    PlaybackQueueState.listKey = null
+    PlaybackQueueState.clear()
     diskRenewAttempts = 0
     lastDiskRenewAt = 0L
     renderCourseSwitch()

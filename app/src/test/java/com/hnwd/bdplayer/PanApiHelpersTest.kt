@@ -65,6 +65,58 @@ class PanApiHelpersTest {
         assertFalse(isShareSourceId("quark:xyz"))      // 夸克侧只认十六进制
     }
 
+    // ===================== 网盘目录来源（第三类） =====================
+
+    @Test
+    fun `网盘目录 id 往返保留中文空格与多级路径`() {
+        val path = "/课程资料/2026 归档/第 1 章"
+        val id = directorySourceId(path)
+        assertTrue(id.startsWith(DIR_SOURCE_PREFIX))
+        assertEquals(path, directorySourcePath(id))
+        assertTrue(isShareSourceId(id))
+    }
+
+    @Test
+    fun `根目录是合法的网盘目录来源`() {
+        val id = directorySourceId("/")
+        assertEquals("/", directorySourcePath(id))
+        assertTrue(isShareSourceId(id))
+        assertTrue(isShareSourceId(qualifySourceId(SourceProvider.BAIDU, id)))
+    }
+
+    @Test
+    fun `带 provider 前缀的目录 id 也能还原`() {
+        val id = qualifySourceId(SourceProvider.BAIDU, directorySourceId("/音频库"))
+        assertEquals("/音频库", directorySourcePath(id))
+        assertTrue(isDirectorySource(id))
+        assertTrue(isShareSourceId(id))
+    }
+
+    @Test
+    fun `三类来源按 id 分类`() {
+        assertEquals(SourceKind.GROUP, sourceKindOf("123456"))
+        assertEquals(SourceKind.CONTACT, sourceKindOf("contact-123"))
+        assertEquals(SourceKind.DIRECTORY, sourceKindOf(directorySourceId("/A")))
+        assertEquals(SourceKind.CONTACT, sourceKindOf("baidu:contact-9"))
+        assertEquals(SourceKind.DIRECTORY, sourceKindOf("baidu:" + directorySourceId("/A")))
+    }
+
+    @Test
+    fun `老数据推断类型且夸克来源恒为目录`() {
+        assertEquals(SourceKind.GROUP, inferSourceKind("123456", SourceProvider.BAIDU))
+        assertEquals(SourceKind.CONTACT, inferSourceKind("contact-123", SourceProvider.BAIDU))
+        assertEquals(SourceKind.DIRECTORY, inferSourceKind("quark:a1b2c3d4", SourceProvider.QUARK))
+    }
+
+    @Test
+    fun `畸形目录 id 被来源校验拒绝`() {
+        assertFalse(isShareSourceId("dir-"))                       // 空路径
+        assertFalse(isShareSourceId("dir-123456"))                // 解码后是相对路径
+        assertFalse(isShareSourceId("dir-%E4%B8%AD%E6%96%87"))    // 解码后不是绝对路径
+        assertFalse(isShareSourceId("dir-%ZZ"))                   // 非法百分号编码
+        assertTrue(isShareSourceId("dir-%2F%E8%AF%BE%E7%A8%8B")) // /课程
+    }
+
     // ===================== 路径 =====================
 
     @Test

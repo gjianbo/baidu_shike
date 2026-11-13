@@ -17,6 +17,25 @@ import org.junit.Test
  */
 class BackupStoreValidationTest {
 
+    @Test
+    fun playbackSortBackupRoundTripsNewestAndKeepsAudioAndVideoSeparate() {
+        val audioKey = "play:AUDIO:" + AccountScope.key("dir:lessons", "10086")
+        val videoKey = "play:VIDEO:" + AccountScope.key("dir:lessons", "10086")
+        val settings = mapOf(
+            audioKey to CourseOrder.NEWEST.name,
+            videoKey to CourseOrder.NETWORK.name,
+            "play:AUDIO:" + AccountScope.key("dir:lessons", "20086") to CourseOrder.DESCENDING.name,
+            "list:" + AccountScope.key("dir:lessons", "10086") to CourseOrder.ASCENDING.name,
+        )
+        val backup = SortStore.encodePlaybackBackup(settings, "10086")
+        backup.getJSONObject("AUDIO").put("dir:invalid", "UNKNOWN")
+        assertEquals(
+            mapOf(audioKey to CourseOrder.NEWEST.name, videoKey to CourseOrder.NETWORK.name),
+            SortStore.playbackBackupEntries(backup, "10086"),
+        )
+        assertTrue(SortStore.isPlaybackOrder("NEWEST"))
+    }
+
     private fun favorite(
         gid: String = "1001",
         message: String = "m1",
@@ -56,6 +75,29 @@ class BackupStoreValidationTest {
     @Test
     fun `老版本 schema 仍然兼容`() {
         assertTrue(BackupStore.valid(payload(schemaVersion = 1)))
+    }
+
+    @Test
+    fun `网盘目录来源可以通过备份校验`() {
+        val dirId = directorySourceId("/课程资料/2026")
+        val sources = JSONArray()
+            .put(JSONObject().put("id", "12345").put("name", "群 A"))
+            .put(JSONObject().put("id", dirId).put("name", "课程资料").put("kind", "DIRECTORY"))
+        assertTrue(BackupStore.valid(payload(sources = sources, groupId = dirId)))
+    }
+
+    @Test
+    fun `根目录网盘目录来源可以通过备份校验`() {
+        val rootId = directorySourceId("/")
+        val sources = JSONArray()
+            .put(JSONObject().put("id", rootId).put("name", "/").put("kind", "DIRECTORY"))
+        assertTrue(BackupStore.valid(payload(sources = sources, groupId = rootId)))
+    }
+
+    @Test
+    fun `畸形网盘目录来源被备份校验拒绝`() {
+        val sources = JSONArray().put(JSONObject().put("id", "dir-%ZZ").put("name", "坏目录"))
+        assertFalse(BackupStore.valid(payload(sources = sources)))
     }
 
     @Test

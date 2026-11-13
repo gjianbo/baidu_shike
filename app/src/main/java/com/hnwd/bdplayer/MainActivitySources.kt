@@ -70,7 +70,17 @@ internal fun MainActivity.storedShareSources(): List<ShareSource> {
         } else {
             SourceProvider.entries.firstOrNull { it.name == item.optString("provider") } ?: SourceProvider.BAIDU
         }
-        ShareSource(sourceId(provider, rawId), item.getString("name"), item.optString("session"), provider)
+        val normalizedId = sourceId(provider, rawId)
+        val kind = item.optString("kind").takeIf { it.isNotBlank() }
+            ?.let { runCatching { SourceKind.valueOf(it) }.getOrNull() }
+            ?: inferSourceKind(normalizedId, provider)
+        val path = item.optString("path").ifEmpty {
+            // 备份导出只带 id，恢复后靠 id 自包含的路径还原。
+            if (kind == SourceKind.DIRECTORY && provider == SourceProvider.BAIDU) {
+                directorySourcePath(normalizedId)
+            } else ""
+        }
+        ShareSource(normalizedId, item.getString("name"), item.optString("session"), provider, kind, path)
     }
 }
 
@@ -108,11 +118,7 @@ internal fun MainActivity.chooseSource() {
         title = "切换文件库",
         subtitle = "选择要浏览的来源（按网盘分组）",
         choices = ordered.map {
-            val meta = when (it.provider) {
-                SourceProvider.QUARK -> "夸克 · 监控目录"
-                SourceProvider.BAIDU -> if (isContactSource(it.id)) "百度 · 联系人" else "百度 · 群组"
-            }
-            SheetChoice(it.name, meta = meta, checked = it.id == gid, tag = it)
+            SheetChoice(it.name, meta = sourceMetaOf(it), checked = it.id == gid, tag = it)
         },
         onSelect = { choice ->
             (choice.tag as? ShareSource)?.let { selectSource(it) }
@@ -135,7 +141,7 @@ internal fun MainActivity.manageSources() {
         title = "添加 / 管理来源",
         subtitle = "选择来源所属网盘",
         choices = listOf(
-            SheetChoice("百度网盘", meta = "群组 / 联系人", tag = SourceProvider.BAIDU),
+            SheetChoice("百度网盘", meta = "群组 / 联系人 / 网盘目录", tag = SourceProvider.BAIDU),
             SheetChoice("夸克网盘", meta = "从根目录勾选监控目录", tag = SourceProvider.QUARK),
         ),
         onSelect = { choice ->
@@ -155,10 +161,98 @@ internal fun MainActivity.manageBaiduSources() {
     }
     showChoiceSheet(
         title = "管理百度来源",
-        subtitle = "勾选要在 App 中浏览的文件库",
-        choices = listOf(SheetChoice("群组"), SheetChoice("联系人")),
-        onSelect = { discoverSources(contacts = it.title == "联系人") },
+        subtitle = "选择要添加或管理的来源类型",
+        choices = listOf(
+            SheetChoice("群组", meta = "从群组列表勾选", tag = BAIDU_SOURCE_GROUP),
+            SheetChoice("联系人", meta = "从联系人列表勾选", tag = BAIDU_SOURCE_CONTACT),
+            SheetChoice("网盘目录", meta = "从根目录勾选一级目录", tag = BAIDU_SOURCE_DIRECTORY),
+        ),
+        onSelect = { choice ->
+            when (choice.tag) {
+                BAIDU_SOURCE_DIRECTORY -> manageBaiduDirectorySources()
+                BAIDU_SOURCE_CONTACT -> discoverSources(contacts = true)
+                BAIDU_SOURCE_GROUP -> discoverSources(contacts = false)
+            }
+        },
     )
+}
+
+private const val BAIDU_SOURCE_GROUP = "baidu-group"
+private const val BAIDU_SOURCE_CONTACT = "baidu-contact"
+private const val BAIDU_SOURCE_DIRECTORY = "baidu-directory"
+
+/**
+ * 网盘目录来源：只列我的百度网盘根目录下的**一级子目录**，多选勾选，最多
+ * [MAX_BAIDU_DIR_SOURCES] 个。与夸克监控目录同形态 —— 不递归、不下钻、不选根目录本身。
+ */
+internal fun MainActivity.manageBaiduDirectorySources() {
+    if (!ready || !hasVerifiedAccount()) {
+        toast("请先确认百度网盘登录")
+        return
+    }
+    ensureBdstoken(
+        onReady = { token ->
+            val request = BaiduPersonalDrive(token).list("/", 1, 200)
+            load(
+                // 不用 LIST：load() 对 LIST 会写 status.text 并 ++requestId，会与首页
+                // startHomeCheck（默认 LIST）抢通道，导致目录请求被顶掉、状态栏残留提示。
+                request.url, lane = RequestLane.COURSE,
+                statusHint = null,
+                onCancelled = { toast("读取目录已取消") },
+                onFailure = { toast("读取网盘目录失败，请重试") },
+            ) { json ->
+                val page = runCatching { request.decode(json) }.getOrNull()
+                if (page == null) {
+                    toast("解析网盘目录失败")
+                    return@load
+                }
+                val dirs = page.items.filter { it.directory }
+                if (dirs.isEmpty()) {
+                    toast("我的网盘根目录没有子文件夹")
+                    return@load
+                }
+                showBaiduDirectorySheet(dirs)
+            }
+        },
+        onFailure = { toast("无法获取网盘会话，请重新登录") },
+    )
+}
+
+/** 与 [manageQuarkSources] 同形态：根目录一层多选，已配置的一级目录预勾选。 */
+private fun MainActivity.showBaiduDirectorySheet(dirs: List<PanEntry>) {
+    val configuredIds = shareSources().filter {
+        it.provider == SourceProvider.BAIDU && sourceKindOf(it.id) == SourceKind.DIRECTORY
+    }.map { it.id }.toSet()
+    showChoiceSheet(
+        title = "百度网盘目录",
+        subtitle = "勾选要关注的目录（最多 $MAX_BAIDU_DIR_SOURCES 个，仅根目录一层）",
+        choices = dirs.map { entry ->
+            SheetChoice(
+                entry.name,
+                meta = "百度 · 目录",
+                checked = directorySourceId(entry.path) in configuredIds,
+                tag = entry,
+            )
+        },
+        multi = true,
+        confirmLabel = "保存",
+        onConfirm = { selected ->
+            val paths = selected.mapNotNull { it.tag as? PanEntry }.map { it.path }
+            saveBaiduDirectorySources(directorySelectionOf(paths))
+        },
+    )
+}
+
+private fun MainActivity.saveBaiduDirectorySources(selected: Map<String, String>) {
+    val merged = mergeDirectorySources(shareSources(), selected)
+    // 第 4 步接入目录浏览链路前不主动切到目录来源，避免活跃来源落进旧群共享链路；
+    // 只有当前活跃来源恰好被这次取消勾选时才回退到一个仍存在的来源。
+    val next = gid.takeIf { current -> merged.any { it.id == current } }
+        ?: merged.firstOrNull { sourceKindOf(it.id) != SourceKind.DIRECTORY }?.id
+        ?: merged.firstOrNull()?.id.orEmpty()
+    saveShareSources(merged, next)
+    if (next != gid) activateGroup(next) else refresh()
+    toast("已保存 ${selected.size} 个网盘目录")
 }
 
 
@@ -205,7 +299,7 @@ internal fun MainActivity.manageQuarkSources() {
                         val others = shareSources().filter { it.provider != SourceProvider.QUARK }
                         val quark = picked.map {
                             ShareSource(qualifySourceId(SourceProvider.QUARK, it.id), it.name,
-                                provider = SourceProvider.QUARK)
+                                provider = SourceProvider.QUARK, kind = SourceKind.DIRECTORY)
                         }
                         val merged = others + quark
                         val next = gid.takeIf { current -> merged.any { it.id == current } }
@@ -255,7 +349,8 @@ internal fun MainActivity.discoverSources(contacts: Boolean) {
                 val sourceId = if (contacts) CONTACT_SOURCE_PREFIX + id else id
                 val name = if (contacts) sequenceOf("remark", "display_name", "nick_name", "uname")
                     .filterNot(item::isNull).map { item.optString(it, "") }.firstOrNull { it.isNotBlank() } else item.optString("name")
-                candidates[sourceId] = ShareSource(sourceId, name?.takeIf { it.isNotBlank() } ?: "$label $id")
+                candidates[sourceId] = ShareSource(sourceId, name?.takeIf { it.isNotBlank() } ?: "$label $id",
+                    kind = if (contacts) SourceKind.CONTACT else SourceKind.GROUP)
             }
             val nextStart = start + records.length()
             val hasMore = if (!json.isNull("has_more")) PanApi.hasMore(json)
@@ -288,14 +383,12 @@ internal fun MainActivity.showSourcePicker(account: String, contacts: Boolean, d
     status.text = ""
     val label = if (contacts) "联系人" else "群组"
     val existing = shareSources().associateBy { it.id }
-    val candidates = (discovered + existing.values.filter {
-        it.provider == SourceProvider.BAIDU && isContactSource(it.id) == contacts
-    })
-        .distinctBy { it.id }
+    val candidates = sourcePickerCandidates(discovered, existing.values.toList(), contacts)
     if (candidates.isEmpty()) {
         AlertDialog.Builder(this)
             .setTitle("网盘${label}")
-            .setMessage("这个账号的${label}列表为空。")
+            .setMessage("这个账号的${label}列表为空。也可以直接关注我的网盘目录。")
+            .setNegativeButton("选择网盘目录") { _, _ -> manageBaiduDirectorySources() }
             .setNeutralButton("打开网页通讯录") { _, _ -> openContacts() }
             .setPositiveButton("关闭", null)
             .show()
@@ -335,7 +428,9 @@ internal fun MainActivity.saveShareSources(sources: List<ShareSource>, activeGro
                 .put("id", it.id)
                 .put("name", it.name)
                 .put("session", it.sessionUrl)
-                .put("provider", it.provider.name),
+                .put("provider", it.provider.name)
+                .put("kind", it.kind.name)
+                .put("path", it.path),
         )
     }
     getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
@@ -382,7 +477,8 @@ internal fun MainActivity.associateCurrentSession() {
         .setNegativeButton("取消", null)
         .setPositiveButton("保存") { _, _ ->
             if (account != verifiedAccount || account != AccountScope.current) return@setPositiveButton
-            val source = ShareSource(group, name.text.toString().trim().ifEmpty { defaultName })
+            val source = ShareSource(group, name.text.toString().trim().ifEmpty { defaultName },
+                kind = SourceKind.GROUP)
             saveShareSources(shareSources().filterNot { it.id == group } + source, group)
             activateGroup(group, returnFromWeb = true)
         }.show()
@@ -393,7 +489,7 @@ internal fun MainActivity.activateGroup(group: String, returnFromWeb: Boolean = 
     clearSelectionIfActive()
     val changed = group != gid
     setActiveGroup(group)
-    if (!returnFromWeb && screen == Screen.GROUPS && isContactSource(group)) {
+    if (!returnFromWeb && screen == Screen.GROUPS && sourceKindOf(group) == SourceKind.CONTACT) {
         tabFolders.remove(Screen.HOME)
         tabScroll.remove(Screen.HOME)
         showScreen(Screen.HOME)

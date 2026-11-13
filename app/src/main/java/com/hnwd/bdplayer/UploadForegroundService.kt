@@ -41,31 +41,36 @@ internal class UploadForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // startForegroundService 后必须在 5 秒内进入前台，先做这一步再做别的。
-        startForeground(
-            NOTIFICATION_ID,
-            buildNotification(UploadCenter.state),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-        )
+        try {
+            startForeground(
+                NOTIFICATION_ID,
+                buildNotification(UploadCenter.state),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } catch (error: IllegalStateException) {
+            UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (!UploadCenter.state.running) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (listener == null) {
             val observer: (UploadCenter.State) -> Unit = { state -> onState(state) }
             listener = observer
             UploadCenter.addListener(observer)
         }
-        when (intent?.action) {
-            ACTION_CANCEL -> UploadCenter.cancelCurrent(this)
-            ACTION_START -> {
-                // 队列由 UploadCenter 持有；本服务只是保活壳，不解析文件 Uri。
-                // startUpload 总是先 enqueue（running=true）再 startService，所以
-                // running=false 只可能是整批已结束或 START_STICKY 重建后的空进程 —— 直接退出，
-                // 避免挂一个没有任务的前台服务。
-                if (!UploadCenter.state.running) {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
-            }
-        }
-        return START_STICKY
+        if (intent?.action == ACTION_CANCEL) UploadCenter.cancelCurrent(this)
+        UploadCenter.onServiceReady(this)
+        return START_NOT_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        UploadCenter.stop(this, "后台上传时间已达系统上限，请返回应用后重试")
     }
 
     private fun onState(state: UploadCenter.State) {
@@ -122,6 +127,7 @@ internal class UploadForegroundService : Service() {
     override fun onDestroy() {
         listener?.let { UploadCenter.removeListener(it) }
         listener = null
+        // 若刚好有一条新的 ACTION_START 等待系统投递，由它重新启动队列。
         super.onDestroy()
     }
 

@@ -67,7 +67,7 @@ internal object ThemeStore {
 
     fun courseOrder(context: Context): String =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getString(KEY_SORT, "ASCENDING") ?: "ASCENDING"
+            .getString(KEY_SORT, null) ?: CourseOrder.NEWEST.name
 
     fun setCourseOrder(context: Context, value: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit {

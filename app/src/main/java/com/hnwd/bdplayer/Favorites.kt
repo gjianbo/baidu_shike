@@ -17,6 +17,7 @@ internal class Favorites(private val preferences: SharedPreferences) {
                 runCatching { EntryOrigin.valueOf(item.optString("origin", "GROUP")) }
                     .getOrDefault(EntryOrigin.GROUP),
                 item.optString("md5"),
+                modifiedAt = item.optLong("modifiedAt", 0),
             )
         }
     }.getOrDefault(emptyList())
@@ -73,7 +74,8 @@ internal class Favorites(private val preferences: SharedPreferences) {
                 .put("size", it.size)
                 .put("directory", it.directory)
                 .put("origin", it.origin.name)
-                .put("md5", it.md5))
+                .put("md5", it.md5)
+                .put("modifiedAt", it.modifiedAt))
         }
         preferences.edit { putString(storageKey(), data.toString()) }
     }

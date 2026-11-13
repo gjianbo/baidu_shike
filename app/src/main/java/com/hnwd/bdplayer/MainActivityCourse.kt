@@ -26,13 +26,8 @@ internal fun MainActivity.renderCourse() {
 internal fun MainActivity.listSortable(): Boolean = screen == Screen.DISK || screen == Screen.GROUPS
 
 
-/**
- * 批量选择入口是否露出。
- *
- * 网盘页的「选择」与批量操作条布局待重做，先隐藏入口；
- * 排序不受影响，网盘页只留排序一个按钮。
- */
-internal fun MainActivity.listSelectable(): Boolean = listSortable() && screen != Screen.DISK
+/** 网盘与群组目录提供文件多选。 */
+internal fun MainActivity.listSelectable(): Boolean = listSortable()
 
 
 internal fun MainActivity.addFilteredCourseRows(
@@ -75,9 +70,9 @@ internal fun MainActivity.addFilteredCourseRows(
         sortButton.visibility = if (sortable && entries.isNotEmpty() && !selectionMode) View.VISIBLE else View.GONE
         btnSelect.visibility = if (!selectionMode && listSelectable() && ordered.isNotEmpty()) View.VISIBLE else View.GONE
         rows.removeAllViews()
-        extendPlaybackQueue(ordered)
+        extendPlaybackQueue(matching)
         if (ordered.isEmpty() && entries.isNotEmpty()) rows.addView(label("当前已加载的内容中没有匹配项", 12f))
-        addCourseRows(rows, ordered, transferred)
+        addCourseRows(rows, ordered, transferred, playbackEntries = matching)
         renderCourseSwitch()
     }
     content.addView(rows)
@@ -132,7 +127,7 @@ internal fun MainActivity.showCourseSort() {
 
 
 internal fun MainActivity.playbackOrderKey(entry: PanEntry, listKey: String?): String? {
-    // 磁盘条目也优先用目录键，才能和列表页的排序对上；拿不到目录再退回路径。
+    // 优先用稳定的目录 ID，拿不到目录时再使用路径。
     val directory = directoryCacheKey(entry, listKey) ?: courseCache.directoryContaining(entry)
     return directory?.let { AccountScope.key(it) } ?: playbackPathOrderKey(entry)
 }
@@ -147,13 +142,8 @@ internal fun MainActivity.playbackPathOrderKey(entry: PanEntry): String? {
 
 internal fun MainActivity.playbackOrder(entry: PanEntry, listKey: String?): CourseOrder {
     val key = playbackOrderKey(entry, listKey)
-    val pathKey = playbackPathOrderKey(entry)
-    // 播放页自己的排序优先；没单独设过就继承这个目录的列表排序；
-    // 再退到老版本按路径存的偏好；都没有才用全局默认。
-    return key?.let { SortStore.playback(this, it) }
-        ?: key?.let { SortStore.list(this, it) }
-        ?: pathKey?.takeIf { it != key }?.let { SortStore.playback(this, it) }
-        ?: courseOrder
+    val pathKey = playbackPathOrderKey(entry)?.takeIf { it != key }
+    return SortStore.playback(this, PanApi.kindOf(entry), key, pathKey)
 }
 
 
@@ -162,13 +152,14 @@ internal fun MainActivity.playbackSortLabel(entry: PanEntry, listKey: String?): 
         CourseOrder.ASCENDING -> "升序 ▾"
         CourseOrder.DESCENDING -> "降序 ▾"
         CourseOrder.NETWORK -> "原序 ▾"
+        CourseOrder.NEWEST -> "最近更新 ▾"
     }
 
 
 internal fun MainActivity.showPlaybackSort(anchor: View, entry: PanEntry, listKey: String?, onSorted: (List<PanEntry>) -> Unit) {
     val key = playbackOrderKey(entry, listKey) ?: return
-    val account = verifiedAccount
-    val options = CourseOrder.entries
+    val account = playbackAccount(entry)
+    val options = SortStore.playbackOrders
     PopupMenu(anchor.context, anchor).apply {
         val selected = playbackOrder(entry, listKey)
         options.forEachIndexed { index, order ->
@@ -179,22 +170,16 @@ internal fun MainActivity.showPlaybackSort(anchor: View, entry: PanEntry, listKe
         setOnMenuItemClickListener { item ->
             val order = options[item.itemId]
             // 先落盘：即使此刻播放队列已经变了，用户的选择也不该被吞掉。
-            SortStore.setPlayback(this@showPlaybackSort, key, order)
-            val stillCurrent = account == verifiedAccount && hasVerifiedAccount() &&
+            SortStore.setPlayback(this@showPlaybackSort, PanApi.kindOf(entry), key, order)
+            val stillCurrent = account == playbackAccount(entry) && hasActiveSession(entry.provider) &&
                 PlaybackQueueState.listKey == listKey &&
                 PlaybackQueueState.anchor?.let { sameEntry(it, entry) } == true
             if (!stillCurrent) {
-                toast("排序已保存，下次进入该目录生效")
+                toast("已保存播放列表排序")
             } else {
-                val courses = orderCourses(PlaybackQueueState.entries, order)
-                PlaybackQueueState.entries = courses
-                pendingQueue = pendingQueue?.let { pending ->
-                    if (playbackOrderKey(pending.entry, pending.listKey) == key) {
-                        pending.copy(entries = orderCourses(pending.entries, order))
-                    } else pending
-                }
+                PlaybackQueueState.updateEntries(PlaybackQueueState.sourceEntries, order)
                 renderCourseSwitch()
-                onSorted(courses)
+                onSorted(PlaybackQueueState.entries)
             }
             true
         }
@@ -216,7 +201,7 @@ internal fun MainActivity.playbackDirectory(entry: PanEntry, listKey: String?): 
         key.startsWith("dir:") -> "G:${key.removePrefix("dir:")}"
         else -> if (entry.isDisk) "D:root" else "G:${entry.gid}"
     }
-    return queueKey to orderCourses(media, playbackOrder(entry, queueKey))
+    return queueKey to media
 }
 
 
@@ -276,10 +261,9 @@ internal fun MainActivity.loadMoreCourses(
             complete(null)
             return@load
         }
-        val courses = orderCourses(sameMediaKind(entry, courseCache.readAll(key)), playbackOrder(entry, listKey))
-        PlaybackQueueState.entries = courses
+        PlaybackQueueState.updateEntries(sameMediaKind(entry, courseCache.readAll(key)), playbackOrder(entry, listKey))
         renderCourseSwitch()
-        complete(courses)
+        complete(PlaybackQueueState.entries)
     }
 }
 
@@ -318,13 +302,12 @@ internal fun MainActivity.loadMoreDiskCourses(
                 }
                 courseCache.writeIfChanged(key, page + 1, files, if (hasMore) "more" else "")
                 diskIndexCache = null
-                val courses = orderCourses(
+                PlaybackQueueState.updateEntries(
                     sameMediaKind(entry, courseCache.readAll(key)),
                     playbackOrder(entry, listKey),
                 )
-                PlaybackQueueState.entries = courses
                 renderCourseSwitch()
-                done(courses)
+                done(PlaybackQueueState.entries)
             }
         },
         onFailure = { done(null) },
@@ -358,6 +341,7 @@ internal fun MainActivity.addCourseRows(
     container: LinearLayout,
     entries: List<PanEntry>,
     transferred: Set<String> = emptySet(),
+    playbackEntries: List<PanEntry> = entries,
 ) {
     val favoriteKeys = favorites.all().map(::entryKey).toSet()
     val sourceNames = if (screen == Screen.FAVORITES) {
@@ -366,7 +350,7 @@ internal fun MainActivity.addCourseRows(
         emptyMap()
     }
     if (!hasWideWindow) {
-        entries.forEach { container.addView(courseRow(it, entries, transferred, favoriteKeys, sourceNames)) }
+        entries.forEach { container.addView(courseRow(it, entries, playbackEntries, transferred, favoriteKeys, sourceNames)) }
         return
     }
     entries.chunked(2).forEach { pair ->
@@ -374,7 +358,7 @@ internal fun MainActivity.addCourseRows(
         pair.forEachIndexed { index, entry ->
             val params = LinearLayout.LayoutParams(0, -2, 1f)
             if (index == 0 && pair.size == 2) params.rightMargin = dp(8)
-            line.addView(courseRow(entry, entries, transferred, favoriteKeys, sourceNames), params)
+            line.addView(courseRow(entry, entries, playbackEntries, transferred, favoriteKeys, sourceNames), params)
         }
         if (pair.size == 1) line.addView(View(this), LinearLayout.LayoutParams(0, -2, 1f))
         container.addView(line)
@@ -382,12 +366,13 @@ internal fun MainActivity.addCourseRows(
 }
 
 
-internal fun MainActivity.courseRow(
+private fun MainActivity.courseRow(
     entry: PanEntry,
     entries: List<PanEntry>,
-    transferred: Set<String> = emptySet(),
-    favoriteKeys: Set<String> = emptySet(),
-    sourceNames: Map<String, String> = emptyMap(),
+    playbackEntries: List<PanEntry>,
+    transferred: Set<String>,
+    favoriteKeys: Set<String>,
+    sourceNames: Map<String, String>,
 ): View {
     val format = formatOf(entry)
     val kind = PanApi.kindOf(entry)
@@ -440,9 +425,10 @@ internal fun MainActivity.courseRow(
         row.setOnLongClickListener(null)
     } else {
         check.visibility = View.GONE
-        row.setOnClickListener { openEntry(entry, entries, currentPlaybackListKey()) }
+        val actionEntries = if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) playbackEntries else entries
+        row.setOnClickListener { openEntry(entry, actionEntries, currentPlaybackListKey()) }
         row.setOnLongClickListener {
-            showEntryActions(entry, entries)
+            showEntryActions(entry, actionEntries)
             true
         }
     }
@@ -464,7 +450,7 @@ internal fun MainActivity.currentPlaybackListKey(): String {
 
 internal fun MainActivity.selectPlayback(entry: PanEntry, entries: List<PanEntry>, listKey: String? = null) {
     val directory = playbackDirectory(entry, listKey)
-    val queue = directory?.second ?: orderCourses(courseSiblings(entry, entries), playbackOrder(entry, null))
+    val queue = directory?.second ?: courseSiblings(entry, entries)
     pendingQueue = QueueSelection(entry, queue, directory?.first)
 }
 
@@ -473,7 +459,9 @@ internal fun MainActivity.extendPlaybackQueue(entries: List<PanEntry>) {
     val anchor = PlaybackQueueState.anchor ?: return
     if (PlaybackQueueState.listKey != currentPlaybackListKey() || entries.none { sameEntry(it, anchor) }) return
     if (PanApi.kindOf(anchor) == MediaKind.VIDEO && videoPage != null) return
-    PlaybackQueueState.entries = playbackDirectory(anchor, PlaybackQueueState.listKey)?.second ?: return
+    val listKey = PlaybackQueueState.listKey
+    val source = playbackDirectory(anchor, listKey)?.second ?: return
+    PlaybackQueueState.updateEntries(source, playbackOrder(anchor, listKey))
 }
 
 

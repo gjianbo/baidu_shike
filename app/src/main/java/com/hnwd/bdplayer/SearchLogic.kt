@@ -11,10 +11,9 @@ package com.hnwd.bdplayer
 /** 全局搜索单次会话的结果上限，超过即停止继续遍历来源。 */
 internal const val MAX_GLOBAL_SEARCH_HITS = 1000
 
-/** 可搜索的百度群组：夸克来源和联系人来源都不参与全局搜索。 */
+/** 可搜索的百度群组：夸克来源、联系人来源与网盘目录都不参与全局搜索。 */
 internal fun searchGroupTargets(sources: List<ShareSource>): List<SearchTarget> =
-    sources
-        .filter { it.provider == SourceProvider.BAIDU && !isContactSource(it.id) }
+    sources.filter { isGroupSearchSource(it) }
         .map { SearchTarget(SearchScope.GROUP, it.id, it.name) }
 
 /** 群组 = 全部已关联百度群组；全部 = 群组 + 我的网盘；我的网盘 = 只有盘。 */

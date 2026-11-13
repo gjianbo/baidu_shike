@@ -3,13 +3,13 @@ package com.hnwd.bdplayer
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** QUEUED 是已复制到私有缓存、等待前台服务串行上传的任务。 */
+/** QUEUED 是等待串行准备和上传的任务。 */
 internal enum class UploadRecordState { QUEUED, RUNNING, SUCCESS, FAILED }
 
 /**
  * 一条上传任务记录。与 [DownloadTask] 平行，供「传输」页统一展示。
  *
- * 失败/取消的临时文件已被删除，不提供页内重试，只能回文件列表重新选一次。
+ * 持久化授权允许中断的任务重新读取源文件。
  */
 internal data class UploadRecord(
     val id: Long,
@@ -24,6 +24,12 @@ internal data class UploadRecord(
     val message: String = "",
     /** 上传目标网盘；旧记录没有该字段时按百度兼容。 */
     val source: String = UploadRecordLogic.SOURCE_BAIDU,
+    val sourceUri: String = "",
+    val folderId: String = "",
+    val provider: SourceProvider = SourceProvider.BAIDU,
+    val accountId: String = "",
+    val commitState: UploadCommitState = UploadCommitState.TRANSFERRING,
+    val remoteFileId: String = "",
 )
 
 /** 纯逻辑：编解码与列表收敛，可在 JVM 单测里钉死口径。 */
@@ -32,6 +38,26 @@ internal object UploadRecordLogic {
     const val SOURCE_BAIDU = "百度网盘 · 上传"
     const val SOURCE_QUARK = "夸克网盘 · 上传"
     const val INTERRUPTED = "上传中断（应用已关闭）"
+    const val UNCONFIRMED = "网盘提交结果待确认，请先检查目标目录，避免重复上传"
+
+    fun canRetry(record: UploadRecord): Boolean =
+        record.state == UploadRecordState.FAILED && record.sourceUri.isNotBlank() &&
+            record.accountId.isNotBlank() && record.commitState == UploadCommitState.TRANSFERRING
+
+    fun finish(record: UploadRecord, success: Boolean, message: String, now: Long): UploadRecord {
+        val accepted = success || record.commitState == UploadCommitState.ACCEPTED
+        val detail = when {
+            accepted && !success -> "已上传：${record.name}"
+            !accepted && record.commitState == UploadCommitState.SUBMITTING -> UNCONFIRMED
+            else -> message
+        }
+        return record.copy(
+            state = if (accepted) UploadRecordState.SUCCESS else UploadRecordState.FAILED,
+            finishedAt = now, percent = if (accepted) 100 else record.percent,
+            message = detail, label = detail,
+            sourceUri = if (accepted || detail == "已取消上传") "" else record.sourceUri,
+        )
+    }
 
     fun sourceLabel(provider: SourceProvider): String =
         if (provider == SourceProvider.QUARK) SOURCE_QUARK else SOURCE_BAIDU
@@ -61,14 +87,11 @@ internal object UploadRecordLogic {
     ): Reconciled {
         var changed = false
         val out = records.map { record ->
-            if (!isActive(record) || record.id in liveIds) return@map record
+            if (record.id in liveIds || !isActive(record) &&
+                !(record.state == UploadRecordState.FAILED && record.commitState == UploadCommitState.ACCEPTED)
+            ) return@map record
             changed = true
-            record.copy(
-                state = UploadRecordState.FAILED,
-                finishedAt = now,
-                message = INTERRUPTED,
-                label = INTERRUPTED,
-            )
+            finish(record, false, INTERRUPTED, now)
         }
         return Reconciled(out, changed)
     }
@@ -96,6 +119,12 @@ internal object UploadRecordLogic {
         .put("label", record.label)
         .put("message", record.message)
         .put("source", record.source)
+        .put("uri", record.sourceUri)
+        .put("folderId", record.folderId)
+        .put("provider", record.provider.name)
+        .put("account", record.accountId)
+        .put("commit", record.commitState.name)
+        .put("remoteFileId", record.remoteFileId)
 
     private fun fromJson(item: JSONObject) = UploadRecord(
         id = item.getLong("id"),
@@ -110,5 +139,13 @@ internal object UploadRecordLogic {
         label = item.optString("label").ifBlank { "排队中" },
         message = item.optString("message"),
         source = item.optString("source").ifBlank { SOURCE_BAIDU },
+        sourceUri = item.optString("uri"),
+        accountId = item.optString("account"),
+        commitState = UploadCommitState.entries.firstOrNull { it.name == item.optString("commit") }
+            ?: UploadCommitState.TRANSFERRING,
+        remoteFileId = item.optString("remoteFileId"),
+        folderId = item.optString("folderId"),
+        provider = runCatching { SourceProvider.valueOf(item.optString("provider")) }
+            .getOrDefault(SourceProvider.BAIDU),
     )
 }

@@ -29,7 +29,7 @@ internal fun MainActivity.showAddSheet() {
     // 百度 / 夸克共用同一个多选入口，UploadCenter 按入队时快照的 provider 分派上传器。
     view.findViewById<View>(R.id.addUpload).setOnClickListener {
         dialog.dismiss()
-        uploadLauncher.launch(arrayOf("*/*"))
+        chooseUploadFiles()
     }
     view.findViewById<View>(R.id.addFolder).setOnClickListener {
         dialog.dismiss()

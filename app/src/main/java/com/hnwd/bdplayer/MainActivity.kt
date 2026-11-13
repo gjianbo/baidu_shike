@@ -101,6 +101,7 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var batchMove: TextView
     internal lateinit var batchCopy: TextView
     internal lateinit var batchDelete: TextView
+    internal lateinit var batchDownload: TextView
     internal lateinit var fabAdd: View
     internal lateinit var crumbsScroll: View
     internal lateinit var crumbsRow: LinearLayout
@@ -222,9 +223,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    internal val uploadLauncher =
+    private data class UploadTarget(
+        val provider: SourceProvider, val accountId: String, val dir: String, val folderId: String,
+    )
+
+    private var pendingUploadTarget: UploadTarget? = null
+    private val uploadLauncher =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-            if (uris.isNotEmpty()) startUpload(uris)
+            val target = pendingUploadTarget
+            pendingUploadTarget = null
+            if (uris.isNotEmpty()) {
+                if (target == null) toast("无法确认原上传位置，请重新选择文件")
+                else startUpload(uris, target)
+            }
         }
 
     /**
@@ -246,7 +257,7 @@ class MainActivity : AppCompatActivity() {
     internal var selectionScreen: Screen? = null
     internal var lastRenderedEntries: List<PanEntry> = emptyList()
 
-    internal var courseOrder = CourseOrder.ASCENDING
+    internal var courseOrder = CourseOrder.NEWEST
 
     internal val folders = mutableListOf<PanEntry>()
     internal val courseEntries = mutableListOf<PanEntry>()
@@ -269,6 +280,7 @@ class MainActivity : AppCompatActivity() {
     internal var pendingQueue: QueueSelection? = null
     /** onCreate 收到媒体通知 action 时置位，等 controller 异步就绪后再展开播放页。 */
     private var pendingOpenPlayer = false
+    private var pendingDownloadVerification: Long? = null
     internal var audioRequestMessage: String? = null
     internal var refreshAudioPageMessage: (() -> Unit)? = null
     internal val nowPlayingTicker = object : Runnable {
@@ -324,6 +336,16 @@ class MainActivity : AppCompatActivity() {
     @Suppress("DEPRECATION")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        readDownloadVerification(intent)
+        savedInstanceState?.getBundle(STATE_UPLOAD_TARGET)?.let { saved ->
+            val provider = SourceProvider.entries.firstOrNull { it.name == saved.getString("provider") }
+            val accountId = saved.getString("account").orEmpty()
+            if (provider != null && accountId.isNotBlank()) {
+                pendingUploadTarget = UploadTarget(
+                    provider, accountId, saved.getString("dir", "/"), saved.getString("folder", ""),
+                )
+            }
+        }
         if (intent.action == ACTION_OPEN_PLAYER) {
             pendingOpenPlayer = true
             // 通知 action 只是一次性事件；清掉，避免后续 recreate()（如备份恢复）
@@ -335,7 +357,7 @@ class MainActivity : AppCompatActivity() {
             pendingQueue = it.selection
         }
         val savedOrder = ThemeStore.courseOrder(this)
-        courseOrder = CourseOrder.entries.firstOrNull { it.name == savedOrder } ?: CourseOrder.ASCENDING
+        courseOrder = CourseOrder.entries.firstOrNull { it.name == savedOrder } ?: CourseOrder.NEWEST
         window.statusBarColor = color(R.color.bg)
         window.navigationBarColor = color(R.color.bg)
         WindowInsetsControllerCompat(window, window.decorView).apply {
@@ -579,6 +601,12 @@ class MainActivity : AppCompatActivity() {
         batchMove = shell.findViewById(R.id.batchMove)
         batchCopy = shell.findViewById(R.id.batchCopy)
         batchDelete = shell.findViewById(R.id.batchDelete)
+        batchDownload = shell.findViewById(R.id.batchDownload)
+        batchDownload.setOnClickListener {
+            val entries = visibleSelectionEntries()
+            exitSelection()
+            downloads.start(entries)
+        }
         batchMove.setOnClickListener { diskWrites.batchMoveSelected() }
         batchCopy.setOnClickListener { diskWrites.batchCopySelected() }
         batchDelete.setOnClickListener { diskWrites.batchDeleteSelected() }
@@ -669,11 +697,20 @@ class MainActivity : AppCompatActivity() {
         if (screen == Screen.DISK || screen == Screen.GROUPS || screen == Screen.HOME) {
             outState.putString(STATE_FOLDERS, encodeEntries(folders))
         }
+        pendingUploadTarget?.let { target ->
+            outState.putBundle(STATE_UPLOAD_TARGET, Bundle().apply {
+                putString("provider", target.provider.name)
+                putString("account", target.accountId)
+                putString("dir", target.dir)
+                putString("folder", target.folderId)
+            })
+        }
         super.onSaveInstanceState(outState)
     }
 
     override fun onResume() {
         super.onResume()
+        verifyPendingDownload()
         // 从夸克登录页返回后，设置页的网盘登录态需要重算。
         if (screen == Screen.SETTINGS && ready) refresh()
     }
@@ -681,6 +718,8 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        readDownloadVerification(intent)
+        verifyPendingDownload()
         if (intent.action == ACTION_OPEN_PLAYER) {
             // Activity 存活时 controller / 账号校验可能仍在异步建立，openCurrentPlayback()
             // 的守卫此刻不成立会静默失败。先挂起标志，让 controller 就绪回调与
@@ -690,6 +729,21 @@ class MainActivity : AppCompatActivity() {
             intent.action = null
             openCurrentPlayback()
         }
+    }
+
+    private fun readDownloadVerification(intent: Intent) {
+        val id = intent.getLongExtra(DownloadActivity.EXTRA_VERIFY_DOWNLOAD, -1)
+        if (id >= 0) {
+            pendingDownloadVerification = id
+            intent.removeExtra(DownloadActivity.EXTRA_VERIFY_DOWNLOAD)
+        }
+    }
+
+    internal fun verifyPendingDownload() {
+        val id = pendingDownloadVerification ?: return
+        if (!activityVisible || !ready || !hasVerifiedAccount()) return
+        pendingDownloadVerification = null
+        downloads.verify(id)
     }
 
     /**
@@ -867,6 +921,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        DownloadCenter.resume(this)
         activityVisible = true
         stoppedVideo = null
         if (videoToRestore == null && videoPage == null && videoLoading == null) videoToRestore = loadingVideo
@@ -1450,19 +1505,13 @@ class MainActivity : AppCompatActivity() {
         override fun account() = verifiedAccount
         override fun userAgent() = web.settings.userAgentString
         override fun sessionReady(provider: SourceProvider) = hasActiveSession(provider)
-        override fun verifyAccount() = verifyAndRefresh()
         override fun isCurrent() = !isDestroyed && !isFinishing
         override fun say(message: String) = toast(message)
-        override fun setStatus(message: String) {
-            status.text = message
-        }
-        override fun runOnUiThread(action: () -> Unit) = this@MainActivity.runOnUiThread(action)
-        override fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) =
-            ensureBdstoken(onReady = onReady, onFailure = onFailure)
+        override fun isVisible() = activityVisible
 
-        override fun onAdded(name: String) {
+        override fun onAdded(message: String) {
             updateDownloadBadge()
-            Snackbar.make(shell, "已加入下载队列：$name", Snackbar.LENGTH_LONG)
+            Snackbar.make(shell, message, Snackbar.LENGTH_LONG)
                 .setAction("查看进度") { openDownloads() }
                 .show()
         }
@@ -1472,14 +1521,36 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent(this, DownloadActivity::class.java))
     }
 
-    /** 系统文件选择器可多选；任务交给 UploadCenter 串行队列，本页只给一条可点提示。 */
-    internal fun startUpload(sources: List<Uri>) {
-        if (sources.isEmpty()) return
-        // provider 与目录 fid 在入队时快照；队列按 provider 分派到百度/夸克上传器。
+    internal fun chooseUploadFiles() {
+        if (pendingUploadTarget != null) return
+        val provider = diskProvider
+        if (!hasActiveSession(provider)) {
+            toast("请先登录${TransferSession.providerName(provider)}网盘")
+            return
+        }
+        val accountId = when (provider) {
+            SourceProvider.BAIDU -> verifiedAccount
+            SourceProvider.QUARK -> runCatching {
+                TransferSession.capture(provider).quarkAccount()
+            }.getOrElse {
+                toast("请先登录夸克网盘")
+                return
+            }
+        }
+        pendingUploadTarget = UploadTarget(provider, accountId, currentDiskDir(), currentDiskFolderId())
+        uploadLauncher.launch(arrayOf("*/*"))
+    }
+
+    private fun startUpload(sources: List<Uri>, target: UploadTarget) {
         showUploadSnackbar(sources.size)
-        UploadCenter.enqueue(this, sources, currentDiskDir(), currentDiskFolderId(), diskProvider)
+        UploadCenter.enqueue(this, sources, target.dir, target.folderId, target.provider, target.accountId)
         // 前台服务只负责保活与通知；权限弹窗顺带申请，拒绝也不影响上传。
-        UploadForegroundService.start(this)
+        try {
+            UploadForegroundService.start(this)
+        } catch (error: IllegalStateException) {
+            UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
+            return
+        }
         val needsNotificationPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -1505,7 +1576,7 @@ class MainActivity : AppCompatActivity() {
                 android.util.Log.i("ShikeUpload", state.message)
                 if (!isFinishing && !isDestroyed) {
                     toast(state.message)
-                    if (state.success) refresh()
+                    if (state.completed > 0) refresh()
                 }
             }
         }
@@ -1668,6 +1739,7 @@ class MainActivity : AppCompatActivity() {
         const val STATE_TRANSFERRED_ONLY = "transferred_only"
         const val STATE_FAVORITES_ORIGIN = "favorites_origin"
         const val STATE_FOLDERS = "folder_trail"
+        private const val STATE_UPLOAD_TARGET = "upload_target"
         /** 「待确认删除」登记的有效期：超过后以服务端列表为准，避免文件被永久隐藏。 */
         const val PENDING_DELETE_TTL_MS = 30_000L
     }
@@ -1676,6 +1748,21 @@ class MainActivity : AppCompatActivity() {
 // The playback service and its UI run in the same process. Keep the queue when Android recreates the UI.
 internal object PlaybackQueueState {
     var anchor: PanEntry? = null
-    var entries: List<PanEntry> = emptyList()
     var listKey: String? = null
+    var sourceEntries: List<PanEntry> = emptyList()
+        private set
+    var entries: List<PanEntry> = emptyList()
+        private set
+
+    fun updateEntries(source: List<PanEntry>, order: CourseOrder) {
+        sourceEntries = source
+        entries = orderCourses(source, order)
+    }
+
+    fun clear() {
+        anchor = null
+        listKey = null
+        sourceEntries = emptyList()
+        entries = emptyList()
+    }
 }

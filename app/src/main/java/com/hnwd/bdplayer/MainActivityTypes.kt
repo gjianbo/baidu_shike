@@ -29,6 +29,7 @@ internal enum class CourseOrder(val label: String) {
     ASCENDING("名称升序"),
     DESCENDING("名称降序"),
     NETWORK("网盘顺序"),
+    NEWEST("最近更新优先"),
 }
 
 /** 请求通道：同一通道的新请求会作废旧请求的回调。 */
@@ -38,12 +39,16 @@ internal enum class SearchScope(val label: String) { DISK("我的网盘"), GROUP
 
 internal data class SearchTarget(val scope: SearchScope, val sourceId: String, val name: String)
 
-/** 已配置的来源（百度群组 / 联系人 / 夸克监控目录）。 */
+/** 已配置的来源（百度群组 / 联系人 / 网盘目录 / 夸克监控目录）。 */
 internal data class ShareSource(
     val id: String,
     val name: String,
     val sessionUrl: String = "",
     val provider: SourceProvider = SourceProvider.BAIDU,
+    /** 老数据无 kind 字段时，读取端按 id + provider 推断，见 [inferSourceKind]。 */
+    val kind: SourceKind = SourceKind.GROUP,
+    /** 网盘目录的可读绝对路径；群组 / 联系人 / 夸克 fid 来源为空。 */
+    val path: String = "",
 )
 
 internal data class SheetChoice(
@@ -59,7 +64,7 @@ internal data class FolderPosition(
     val transferredOnly: Boolean,
 )
 
-internal data class QueueSelection(val entry: PanEntry, val entries: List<PanEntry>, val listKey: String?)
+internal data class QueueSelection(val entry: PanEntry, val sourceEntries: List<PanEntry>, val listKey: String?)
 
 internal data class RetainedPlayback(
     val video: VideoPlaybackPage.Snapshot?,

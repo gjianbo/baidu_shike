@@ -58,6 +58,14 @@ class EntryJsonTest {
     }
 
     @Test
+    fun `恢复后仍按最近更新时间排序`() {
+        val older = entry(fileId = "older").copy(modifiedAt = 1_750_000_000L)
+        val newer = entry(fileId = "newer").copy(modifiedAt = 1_760_000_000L)
+        val restored = decodeEntries(encodeEntries(listOf(older, newer)))
+        assertEquals(listOf(newer, older), orderCourses(restored, CourseOrder.NEWEST))
+    }
+
+    @Test
     fun `目录条目往返后仍是目录且大小为原始字符串`() {
         val dir = entry(name = "课程", path = "/课程", directory = true, size = "")
         val restored = decodeEntries(encodeEntries(listOf(dir))).single()
@@ -134,6 +142,7 @@ class EntryJsonTest {
         assertEquals("", restored.path)
         assertEquals("", restored.size)
         assertEquals("", restored.md5)
+        assertEquals(0L, restored.modifiedAt)
         assertFalse(restored.directory)
     }
 

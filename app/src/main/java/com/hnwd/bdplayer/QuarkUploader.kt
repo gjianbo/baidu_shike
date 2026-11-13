@@ -1,7 +1,6 @@
 package com.hnwd.bdplayer
 
 import android.content.Context
-import android.webkit.CookieManager
 import android.webkit.WebSettings
 import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
@@ -26,31 +25,34 @@ import java.util.concurrent.atomic.AtomicReference
  * → CompleteMultipartUpload（XML 合并，带 x-oss-callback）→ finish → 回读。
  * `update/hash` 返回 finish=true 即秒传命中，直接 finish 拿 fid，零上传。
  */
-internal class QuarkUploader(context: Context) {
+internal class QuarkUploader(context: Context, private val session: TransferSession) {
     private val client = OkHttpClient.Builder()
-        .followSslRedirects(false)
+        .followRedirects(false)
+        .retryOnConnectionFailure(false)
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
     private val userAgent = WebSettings.getDefaultUserAgent(context)
     private val currentCall = AtomicReference<Call?>(null)
+    @Volatile private var cancelled = false
 
-    private val cookie: String
-        get() = CookieManager.getInstance()
-            .getCookie("${QuarkUploadLogic.API}/file/sort").orEmpty()
-
-    /** 匿名访问也会带 Cookie，必须按 __pus / __puus 判定，不能只看非空。 */
-    fun hasSession(): Boolean = QuarkPersonalDrive.hasLoginCookie(cookie)
+    fun verifyAccount(expected: String) {
+        TransferSession.requireAccount(SourceProvider.QUARK, expected, session.quarkAccount())
+    }
 
     fun cancel() {
+        cancelled = true
         currentCall.getAndSet(null)?.cancel()
     }
+
+    class Rejected(code: Int, message: String) : IOException(QuarkUploadLogic.uploadError(code, message))
 
     /** 通用夸克控制面请求：统一校验 HTTP 与 code==0。 */
     private fun execute(request: Request): JSONObject {
         val call = client.newCall(request)
         currentCall.set(call)
+        if (cancelled) call.cancel()
         try {
             call.execute().use { response ->
                 val text = response.body?.string().orEmpty()
@@ -58,7 +60,7 @@ internal class QuarkUploader(context: Context) {
                 val json = runCatching { JSONObject(text) }
                     .getOrElse { throw IOException("夸克响应不是 JSON：${text.take(160)}") }
                 val code = json.optInt("code", 0)
-                check(code == 0) { QuarkUploadLogic.uploadError(code, json.optString("message")) }
+                if (code != 0) throw Rejected(code, json.optString("message"))
                 return json
             }
         } finally {
@@ -76,7 +78,7 @@ internal class QuarkUploader(context: Context) {
             .url(url)
             .header("User-Agent", userAgent)
             .header("Accept", "application/json")
-            .header("Cookie", cookie)
+            .header("Cookie", session.cookie)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         return execute(request)
@@ -84,7 +86,6 @@ internal class QuarkUploader(context: Context) {
 
     /** ① 预上传：返回占位 fid、OSS 对象信息、callback 与临时凭证。 */
     fun pre(fileName: String, size: Long, pdirFid: String, formatType: String): QuarkUploadLogic.Pre {
-        check(hasSession()) { "请先在 App 内登录夸克网盘" }
         val json = api(
             QuarkUploadLogic.preUrl(),
             QuarkUploadLogic.preBody(fileName, size, pdirFid, formatType, System.currentTimeMillis()),
@@ -103,12 +104,13 @@ internal class QuarkUploader(context: Context) {
         )
 
     /** 整文件 MD5 与 SHA1（hex 小写），流式计算，不整包进内存。 */
-    fun hashes(file: File): Pair<String, String> {
+    fun hashes(file: File, checkActive: () -> Unit): Pair<String, String> {
         val md5 = MessageDigest.getInstance("MD5")
         val sha1 = MessageDigest.getInstance("SHA-1")
         FileInputStream(file).use { input ->
             val buffer = ByteArray(64 * 1024)
             while (true) {
+                checkActive()
                 val count = input.read(buffer)
                 if (count < 0) break
                 md5.update(buffer, 0, count)
@@ -175,6 +177,7 @@ internal class QuarkUploader(context: Context) {
         val request = builder.put(data.toRequestBody(mime.toMediaType())).build()
         val call = client.newCall(request)
         currentCall.set(call)
+        if (cancelled) call.cancel()
         try {
             call.execute().use { response ->
                 val text = response.body?.string().orEmpty()
@@ -222,6 +225,7 @@ internal class QuarkUploader(context: Context) {
             .build()
         val call = client.newCall(request)
         currentCall.set(call)
+        if (cancelled) call.cancel()
         try {
             call.execute().use { response ->
                 val text = response.body?.string().orEmpty()

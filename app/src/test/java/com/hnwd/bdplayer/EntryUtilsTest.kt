@@ -60,6 +60,25 @@ class EntryUtilsTest {
         assertEquals(names, sorted)
     }
 
+    @Test
+    fun `目录按更新时间排序且播放队列按课次排序`() {
+        val first = entry("第1讲.mp4").copy(modifiedAt = 200)
+        val second = entry("第2讲.mp4").copy(modifiedAt = 300)
+        val third = entry("第3讲.mp4").copy(modifiedAt = 100)
+        val source = listOf(third, first, second)
+
+        try {
+            PlaybackQueueState.updateEntries(source, CourseOrder.ASCENDING)
+            assertEquals(listOf(first, second, third), PlaybackQueueState.entries)
+            assertEquals(listOf(second, first, third), orderCourses(source, CourseOrder.NEWEST))
+
+            PlaybackQueueState.updateEntries(PlaybackQueueState.sourceEntries, CourseOrder.NETWORK)
+            assertEquals(source, PlaybackQueueState.entries)
+        } finally {
+            PlaybackQueueState.clear()
+        }
+    }
+
     // ===================== 相邻条目（上一节 / 下一节） =====================
 
     @Test

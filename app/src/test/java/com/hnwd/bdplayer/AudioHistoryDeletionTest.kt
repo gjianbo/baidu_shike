@@ -11,6 +11,20 @@ class AudioHistoryDeletionTest {
     private val other = entry.copy(fileId = "other")
 
     @Test
+    fun historyRestoresFileModifiedTimeSeparatelyFromPlaybackTime() {
+        val prefs = MemoryPreferences()
+        val dated = entry.copy(modifiedAt = 1_760_000_000L)
+        val history = AudioHistory(prefs, "account")
+        history.begin(dated).save(120, false, 600)
+        history.begin(other).save(45, false, 600)
+
+        val restored = AudioHistory(prefs, "account")
+        assertEquals(dated.modifiedAt, restored.find(dated)?.entry?.modifiedAt)
+        assertEquals(0L, restored.find(other)?.entry?.modifiedAt)
+        assertEquals(120, restored.find(dated)?.seconds)
+    }
+
+    @Test
     fun deletingOneLessonStopsItsCurrentRecordingAndAllowsReopening() {
         val store = AudioHistory(MemoryPreferences())
         val history = store.scoped("account")

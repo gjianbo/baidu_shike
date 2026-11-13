@@ -18,13 +18,16 @@ import java.io.RandomAccessFile
  */
 internal class QuarkUploadSection(
     context: Context,
+    session: TransferSession,
+    private val accountId: String,
     private val file: File,
     private val displayName: String,
     private val folderId: String,
+    private val commit: UploadCommit,
     private val onProgress: (percent: Int, label: String) -> Unit,
     private val onResult: (success: Boolean, message: String) -> Unit,
 ) : UploadWorker {
-    private val uploader = QuarkUploader(context.applicationContext)
+    private val uploader = QuarkUploader(context.applicationContext, session)
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var cancelled = false
@@ -54,45 +57,56 @@ internal class QuarkUploadSection(
             }
             running = false
             val message = when {
-                cancelled -> "已取消上传"
                 result.isSuccess -> "已上传：${result.getOrNull()}"
+                cancelled -> "已取消上传"
                 else -> "上传失败：${result.exceptionOrNull()?.message ?: "未知错误"}"
             }
-            main.post { onResult(result.isSuccess && !cancelled, message) }
+            main.post { onResult(result.isSuccess, message) }
         }
     }
 
+    private fun checkActive() {
+        if (cancelled) throw IOException("已取消")
+    }
+
     private fun doUpload(): String {
+        checkActive()
         val size = file.length()
         check(size <= QuarkUploadLogic.MAX_SINGLE_FILE) {
             "文件超过夸克单文件上限（100GB）"
         }
         val mime = QuarkUploadLogic.formatType(displayName)
         progress(0, "正在校验文件…")
-        if (!uploader.hasSession()) throw IOException("请先在 App 内登录夸克网盘")
+        uploader.verifyAccount(accountId)
 
-        val pre = uploader.pre(displayName, size, folderId, mime)
+        // 预上传和哈希登记也可能直接落盘（秒传），请求发出前先记录状态。
+        commit.begin()
+        val pre = try {
+            uploader.pre(displayName, size, folderId, mime)
+        } catch (rejected: QuarkUploader.Rejected) {
+            commit.rejected()
+            throw rejected
+        }
         if (pre.finished) {
-            // pre 阶段就秒传命中时也要通知 finish 确认，与 updateHash 命中路径保持一致。
-            runCatching { uploader.finish(pre.objKey, pre.taskId) }
-                .onFailure { android.util.Log.d("ShikeUpload", "pre fast-upload finish skipped", it) }
-            progress(100, "秒传完成")
+            finishRapid(pre.objKey, pre.taskId, pre.fid)
             return displayName
         }
+        commit.rejected()
 
-        // ★ 关键：合并前必须把整文件 md5/sha1 登记到 task，否则 OSS 回调 content_hash 为空。
-        val (md5, sha1) = uploader.hashes(file)
-        val hash = uploader.updateHash(pre.taskId, md5, sha1)
+        val (md5, sha1) = uploader.hashes(file, ::checkActive)
+        commit.begin()
+        val hash = try {
+            uploader.updateHash(pre.taskId, md5, sha1)
+        } catch (rejected: QuarkUploader.Rejected) {
+            commit.rejected()
+            throw rejected
+        }
         if (hash.finished) {
-            android.util.Log.i("ShikeUpload", "quark fast upload hit: $displayName")
-            val objKey = hash.objKey.takeIf { it.isNotBlank() } ?: pre.objKey
-            // 实测文档说「直接拿 fid 结束」，社区实现会再调一次 finish；
-            // 这里兼容两者：尝试确认，但秒传已返回 fid，确认失败不推翻成功。
-            runCatching { uploader.finish(objKey, pre.taskId) }
-                .onFailure { android.util.Log.d("ShikeUpload", "fast-upload finish skipped", it) }
-            progress(100, "秒传完成")
+            val objKey = hash.objKey.ifBlank { pre.objKey }
+            finishRapid(objKey, pre.taskId, hash.fid)
             return displayName
         }
+        commit.rejected()
 
         val count = QuarkUploadLogic.chunkCount(size, pre.partSize)
         val parts = ArrayList<Pair<Int, String>>(count)
@@ -101,7 +115,7 @@ internal class QuarkUploadSection(
         val sha1State = QuarkSha1()
         var doneBytes = 0L
         for (index in 0 until count) {
-            if (cancelled) throw IOException("已取消")
+            checkActive()
             val chunk = QuarkUploadLogic.chunkAt(size, index, pre.partSize)
             val data = readPart(file, chunk.offset, chunk.length)
             val hashCtx = if (index == 0) null else sha1State.hashCtxBase64()
@@ -114,13 +128,20 @@ internal class QuarkUploadSection(
                 "上传中 ${index + 1}/$count",
             )
         }
-        if (cancelled) throw IOException("已取消")
+        commit.begin()
         progress(99, "正在合并分片…")
         uploader.commit(pre, pre.taskId, parts)
         progress(99, "正在创建文件…")
-        uploader.finish(pre.objKey, pre.taskId)
+        commit.accepted(uploader.finish(pre.objKey, pre.taskId))
         progress(100, "完成")
         return displayName
+    }
+
+    private fun finishRapid(objKey: String, taskId: String, fid: String) {
+        if (fid.isNotBlank()) commit.accepted(fid)
+        val confirmed = runCatching { uploader.finish(objKey, taskId) }
+        if (fid.isBlank()) commit.accepted(confirmed.getOrThrow())
+        progress(100, "秒传完成")
     }
 
     private fun readPart(file: File, offset: Long, length: Int): ByteArray {

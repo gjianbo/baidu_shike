@@ -173,18 +173,20 @@ internal fun MainActivity.requestBrowseRefresh() {
         if (hasActiveSession()) {
             val onRefresh = feedback.begin()
             val rootKey = "roots:$gid"
-            if (isContactSource(gid)) {
-                loadHomeDirectory(rootKey, force = true, onRefresh = onRefresh)
-            } else {
-                val recentKey = "recent:$gid"
-                startHomeCheck(
-                    force = true,
-                    cacheKey = recentKey,
-                    homeRootKey = rootKey,
-                    cached = emptyList(),
-                    recentIsEmpty = false,
-                    onRefresh = onRefresh,
-                )
+            when (sourceKindOf(gid)) {
+                SourceKind.CONTACT -> loadHomeDirectory(rootKey, force = true, onRefresh = onRefresh)
+                // 网盘目录的完整链路在第 4 步接入 diskList；第 3 步之前无法创建目录来源，不会触发。
+                SourceKind.GROUP, SourceKind.DIRECTORY -> {
+                    val recentKey = "recent:$gid"
+                    startHomeCheck(
+                        force = true,
+                        cacheKey = recentKey,
+                        homeRootKey = rootKey,
+                        cached = emptyList(),
+                        recentIsEmpty = false,
+                        onRefresh = onRefresh,
+                    )
+                }
             }
             return
         }
@@ -236,6 +238,10 @@ internal fun MainActivity.startHomeCheck(
     homeCheckInFlight = true
     if (providerOfSourceId(gid) == SourceProvider.QUARK) {
         startQuarkHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty, checkToken, onRefresh)
+        return
+    }
+    if (sourceKindOf(gid) == SourceKind.DIRECTORY) {
+        startBaiduDirectoryHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty, checkToken, onRefresh)
         return
     }
     load(
@@ -323,7 +329,7 @@ internal fun MainActivity.startQuarkHomeCheck(
 
 internal fun MainActivity.maybeCheckHomeInBackground() {
     if (!hasActiveSession() || screen != Screen.HOME || folders.isNotEmpty()) return
-    if (isContactSource(gid) || homeCheckInFlight || homeRefreshFeedback?.refreshing == true ||
+    if (!shouldCheckHomeInBackground(sourceKindOf(gid)) || homeCheckInFlight || homeRefreshFeedback?.refreshing == true ||
         pendingHomeUpdate != null
     ) return
     if (System.currentTimeMillis() - lastHomeCheckAt < HOME_RECHECK_COOLDOWN_MS) return
@@ -447,18 +453,21 @@ internal fun MainActivity.matchesHomeFilter(entry: PanEntry): Boolean =
 
 internal fun MainActivity.loadHomeDirectory(key: String, force: Boolean, onRefresh: ((String?) -> Unit)? = null) {
     if (onRefresh != null) {
-        if (providerOfSourceId(gid) == SourceProvider.QUARK) loadQuarkRoots(key, onRefresh = onRefresh)
-        else loadRoots(key, onRefresh = onRefresh)
+        when {
+            providerOfSourceId(gid) == SourceProvider.QUARK -> loadQuarkRoots(key, onRefresh = onRefresh)
+            sourceKindOf(gid) == SourceKind.DIRECTORY -> loadBaiduDirectoryRoots(key, onRefresh = onRefresh)
+            else -> loadRoots(key, onRefresh = onRefresh)
+        }
         return
     }
     if (!showingHomeDirectory) renderHomeDirectory(key)
     else status.text = if (courseCache.readPage(key, 1)?.entries?.isEmpty() == true) "文件库暂无内容" else ""
     if (!force && courseCache.isFresh(key, CACHE_TTL_MS) && courseCache.readPage(key, 1)?.nextCursor != null) {
         renderRootMore(key)
-    } else if (providerOfSourceId(gid) == SourceProvider.QUARK) {
-        loadQuarkRoots(key)
-    } else {
-        loadRoots(key)
+    } else when {
+        providerOfSourceId(gid) == SourceProvider.QUARK -> loadQuarkRoots(key)
+        sourceKindOf(gid) == SourceKind.DIRECTORY -> loadBaiduDirectoryRoots(key)
+        else -> loadRoots(key)
     }
 }
 
@@ -501,7 +510,7 @@ internal fun MainActivity.resumeFromHistory(entry: PanEntry) {
         return
     }
     val listKey = PlaybackQueueState.listKey
-    val directoryQueue = PlaybackQueueState.entries.filter {
+    val directoryQueue = PlaybackQueueState.sourceEntries.filter {
         it.origin == entry.origin && it.gid == entry.gid
     }
     val isDirectory = listKey == "G:${entry.gid}" ||

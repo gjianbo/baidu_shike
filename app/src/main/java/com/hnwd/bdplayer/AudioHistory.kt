@@ -46,6 +46,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
                     if (origin == EntryOrigin.DISK) item.optString("gid") else bucket,
                     item.getString("message"), item.getString("owner"), item.getString("file"),
                     item.getString("name"), item.optString("path"), item.optString("size"), false, origin,
+                    modifiedAt = item.optLong("modifiedAt", 0),
                 ),
                 item.getInt("seconds"),
                 item.getBoolean("completed"),
@@ -113,6 +114,7 @@ internal class AudioHistory(private val preferences: SharedPreferences, private 
                 .put("name", item.entry.name)
                 .put("path", item.entry.path)
                 .put("size", item.entry.size)
+                .put("modifiedAt", item.entry.modifiedAt)
                 .put("seconds", item.seconds)
                 .put("completed", item.completed)
                 .put("duration", item.duration)

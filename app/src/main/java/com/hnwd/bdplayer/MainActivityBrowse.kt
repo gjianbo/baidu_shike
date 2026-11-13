@@ -40,7 +40,7 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
     showAvailableMediaFilters(emptySet())
     styleContent()
     val earlyParent = folders.lastOrNull()
-    val homeSourceKey = if (isContactSource(gid)) "roots:$gid" else "recent:$gid"
+    val homeSourceKey = homeSourceKeyOf(gid, sourceKindOf(gid))
     val earlyKey = if (screen == Screen.HOME && earlyParent == null && gid.isNotEmpty()) homeSourceKey else ""
     val earlyCached = if (!hasActiveSession() && (checkingAccount || !ready) && earlyKey.isNotEmpty()) {
         courseCache.readAll(earlyKey)
@@ -122,7 +122,8 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
         screen == Screen.SETTINGS -> "外观、备份与本机数据"
         screen == Screen.DISK -> "个人文件 · 已转存内容可直接播放"
         screen == Screen.GROUPS -> when {
-            isContactSource(gid) -> "联系人文件库"
+            sourceKindOf(gid) == SourceKind.CONTACT -> "联系人文件库"
+            sourceKindOf(gid) == SourceKind.DIRECTORY -> "我的网盘 · 关注目录"
             currentPageProvider() == SourceProvider.QUARK -> "夸克网盘 · 监控目录"
             else -> "群组文件库"
         }
@@ -136,7 +137,7 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
         renderSourcePicker()
     }
     val cached = if (cacheKey.isNotEmpty()) courseCache.readAll(cacheKey) else emptyList()
-    val contactHome = screen == Screen.HOME && parent == null && isContactSource(gid)
+    val contactHome = screen == Screen.HOME && parent == null && sourceKindOf(gid) == SourceKind.CONTACT
     val homeRootKey = if (screen == Screen.HOME && !contactHome && parent == null && gid.isNotEmpty()) "roots:$gid" else null
     showingHomeDirectory = contactHome
     if (contactHome) sectionTitle.text = "群组"
@@ -185,10 +186,12 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
             status.text = "$cacheNote · 30 分钟内已检查"
             renderRootMore(cacheKey)
         }
-        parent != null -> if (providerOfSourceId(parent.gid) == SourceProvider.QUARK) {
-            loadQuarkChildren(parent, 1, cacheKey = cacheKey)
-        } else {
-            loadChildren(parent, 1, cacheKey = cacheKey)
+        parent != null -> when {
+            providerOfSourceId(parent.gid) == SourceProvider.QUARK ->
+                loadQuarkChildren(parent, 1, cacheKey = cacheKey)
+            sourceKindOf(gid) == SourceKind.DIRECTORY ->
+                loadBaiduDirectoryChildren(parent, 1, cacheKey = cacheKey)
+            else -> loadChildren(parent, 1, cacheKey = cacheKey)
         }
         homeRootKey != null -> {
             if (!force && homeCheckInFlight) {
@@ -200,10 +203,10 @@ internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean =
                 startHomeCheck(force, cacheKey, homeRootKey, cached, recentIsEmpty)
             }
         }
-        else -> if (providerOfSourceId(gid) == SourceProvider.QUARK) {
-            loadQuarkRoots(cacheKey)
-        } else {
-            loadRoots(cacheKey)
+        else -> when {
+            providerOfSourceId(gid) == SourceProvider.QUARK -> loadQuarkRoots(cacheKey)
+            sourceKindOf(gid) == SourceKind.DIRECTORY -> loadBaiduDirectoryRoots(cacheKey)
+            else -> loadRoots(cacheKey)
         }
     }
 }
@@ -378,9 +381,7 @@ internal fun MainActivity.loadQuarkDiskPage(dirFid: String, parentPath: String, 
         val result = runCatching {
             val session = QuarkPersonalDrive.openSession() ?: throw QuarkLoginRequired()
             val page = session.execute(session.list(dirFid, 1, 200))
-            page.items
-                .sortedWith(compareByDescending<QuarkFile> { it.directory }.thenBy { it.name })
-                .map { quarkEntry(it, DISK_SOURCE_ID, EntryOrigin.DISK, parentPath) }
+            page.items.map { quarkEntry(it, DISK_SOURCE_ID, EntryOrigin.DISK, parentPath) }
         }
         runOnUiThread {
             if (request != requestId || isFinishing || isDestroyed) return@runOnUiThread
@@ -499,7 +500,7 @@ internal fun MainActivity.loadRoots(
     val homeDirectory = showingHomeDirectory || onRefresh != null
     load(
         PanApi.roots(group, cursor),
-        post = isContactSource(group),
+        post = rootNeedsPost(sourceKindOf(group)),
         statusHint = if (homeDirectory) "正在读取文件库…"
         else if (page == 1 && cacheNote.isNotEmpty()) "$cacheNote · 正在检查更新" else null,
         onCancelled = {
@@ -531,7 +532,7 @@ internal fun MainActivity.loadRoots(
             display(courseCache.readAll(key))
         }
         renderRootMore(key)
-        val pagination = if (isContactSource(group)) json.getJSONObject("records") else json
+        val pagination = if (rootPaginationIsRecords(sourceKindOf(group))) json.getJSONObject("records") else json
         if (next.isEmpty() && PanApi.hasMore(pagination)) {
             status.text = "网盘未返回可用的分页游标，请刷新后重试。"
         }
@@ -541,7 +542,7 @@ internal fun MainActivity.loadRoots(
 
 
 internal fun MainActivity.nextRootCursor(json: JSONObject, sourceId: String, cursor: String): String {
-    if (isContactSource(sourceId)) {
+    if (rootCursorIsRecords(sourceKindOf(sourceId))) {
         val records = json.getJSONObject("records")
         return records.optString("cursor", "").takeIf {
             PanApi.hasMore(records) && !records.isNull("cursor") && it != cursor
@@ -670,8 +671,11 @@ internal fun MainActivity.renderRootMore(key: String) {
     more.setTextColor(color(R.color.ink3))
     more.setOnClickListener {
         more.isEnabled = false
-        if (providerOfSourceId(gid) == SourceProvider.QUARK) loadQuarkRoots(key, page + 1, more)
-        else loadRoots(key, page + 1, cursor, more)
+        when {
+            providerOfSourceId(gid) == SourceProvider.QUARK -> loadQuarkRoots(key, page + 1, more)
+            sourceKindOf(gid) == SourceKind.DIRECTORY -> loadBaiduDirectoryRoots(key, page + 1, more)
+            else -> loadRoots(key, page + 1, cursor, more)
+        }
     }
     content.addView(more)
 }
@@ -815,13 +819,12 @@ internal fun MainActivity.probeAccount(onDone: (Boolean, Boolean) -> Unit) {
                     courseEntries.clear()
                     courseParentKey = ""
                     pendingQueue = pendingQueue?.takeIf { videoToRestore?.account == verifiedAccount }
-                    PlaybackQueueState.anchor = null
-                    PlaybackQueueState.entries = emptyList()
-                    PlaybackQueueState.listKey = null
+                    PlaybackQueueState.clear()
                     toast("已切换账号，数据按账号隔离")
                     setActiveGroup(readActiveSource())
                 }
                 finish(changed, confirmed)
+                verifyPendingDownload()
                 if (confirmed) {
                     restoreVideoIfReady()
                     if (!changed) controller?.let {
@@ -886,8 +889,11 @@ internal fun MainActivity.renderChildMore(parent: PanEntry, key: String) {
     more.setTextColor(color(R.color.ink3))
     more.setOnClickListener {
         more.isEnabled = false
-        if (providerOfSourceId(parent.gid) == SourceProvider.QUARK) loadQuarkChildren(parent, page + 1, more, key)
-        else loadChildren(parent, page + 1, more, key)
+        when {
+            providerOfSourceId(parent.gid) == SourceProvider.QUARK -> loadQuarkChildren(parent, page + 1, more, key)
+            sourceKindOf(gid) == SourceKind.DIRECTORY -> loadBaiduDirectoryChildren(parent, page + 1, more, key)
+            else -> loadChildren(parent, page + 1, more, key)
+        }
     }
     content.addView(more)
 }

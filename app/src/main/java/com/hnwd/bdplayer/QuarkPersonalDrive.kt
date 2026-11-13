@@ -42,8 +42,12 @@ internal data class QuarkPlayback(val uri: Uri, val hls: Boolean) {
 internal class QuarkLoginRequired : Exception("请登录夸克网盘后重试")
 internal class QuarkMutationPending : Exception("网盘仍在处理，请稍后刷新确认结果")
 
-internal class QuarkPersonalDrive private constructor(private val cookie: String, private val userAgent: String?) :
+internal class QuarkPersonalDrive private constructor(
+    private val cookie: String, private val userAgent: String?, private val transfer: Boolean = false,
+) :
     PersonalDriveProtocol<QuarkFile, QuarkFile> {
+
+    private var transferCookie = cookie
 
     companion object {
         const val HOME = "https://pan.quark.cn/"
@@ -133,6 +137,11 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
                 changed = true
             }
             if (changed) runCatching { manager.flush() }
+        }
+
+        fun forTransfer(session: TransferSession, userAgent: String): QuarkPersonalDrive {
+            require(session.provider == SourceProvider.QUARK)
+            return QuarkPersonalDrive(session.cookie, userAgent, transfer = true)
         }
 
         fun openSession(userAgent: String? = null): QuarkPersonalDrive? =
@@ -225,6 +234,11 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
         return signedUri(item.getString("download_url"))
     }
 
+    fun downloadForTransfer(file: QuarkFile): DownloadLinkResolver.Link {
+        check(transfer)
+        return DownloadLinkResolver.Link(download(file), transferCookie)
+    }
+
     fun pdfLink(fileId: String): Uri =
         signedUri(post("pdf/preview", JSONObject().put("fid", fileId)).getString("download_url"))
 
@@ -265,7 +279,21 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
             }
             val status = connection.responseCode
             if (status == 401) throw QuarkLoginRequired()
-            syncSessionCookies(connection)
+            if (transfer) {
+                val cookies = cookie.split(';').map(String::trim).associateByTo(linkedMapOf()) { it.substringBefore('=') }
+                connection.headerFields.entries.firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }
+                    ?.value.orEmpty().forEach { line ->
+                        val pair = line.substringBefore(';').trim()
+                        val name = pair.substringBefore('=')
+                        if (name in SESSION_COOKIES) {
+                            if (pair.substringAfter('=', "").isBlank()) cookies.remove(name)
+                            else cookies[name] = pair
+                        }
+                    }
+                transferCookie = cookies.values.joinToString("; ") { it.trim() }
+            } else {
+                syncSessionCookies(connection)
+            }
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val json = stream?.bufferedReader()?.use { reader ->
                 runCatching { JSONObject(reader.readText()) }.getOrNull()

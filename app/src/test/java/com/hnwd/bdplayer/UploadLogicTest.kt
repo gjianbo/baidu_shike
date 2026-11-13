@@ -54,7 +54,7 @@ class UploadLogicTest {
     }
 
     @Test
-    fun plan_allowsSingleChunkAndRejectsOver1024Parts() {
+    fun plan_keepsSmallChunksAndScalesForLargeMemberFiles() {
         val small = UploadLogic.plan(4 * mb, "0")
         assertTrue(small.allowed)
         assertEquals(1, small.chunks)
@@ -69,8 +69,15 @@ class UploadLogicTest {
         assertTrue(tooMany.reason.contains("1024"))
 
         val vipBig = UploadLogic.plan(10 * gb, "1")
-        assertFalse(vipBig.allowed)
-        assertTrue(vipBig.reason.contains("1024"))
+        assertTrue(vipBig.allowed)
+        assertEquals(16 * mb, vipBig.chunkBytes)
+        assertEquals(640, vipBig.chunks)
+        val superVip = UploadLogic.plan(20 * gb - 1, "2")
+        assertTrue(superVip.allowed)
+        assertEquals(32 * mb, superVip.chunkBytes)
+        val last = UploadLogic.chunkAt(superVip.size, superVip.chunks - 1, superVip.chunkBytes)
+        assertEquals(superVip.size, last.offset + last.length)
+        assertFalse(UploadLogic.plan(10 * gb + 1, "1").allowed)
     }
 
     @Test

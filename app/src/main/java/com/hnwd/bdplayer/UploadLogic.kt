@@ -11,8 +11,8 @@ import org.json.JSONObject
  * 真正发 multipart 的实现放在 PanUploader，编排放在 UploadSection。
  *
  * 口径（网页内部接口，非开放平台 xpan）：
- * - 分片固定 4MB（网页上传器 JS `chunkSize: 4194304`）；
- * - `precreate.block_list` = 本地每片 MD5，长度必须等于 `ceil(size/4MB)`，空数组会 errno 2；
+ * - 默认使用 4 MiB 分片，会员文件超过 4 GiB 时按账号等级扩大分片；
+ * - `precreate.block_list` 是按同一分片规划计算的本地 MD5；
  * - `create.block_list` = 各分片上传成功后**服务端返回的 MD5**，与 precreate 的不可混用；
  * - >256KB 可先试 `/api/rapidupload` 秒传；
  * - 分片数 ≤1024，对应普通账号 4GB 上限。
@@ -47,22 +47,28 @@ internal object UploadLogic {
     }
 
     /** 空文件按 1 片（0 字节）处理，与 `block_list` 至少一个元素的要求一致。 */
-    fun chunkCount(size: Long): Int = when {
+    fun chunkCount(size: Long, chunkBytes: Long = CHUNK_BYTES): Int = when {
         size <= 0 -> 1
-        else -> ((size + CHUNK_BYTES - 1) / CHUNK_BYTES).toInt()
+        else -> ((size - 1) / chunkBytes + 1).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 
-    fun chunkAt(size: Long, index: Int): Chunk {
-        require(index in 0 until chunkCount(size)) { "分片序号越界：$index" }
-        val offset = index * CHUNK_BYTES
-        val length = if (size <= 0) 0 else minOf(CHUNK_BYTES, size - offset).toInt()
+    fun chunkAt(size: Long, index: Int, chunkBytes: Long = CHUNK_BYTES): Chunk {
+        require(index in 0 until chunkCount(size, chunkBytes)) { "分片序号越界：$index" }
+        val offset = index * chunkBytes
+        val length = if (size <= 0) 0 else minOf(chunkBytes, size - offset).toInt()
         return Chunk(index, offset, length)
     }
 
     fun rapidEligible(size: Long): Boolean = size > RAPID_MIN_BYTES
 
     fun plan(size: Long, vipRaw: String): Plan {
-        val chunks = chunkCount(size)
+        val chunkBytes = when {
+            size <= PLAIN_MAX_BYTES -> CHUNK_BYTES
+            vipLevel(vipRaw) == 2 -> 32L * 1024 * 1024
+            vipLevel(vipRaw) == 1 -> 16L * 1024 * 1024
+            else -> CHUNK_BYTES
+        }
+        val chunks = chunkCount(size, chunkBytes)
         val reason = when {
             size < 0 -> "文件大小无效"
             chunks > MAX_PARTS ->
@@ -73,7 +79,7 @@ internal object UploadLogic {
         return Plan(
             size = size,
             chunks = chunks,
-            chunkBytes = CHUNK_BYTES,
+            chunkBytes = chunkBytes,
             rapid = rapidEligible(size),
             allowed = reason.isEmpty(),
             reason = reason,
@@ -98,8 +104,8 @@ internal object UploadLogic {
     }
 
     /** 跳过分片（秒传命中或服务端已有）的字节数，作为进度起点，避免多分片进度卡在 50%。 */
-    fun skippedBytes(size: Long, chunks: Int, toUpload: Set<Int>): Long =
-        (0 until chunks).filter { it !in toUpload }.sumOf { chunkAt(size, it).length.toLong() }
+    fun skippedBytes(size: Long, chunks: Int, toUpload: Set<Int>, chunkBytes: Long = CHUNK_BYTES): Long =
+        (0 until chunks).filter { it !in toUpload }.sumOf { chunkAt(size, it, chunkBytes).length.toLong() }
 
     data class Precreate(val uploadId: String, val returnType: Int, val neededParts: Set<Int>)
 
@@ -148,7 +154,7 @@ internal object UploadLogic {
     }
 
     fun uploadError(errno: Int, stage: String): String = when (errno) {
-        2 -> "$stage：分片参数不匹配，block_list 长度必须等于 ceil(大小/4MB)"
+        2 -> "$stage：分片参数不匹配，请检查分片大小和 block_list"
         9019 -> "$stage：网盘风控拦截（9019），不要混用开放平台 xpan 接口"
         12, 111 -> "$stage：批量操作部分失败，请刷新目录确认"
         31023, 31362 -> "$stage：签名或校验失败，请重新取址后重试"

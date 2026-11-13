@@ -1,117 +1,121 @@
 package com.hnwd.bdplayer
 
 import android.app.Activity
-import android.net.Uri
 
-/** 取址链路需要的最小宿主能力；隐藏 WebView 与账号状态仍归 MainActivity。 */
 internal interface DownloadHost {
     val hostActivity: Activity
 
     fun account(): String
     fun userAgent(): String
     fun sessionReady(provider: SourceProvider): Boolean
-    fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit)
-    fun verifyAccount()
+    fun isVisible(): Boolean
     fun isCurrent(): Boolean
     fun say(message: String)
-    fun setStatus(message: String)
-    fun runOnUiThread(action: () -> Unit)
-    fun onAdded(name: String)
+    fun onAdded(message: String)
 }
 
-/**
- * 长按「下载」的取址分派：复用媒体取址层的 sharedownload / /api/download，
- * 夸克则直接走 file/download。拿到直链后交给 [DownloadCenter] 排队，不自己传字节。
- *
- * 用独立的 [RequestLane.DOWNLOAD]，避免取址时把正在跑的列表请求顶掉；
- * MainActivity.load() 对该 lane 也放开了并发（不比较计数器），因此连续下载多个文件
- * 不会互相取消。
- */
+/** Entry actions enqueue file identities. Only an interactive captcha needs the Activity. */
 internal class DownloadSection(
     private val host: DownloadHost,
     private val mediaLinks: MediaLinkSection,
 ) {
-    fun start(entry: PanEntry) {
-        if (!DownloadLogic.canDownload(entry)) {
-            host.say("文件夹不能下载")
-            return
-        }
-        if (!host.sessionReady(entry.provider)) {
-            host.say(if (entry.provider == SourceProvider.QUARK) "请先登录夸克网盘" else "请先登录百度网盘")
-            return
-        }
-        val route = DownloadLogic.routeOf(entry)
-        val userAgent = host.userAgent()
+    fun start(entry: PanEntry) = start(listOf(entry))
 
-        fun receive(uri: Uri) {
-            if (!host.isCurrent()) return
-            // 取址开始时写过状态栏提示，成功/失败都要收尾，否则「正在获取下载地址…」
-            // 会一直挂在页面上误导用户（项目里其它页面也是用空串清状态栏）。
-            host.setStatus("")
-            val task = DownloadTask(
+    fun start(entries: List<PanEntry>) {
+        val files = entries.filter(DownloadLogic::canDownload)
+        if (files.isEmpty()) {
+            host.say("请选择可下载的文件")
+            return
+        }
+        val ready = files.filter { host.sessionReady(it.provider) }
+        if (ready.isEmpty()) {
+            host.say("请先登录${DownloadLogic.sourceLabel(DownloadLogic.routeOf(files.first()))}")
+            return
+        }
+        val viewer = host.account()
+        val userAgent = host.userAgent()
+        val quarkAccount = if (ready.any { it.provider == SourceProvider.QUARK }) {
+            runCatching { TransferSession.capture(SourceProvider.QUARK).quarkAccount() }.getOrDefault("")
+        } else ""
+        val allowed = ready.filter {
+            if (it.provider == SourceProvider.QUARK) quarkAccount.isNotBlank() else viewer.isNotBlank()
+        }
+        if (allowed.isEmpty()) {
+            host.say("无法确认网盘账号，请检查登录后重试")
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        val queued = DownloadCenter.add(host.hostActivity, allowed.map { entry ->
+            DownloadTask(
                 id = DownloadCenter.newId(),
                 name = entry.name,
-                sizeBytes = entry.size.toLongOrNull() ?: 0L,
+                sizeBytes = entry.size.toLongOrNull() ?: 0,
                 provider = entry.provider,
-                sourceLabel = DownloadLogic.sourceLabel(route),
-                createdAt = System.currentTimeMillis(),
-                url = uri.toString(),
+                sourceLabel = DownloadLogic.sourceLabel(DownloadLogic.routeOf(entry)),
+                createdAt = now,
                 userAgent = userAgent,
-                referer = DownloadLogic.headers(route, userAgent).first { it.first == "Referer" }.second,
                 mediaType = DownloadLogic.mimeType(entry.name),
+                entry = entry.copy(previewUrl = ""),
+                viewer = if (entry.provider == SourceProvider.BAIDU) viewer else quarkAccount,
             )
-            DownloadCenter.add(host.hostActivity, task)
-            host.onAdded(entry.name)
+        })
+        if (!queued) {
+            host.say("无法启动下载队列，请稍后重试")
+            return
         }
-
-        fun fail(message: String) {
-            if (!host.isCurrent()) return
-            host.setStatus("")
-            host.say(message)
+        val message = if (allowed.size == 1 && entries.size == 1) {
+            "已加入下载队列：${allowed.single().name}"
+        } else {
+            val skipped = entries.size - allowed.size
+            "已加入下载队列（${allowed.size} 个文件）" +
+                if (skipped > 0) "，跳过 $skipped 项" else ""
         }
-
-        when (route) {
-            DownloadRoute.QUARK -> AppIo.execute {
-                val result = runCatching {
-                    val drive = QuarkPersonalDrive.openSession(userAgent) ?: throw QuarkLoginRequired()
-                    drive.download(QuarkFile(entry.fileId, entry.name, false))
-                }
-                host.runOnUiThread {
-                    result.onSuccess(::receive).onFailure { fail(quarkError(it)) }
-                }
-            }
-            DownloadRoute.BAIDU_GROUP -> {
-                val viewer = host.account()
-                if (viewer.isEmpty()) {
-                    host.verifyAccount()
-                    host.say("账号校验中，请稍后再试下载")
-                    return
-                }
-                host.setStatus("正在获取下载地址…")
-                mediaLinks.resolve(
-                    entry, viewer, lane = RequestLane.DOWNLOAD,
-                    onFailure = { fail("无法获取下载地址，请重试") },
-                ) { receive(it) }
-            }
-            DownloadRoute.BAIDU_DISK -> {
-                host.setStatus("正在获取下载地址…")
-                host.withBdstoken(
-                    onReady = { token ->
-                        if (!host.isCurrent()) return@withBdstoken
-                        mediaLinks.requestDiskLink(
-                            entry, token, RequestLane.DOWNLOAD, { host.isCurrent() },
-                            onFailure = { fail("无法获取下载地址，请重试") },
-                        ) { receive(it) }
-                    },
-                    onFailure = { fail("网盘会话未就绪，请稍后重试") },
-                )
-            }
-        }
+        host.onAdded(message)
     }
 
-    private fun quarkError(error: Throwable): String = when {
-        error is QuarkLoginRequired -> "请先登录夸克网盘"
-        error.message?.contains("23018") == true -> "夸克网盘非会员单个文件下载上限约 50MB"
-        else -> "无法获取夸克下载地址：${error.message ?: "请重试"}"
+    fun verify(id: Long) {
+        val task = DownloadCenter.tasks(host.hostActivity).firstOrNull {
+            it.id == id && it.state == DownloadState.FAILED && it.needsVerification
+        } ?: return
+        if (task.provider != SourceProvider.BAIDU || !DownloadLogic.hasAccountBinding(task)) return
+        val session = runCatching { TransferSession.capture(task.provider) }.getOrElse {
+            host.say(it.message ?: "请先登录百度网盘")
+            return
+        }
+        verify(task, session, "")
+    }
+
+    private fun verify(task: DownloadTask, session: TransferSession, verification: String) {
+        val activity = host.hostActivity
+        val app = activity.applicationContext
+        AppIo.execute {
+            val link = runCatching { DownloadLinkResolver.resolve(app, task, session, verification) }
+            val error = link.exceptionOrNull()
+            val captcha = (error as? DownloadLinkResolver.VerificationRequired)?.let {
+                runCatching { DownloadLinkResolver.captcha(task, session, it) }.getOrNull()
+            }
+            activity.runOnUiThread {
+                if (!host.isCurrent() || !host.isVisible()) return@runOnUiThread
+                val resolved = link.getOrNull()
+                when {
+                    resolved != null -> {
+                        if (DownloadCenter.submitVerified(activity, task.id, resolved)) {
+                            host.onAdded("已重新加入下载队列：${task.name}")
+                        } else host.say("下载任务已变更或队列已满，请稍后重试")
+                    }
+                    captcha != null -> mediaLinks.showCaptcha(
+                        RequestLane.DOWNLOAD, captcha, captchaPrompt(verification.isNotEmpty()),
+                        host::isCurrent, host::say, cookie = session.cookie,
+                    ) { answer ->
+                        verify(task, session, "&" + PanApi.mediaCaptchaForm(captcha, answer))
+                    }
+                    else -> host.say(when (error) {
+                        is TransferSession.Failure, is DownloadLinkResolver.Failure -> error.message.orEmpty()
+                        else -> "未取得下载地址，请重新验证"
+                    })
+                }
+            }
+        }
     }
 }
