@@ -219,6 +219,12 @@ internal object DownloadCenter {
             if (task.provider == SourceProvider.QUARK) DownloadRoute.QUARK else DownloadRoute.BAIDU_GROUP,
             task.userAgent,
         ).forEach { (key, value) -> request.addRequestHeader(key, value) }
+        // 夸克 CDN 只认会话 Cookie 里的 __puus，缺了直链一律 412。取址时
+        // QuarkPersonalDrive 已把 API 的 Set-Cookie 回流到 WebView CookieManager，
+        // 这里按实际直链地址取最新会话（重试时也能覆盖轮换后的 __puus）。
+        if (task.provider == SourceProvider.QUARK) {
+            QuarkPersonalDrive.mediaCookie(task.url)?.let { request.addRequestHeader("Cookie", it) }
+        }
         // 同一毫秒内重复下载同名文件会撞名并互相覆盖；id 后缀保证目标路径唯一，
         // 且重试复用同一个 task.id，不会反复产生新文件名。
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.CHINA).format(Date(task.createdAt)) +

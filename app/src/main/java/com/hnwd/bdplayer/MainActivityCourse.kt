@@ -498,20 +498,12 @@ internal fun MainActivity.siblingOf(entry: PanEntry, delta: Int): PanEntry? {
 
 
 internal fun MainActivity.renderCourseSwitch() {
-    val anchor = PlaybackQueueState.anchor
-    val index = if (anchor == null) -1 else PlaybackQueueState.entries.indexOfFirst { sameEntry(it, anchor) }
-    if (anchor == null || index < 0 || folders.isEmpty() || courseEntries.none { sameEntry(it, anchor) }) {
-        courseSwitch.visibility = View.GONE
-        return
-    }
-    courseSwitch.visibility = View.VISIBLE
-    btnPrev.isEnabled = siblingOf(anchor, -1) != null
-    btnNext.isEnabled = siblingOf(anchor, 1) != null
-    btnPrev.alpha = if (btnPrev.isEnabled) 1f else 0.4f
-    btnNext.alpha = if (btnNext.isEnabled) 1f else 0.4f
-    courseHint.text = "第 ${index + 1} / ${PlaybackQueueState.entries.size} 节"
-    btnPrev.setOnClickListener { playSibling(anchor, -1) }
-    btnNext.setOnClickListener { playSibling(anchor, 1) }
+    // 课程切换已收敛到播放页内（VideoPlaybackPage 的上一节/下一节、音频页动作栏）。
+    // 主界面底部 include 的 courseSwitch 是早期遗留控件：关闭视频播放页时
+    // PlaybackQueueState.anchor 不清空，目录页会残留一条「第 X / N 节」却没有任何
+    // 播放内容的切换条。按产品决策：目录页彻底不显示它。
+    // 保留本函数是因为播放确认、排序、加载更多、设置页等多处仍会调用它，统一在此收敛。
+    courseSwitch.visibility = View.GONE
 }
 
 

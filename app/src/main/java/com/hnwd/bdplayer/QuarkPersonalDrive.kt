@@ -54,6 +54,26 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
         // 匿名访问也会带 ctoken / b-user-id / _UP_* 等 Cookie，不能用「Cookie 非空」判断已登录。
         private val SESSION_COOKIES = setOf("__pus", "__puus")
 
+        /** API 响应里下发的最新 __puus；WebView CookieManager 的域解析不稳定时作为保底。 */
+        @Volatile
+        private var latestPuus: String? = null
+
+        /**
+         * 媒体直链请求用的完整会话 Cookie：以 CookieManager 为准，若其中缺 __puus
+         * 则补上 [latestPuus]。夸克 CDN 只认 __puus，缺了播放/下载直链一律 412。
+         */
+        fun mediaCookie(url: String): String? {
+            val fromManager = runCatching { CookieManager.getInstance().getCookie(url) }
+                .getOrNull().orEmpty()
+            val puus = latestPuus
+            return when {
+                puus.isNullOrBlank() -> fromManager.takeIf { it.isNotBlank() }
+                fromManager.contains("__puus=") -> fromManager
+                else -> listOfNotNull(fromManager.takeIf { it.isNotBlank() }, "__puus=$puus")
+                    .joinToString("; ").takeIf { it.isNotBlank() }
+            }
+        }
+
         val fileClient = OkHttpClient.Builder()
             .followSslRedirects(false)
             .addNetworkInterceptor { chain ->
@@ -62,7 +82,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
                 val next = request.newBuilder().removeHeader("Cookie")
                 // 按实际请求地址读取会话，跨域重定向不转发夸克 Cookie。
                 if (isMediaUri(url.toUri())) {
-                    CookieManager.getInstance().getCookie(url)?.let { next.header("Cookie", it) }
+                    mediaCookie(url)?.let { next.header("Cookie", it) }
                 }
                 chain.proceed(next.build())
             }
@@ -87,6 +107,32 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
                 val value = part.substringAfter('=', "").trim()
                 name in SESSION_COOKIES && value.isNotEmpty()
             }
+        }
+
+        /**
+         * 夸克在 API 响应里下发 __puus（Domain=quark.cn），播放/下载直链的 CDN 鉴权只认它：
+         * 缺了 __puus 时直链一律 412 Precondition Failed。HttpURLConnection 不会把 Set-Cookie
+         * 写回 WebView CookieManager，这里显式回流，让 [fileClient] 拦截器与系统下载器
+         * 都能取到最新会话（__pus 只是登录标记，单独带仍会 412）。
+         */
+        private fun syncSessionCookies(connection: HttpURLConnection) {
+            val lines = connection.headerFields.entries
+                .firstOrNull { it.key.equals("Set-Cookie", ignoreCase = true) }?.value.orEmpty()
+            val manager = CookieManager.getInstance()
+            var changed = false
+            lines.forEach { line ->
+                val pair = line.substringBefore(';')
+                val name = pair.substringBefore('=').trim()
+                if (name !in SESSION_COOKIES) return@forEach
+                val value = pair.substringAfter('=', "").trim()
+                if (name == "__puus" && value.isNotEmpty()) latestPuus = value
+                val normalized = if (line.contains("Domain=", ignoreCase = true)) line
+                    else "$line; Domain=quark.cn; Path=/"
+                // 后台线程调用 WebView CookieManager；失败也不影响取址，latestPuus 仍会兜底。
+                runCatching { manager.setCookie(HOME, normalized) }
+                changed = true
+            }
+            if (changed) runCatching { manager.flush() }
         }
 
         fun openSession(userAgent: String? = null): QuarkPersonalDrive? =
@@ -219,6 +265,7 @@ internal class QuarkPersonalDrive private constructor(private val cookie: String
             }
             val status = connection.responseCode
             if (status == 401) throw QuarkLoginRequired()
+            syncSessionCookies(connection)
             val stream = if (status in 200..299) connection.inputStream else connection.errorStream
             val json = stream?.bufferedReader()?.use { reader ->
                 runCatching { JSONObject(reader.readText()) }.getOrNull()

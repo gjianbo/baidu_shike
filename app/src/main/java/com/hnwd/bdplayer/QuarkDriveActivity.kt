@@ -369,10 +369,15 @@ class QuarkDriveActivity : AppCompatActivity() {
             runCatching {
                 val safeName = file.name.replace('/', '_').replace('\\', '_')
                 val target = "${System.currentTimeMillis()}_$safeName"
-                manager.enqueue(android.app.DownloadManager.Request(uri)
+                val req = android.app.DownloadManager.Request(uri)
                     .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, target)
                     .setTitle(file.name)
-                    .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED))
+                    .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                // 夸克直链鉴权依赖 API 响应回流的会话 Cookie（__puus），缺了会 412。
+                QuarkPersonalDrive.mediaCookie(uri.toString())
+                    ?.let { req.addRequestHeader("Cookie", it) }
+                req.addRequestHeader("Referer", QuarkPersonalDrive.HOME)
+                manager.enqueue(req)
             }.onSuccess { status.text = "已加入系统下载" }
                 .onFailure { status.text = "无法加入系统下载" }
         }
