@@ -85,7 +85,6 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
         page.findViewById<View>(R.id.setUpdateRow).setOnClickListener { host.checkAppUpdate() }
-        page.findViewById<TextView>(R.id.setUpdateValue).text = currentVersionLabel()
         page.findViewById<TextView>(R.id.setAbout).text = aboutLine()
         host.addPage(page)
         bindPreviewCache(page)
@@ -97,10 +96,6 @@ internal class SettingsPage(private val host: SettingsHost) {
     private fun currentVersionName(): String = runCatching {
         activity.packageManager.getPackageInfo(activity.packageName, 0).versionName.orEmpty()
     }.getOrDefault("")
-
-    /** 检查更新行右侧的短标签（v1.2.1）。 */
-    private fun currentVersionLabel(): String =
-        currentVersionName().takeIf { it.isNotEmpty() }?.let { "v$it" }.orEmpty()
 
     /** 底部关于：只保留应用名 + 版本号，不带包名。 */
     private fun aboutLine(): String {

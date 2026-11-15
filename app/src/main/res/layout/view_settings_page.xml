@@ -447,13 +447,6 @@
                     android:text="检测 GitHub 上的新版本" />
             </LinearLayout>
 
-            <TextView
-                android:id="@+id/setUpdateValue"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="@color/ink3"
-                android:textSize="11.5sp" />
-
             <ImageView
                 android:layout_width="18dp"
                 android:layout_height="18dp"
