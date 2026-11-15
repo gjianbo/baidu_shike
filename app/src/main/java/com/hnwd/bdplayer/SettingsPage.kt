@@ -84,13 +84,21 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setBackupRow).setOnClickListener { host.launchBackup() }
         page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
-        val about = page.findViewById<TextView>(R.id.setAbout)
-        about.text = host.appVersionLine() + "\n点击检查更新"
-        about.setOnClickListener { host.checkAppUpdate() }
+        page.findViewById<View>(R.id.setUpdateRow).setOnClickListener { host.checkAppUpdate() }
+        page.findViewById<TextView>(R.id.setUpdateValue).text = currentVersionLabel()
+        page.findViewById<TextView>(R.id.setAbout).text = host.appVersionLine()
         host.addPage(page)
         bindPreviewCache(page)
         host.renderCourseSwitch()
     }
+
+    /** 当前安装版本的短标签（v1.2.1）；读不到时留空，不阻塞设置页渲染。 */
+    @Suppress("DEPRECATION")
+    private fun currentVersionLabel(): String = runCatching {
+        val name = activity.packageManager
+            .getPackageInfo(activity.packageName, 0).versionName.orEmpty()
+        if (name.isEmpty()) "" else "v$name"
+    }.getOrDefault("")
 
     private fun bindPreviewCache(page: View) {
         val row = page.findViewById<View>(R.id.setPreviewCacheRow)
