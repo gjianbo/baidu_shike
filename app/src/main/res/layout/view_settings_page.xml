@@ -171,67 +171,6 @@
         android:orientation="vertical">
 
         <LinearLayout
-            android:id="@+id/setUpdateRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="?attr/selectableItemBackground"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:padding="16dp">
-
-            <ImageView
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:background="@drawable/bg_empty_icon"
-                android:padding="10dp"
-                android:importantForAccessibility="no"
-                android:src="@drawable/ic_refresh" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="13dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    style="@style/SettingTitle"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="检查更新" />
-
-                <TextView
-                    style="@style/SettingSub"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="3dp"
-                    android:text="检测 GitHub 上的新版本" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/setUpdateValue"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="@color/ink3"
-                android:textSize="11.5sp" />
-
-            <ImageView
-                android:layout_width="18dp"
-                android:layout_height="18dp"
-                android:layout_marginStart="6dp"
-                android:importantForAccessibility="no"
-                android:src="@drawable/ic_chevron_right" />
-        </LinearLayout>
-
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginLeft="69dp"
-            android:background="@color/line" />
-
-        <LinearLayout
             android:id="@+id/setThemeRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -453,6 +392,67 @@
                     android:layout_marginTop="3dp"
                     android:text="手动备份 · 下载 / 拾课备份" />
             </LinearLayout>
+
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginStart="6dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_chevron_right" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginLeft="69dp"
+            android:background="@color/line" />
+
+        <LinearLayout
+            android:id="@+id/setUpdateRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="?attr/selectableItemBackground"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:padding="16dp">
+
+            <ImageView
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:background="@drawable/bg_empty_icon"
+                android:padding="10dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_refresh" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="13dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    style="@style/SettingTitle"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="检查更新" />
+
+                <TextView
+                    style="@style/SettingSub"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="检测 GitHub 上的新版本" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/setUpdateValue"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/ink3"
+                android:textSize="11.5sp" />
 
             <ImageView
                 android:layout_width="18dp"

@@ -86,19 +86,28 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
         page.findViewById<View>(R.id.setUpdateRow).setOnClickListener { host.checkAppUpdate() }
         page.findViewById<TextView>(R.id.setUpdateValue).text = currentVersionLabel()
-        page.findViewById<TextView>(R.id.setAbout).text = host.appVersionLine()
+        page.findViewById<TextView>(R.id.setAbout).text = aboutLine()
         host.addPage(page)
         bindPreviewCache(page)
         host.renderCourseSwitch()
     }
 
-    /** 当前安装版本的短标签（v1.2.1）；读不到时留空，不阻塞设置页渲染。 */
+    /** 当前安装版本号（1.2.1）；读不到时返回空串，不阻塞设置页渲染。 */
     @Suppress("DEPRECATION")
-    private fun currentVersionLabel(): String = runCatching {
-        val name = activity.packageManager
-            .getPackageInfo(activity.packageName, 0).versionName.orEmpty()
-        if (name.isEmpty()) "" else "v$name"
+    private fun currentVersionName(): String = runCatching {
+        activity.packageManager.getPackageInfo(activity.packageName, 0).versionName.orEmpty()
     }.getOrDefault("")
+
+    /** 检查更新行右侧的短标签（v1.2.1）。 */
+    private fun currentVersionLabel(): String =
+        currentVersionName().takeIf { it.isNotEmpty() }?.let { "v$it" }.orEmpty()
+
+    /** 底部关于：只保留应用名 + 版本号，不带包名。 */
+    private fun aboutLine(): String {
+        val appName = activity.getString(R.string.app_name)
+        val version = currentVersionName()
+        return if (version.isEmpty()) appName else "$appName $version"
+    }
 
     private fun bindPreviewCache(page: View) {
         val row = page.findViewById<View>(R.id.setPreviewCacheRow)
