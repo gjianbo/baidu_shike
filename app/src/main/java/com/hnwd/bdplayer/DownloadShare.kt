@@ -20,13 +20,16 @@ internal object DownloadShare {
 
     enum class Outcome { LAUNCHED, NOT_READY, NO_TARGET }
 
-    fun share(context: Context, task: DownloadTask): Outcome {
-        if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return Outcome.NOT_READY
-        val uri = task.outputUri.takeIf(String::isNotBlank)?.toUri()
+    /** 记录对应的文件 uri：优先 MediaStore 输出 uri，历史记录退回系统下载队列。 */
+    fun uriOf(context: Context, task: DownloadTask): Uri? =
+        task.outputUri.takeIf(String::isNotBlank)?.toUri()
             ?: runCatching {
                 context.getSystemService(DownloadManager::class.java)?.getUriForDownloadedFile(task.downloadId)
             }.getOrNull()
-            ?: return Outcome.NOT_READY
+
+    fun share(context: Context, task: DownloadTask): Outcome {
+        if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return Outcome.NOT_READY
+        val uri = uriOf(context, task) ?: return Outcome.NOT_READY
         // 文件可能已被用户在系统文件管理器里删掉：记录还在，uri 已经读不到了。
         if (!readable(context, uri)) return Outcome.NOT_READY
 

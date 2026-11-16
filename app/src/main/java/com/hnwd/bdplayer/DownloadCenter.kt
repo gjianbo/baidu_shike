@@ -211,6 +211,26 @@ internal object DownloadCenter {
         true
     }
 
+    /** 重命名成功后同步记录里的显示名，列表、分享面板与打开方式都以它为准。 */
+    fun renameRecord(context: Context, id: Long, name: String) = synchronized(lock) {
+        val list = read(context)
+        val index = list.indexOfFirst { it.id == id }
+        if (index < 0) return@synchronized
+        list[index] = list[index].copy(name = name)
+        write(context, list, durable = true)
+    }
+
+    /** 只移除记录，不动已发布的文件（文件由 [DownloadFileOps.deleteFile] 单独处理）。 */
+    fun forget(context: Context, id: Long) = synchronized(lock) {
+        val list = read(context)
+        val index = list.indexOfFirst { it.id == id }
+        if (index < 0) return@synchronized
+        // 半成品暂存要一并清掉，成功记录的 stagingName 早已为空。
+        cleanupStage(context, list[index])
+        list.removeAt(index)
+        write(context, list, durable = true)
+    }
+
     fun clearFinished(context: Context) = synchronized(lock) {
         val list = read(context)
         if (list.removeAll {

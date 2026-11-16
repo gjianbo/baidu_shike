@@ -9,10 +9,12 @@ import android.os.Looper
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
@@ -370,6 +372,8 @@ class DownloadActivity : AppCompatActivity() {
                 })
             }
         })
+        // 「需要重试」分区里的失败记录也可以长按移除，不必绕到历史页。
+        if (task.state == DownloadState.FAILED) attachMoreMenu(row, task)
         taskList.addView(row)
     }
 
@@ -418,24 +422,146 @@ class DownloadActivity : AppCompatActivity() {
                 toast("没有可打开此文件的应用")
             }
         })
-        if (task.state == DownloadState.SUCCESS) attachShare(row, task)
+        if (task.state == DownloadState.SUCCESS || task.state == DownloadState.FAILED) {
+            attachMoreMenu(row, task)
+        }
         taskList.addView(row)
     }
 
     /**
-     * 长按已完成的下载 → 系统分享面板。
-     * 文件本身在 MediaStore 的「下载/拾课」，直接以 content uri 交给接收方，不做二次拷贝。
+     * 长按终态记录 → 更多操作菜单。分享直接把 uri 交给系统面板；重命名/删除作用于
+     * MediaStore 里的真实文件；「移除记录」只动列表，避免误删公共「下载 / 拾课」里的文件。
      */
-    private fun attachShare(row: View, task: DownloadTask) {
+    private fun attachMoreMenu(row: View, task: DownloadTask) {
+        if (DownloadFileLogic.actions(task.state).isEmpty()) return
         row.setOnLongClickListener {
-            when (DownloadShare.share(this, task)) {
-                DownloadShare.Outcome.LAUNCHED -> Unit
-                DownloadShare.Outcome.NOT_READY ->
-                    toast(ShareLogic.unavailableMessage(task.state, task.publishing))
-                DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
-            }
+            showMoreMenu(row, task)
             true
         }
+    }
+
+    private fun showMoreMenu(anchor: View, task: DownloadTask) {
+        val actions = DownloadFileLogic.actions(task.state)
+        PopupMenu(this, anchor).apply {
+            // itemId 用「当前展示的下标」而不是 ordinal：失败记录只有一项，ordinal 会越界。
+            actions.forEachIndexed { index, action ->
+                menu.add(0, index, index, DownloadFileLogic.label(action))
+            }
+            setOnMenuItemClickListener { item ->
+                when (actions.getOrNull(item.itemId)) {
+                    MoreAction.SHARE -> shareFile(task)
+                    MoreAction.RENAME -> promptRename(task)
+                    MoreAction.INFO -> showFileInfo(task)
+                    MoreAction.REMOVE_RECORD -> confirmRemoveRecord(task)
+                    MoreAction.DELETE_FILE -> confirmDeleteFile(task)
+                    null -> return@setOnMenuItemClickListener false
+                }
+                true
+            }
+            show()
+        }
+    }
+
+    private fun shareFile(task: DownloadTask) {
+        when (DownloadShare.share(this, task)) {
+            DownloadShare.Outcome.LAUNCHED -> Unit
+            DownloadShare.Outcome.NOT_READY ->
+                toast(ShareLogic.unavailableMessage(task.state, task.publishing))
+            DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
+        }
+    }
+
+    /** 改名默认填记录里的原名（不含下载时的 `时间戳-id_` 前缀），顺手就能改成干净名字。 */
+    private fun promptRename(task: DownloadTask) {
+        val input = EditText(this).apply {
+            hint = "文件名"
+            isSingleLine = true
+            setText(task.name)
+            setSelection(task.name.length)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("重命名")
+            .setView(padded(input))
+            .setNegativeButton("取消", null)
+            .setPositiveButton("保存", null)
+            .show()
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            val name = input.text.toString().trim()
+            val error = DownloadFileLogic.nameError(name, task.name)
+            if (error != null) {
+                input.error = error
+                return@setOnClickListener
+            }
+            dialog.dismiss()
+            // 不因为「和记录里的名字一样」就跳过：磁盘上的真实文件名可能还带着
+            // `时间戳-id_` 前缀，用户点一次保存正好把前缀去掉。
+            AppIo.execute {
+                val result = DownloadFileOps.rename(this, task, name)
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    when (result) {
+                        DownloadFileOps.Result.OK -> {
+                            refreshNow()
+                            toast("已重命名")
+                        }
+                        DownloadFileOps.Result.UNAVAILABLE -> toast("文件已不存在，只能移除记录")
+                        DownloadFileOps.Result.FAILED -> toast("重命名失败，请稍后重试")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showFileInfo(task: DownloadTask) {
+        AppIo.execute {
+            val info = DownloadFileOps.info(this, task)
+            val text = DownloadFileLogic.infoText(
+                name = info.name,
+                size = DownloadLogic.formatBytes(info.sizeBytes),
+                location = info.location,
+                finished = timeLabel(task.finishedAt).ifBlank { "—" },
+                source = task.sourceLabel.ifBlank { "—" },
+                mime = info.mime,
+            )
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                AlertDialog.Builder(this)
+                    .setTitle("文件信息")
+                    .setMessage(text)
+                    .setPositiveButton("知道了", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun confirmRemoveRecord(task: DownloadTask) {
+        AlertDialog.Builder(this)
+            .setTitle("移除记录")
+            .setMessage(DownloadFileLogic.REMOVE_RECORD_CONFIRM)
+            .setNegativeButton("取消", null)
+            .setPositiveButton("移除") { _, _ ->
+                DownloadCenter.forget(this, task.id)
+                refreshNow()
+            }
+            .show()
+    }
+
+    private fun confirmDeleteFile(task: DownloadTask) {
+        AlertDialog.Builder(this)
+            .setTitle("删除文件")
+            .setMessage(DownloadFileLogic.deleteFileConfirm(task.name))
+            .setNegativeButton("取消", null)
+            .setPositiveButton("删除") { _, _ ->
+                AppIo.execute {
+                    val result = DownloadFileOps.deleteFile(this, task)
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        refreshNow()
+                        toast(if (result == DownloadFileOps.Result.OK) "已删除文件" else "无法删除文件，请检查文件是否还在")
+                    }
+                }
+            }
+            .show()
     }
 
     /** 进行中的上传：只有「取消」，没有暂停（前台服务不提供 App 主动暂停）。 */
