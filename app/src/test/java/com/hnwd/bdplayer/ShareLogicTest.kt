@@ -61,4 +61,19 @@ class ShareLogicTest {
         assertEquals("下载失败的记录不能分享", ShareLogic.unavailableMessage(DownloadState.FAILED, false))
         assertEquals("下载完成后才能分享", ShareLogic.unavailableMessage(DownloadState.RUNNING, false))
     }
+
+    @Test
+    fun multiType_keepsSingleTypeAndFallsBackForMixed() {
+        assertEquals("video/mp4", ShareLogic.multiType(listOf("video/mp4", "video/mp4")))
+        // 前后空白不能把「同类型」判成混合。
+        assertEquals("application/pdf", ShareLogic.multiType(listOf(" application/pdf ", "application/pdf")))
+        // 混选时给 */*，否则接收方会把不匹配的文件丢掉。
+        assertEquals(ShareLogic.ALL_TYPES, ShareLogic.multiType(listOf("video/mp4", "application/pdf")))
+        assertEquals(ShareLogic.ALL_TYPES, ShareLogic.multiType(emptyList()))
+    }
+
+    @Test
+    fun multiChooserTitle_carriesCount() {
+        assertEquals("分享 3 个文件", ShareLogic.multiChooserTitle(3))
+    }
 }

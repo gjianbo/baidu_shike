@@ -1,5 +1,7 @@
 package com.hnwd.bdplayer
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.ColorStateList
 import android.graphics.Typeface
@@ -9,6 +11,7 @@ import android.os.Looper
 import android.text.TextUtils
 import android.view.Gravity
 import android.view.View
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.PopupMenu
@@ -34,9 +37,18 @@ class DownloadActivity : AppCompatActivity() {
     private lateinit var storageHint: TextView
     private lateinit var tabActive: TextView
     private lateinit var tabHistory: TextView
+    private lateinit var btnSelect: TextView
+    private lateinit var btnClear: TextView
+    private lateinit var selectBar: LinearLayout
+    private lateinit var selectInfo: TextView
+    private lateinit var btnShareSelected: TextView
+    private lateinit var btnDeleteSelected: TextView
 
     private var showingHistory = false
     private var historyFilter = HistoryFilter.ALL
+    /** 多选态：只在历史页可用，选中集合按记录 id 记（每次渲染都会重建视图）。 */
+    private var selecting = false
+    private val selected = linkedSetOf<Long>()
     private var tasks: List<DownloadTask> = emptyList()
     private var uploads: List<UploadRecord> = emptyList()
     private var speeds: Map<Long, Double> = emptyMap()
@@ -72,8 +84,17 @@ class DownloadActivity : AppCompatActivity() {
         storageHint = findViewById(R.id.storageHint)
         tabActive = findViewById(R.id.tabActive)
         tabHistory = findViewById(R.id.tabHistory)
+        btnSelect = findViewById(R.id.btnSelect)
+        btnClear = findViewById(R.id.btnClear)
+        selectBar = findViewById(R.id.selectBar)
+        selectInfo = findViewById(R.id.selectInfo)
+        btnShareSelected = findViewById(R.id.btnShareSelected)
+        btnDeleteSelected = findViewById(R.id.btnDeleteSelected)
         findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
-        findViewById<View>(R.id.btnClear).setOnClickListener { showClearMenu(it) }
+        btnClear.setOnClickListener { showClearMenu(it) }
+        btnSelect.setOnClickListener { if (selecting) exitSelection() else enterSelection() }
+        btnShareSelected.setOnClickListener { shareSelected() }
+        btnDeleteSelected.setOnClickListener { confirmDeleteSelected() }
         tabActive.setOnClickListener { switchTab(false) }
         tabHistory.setOnClickListener { switchTab(true) }
         switchTab(false)
@@ -141,8 +162,50 @@ class DownloadActivity : AppCompatActivity() {
 
     private fun switchTab(history: Boolean) {
         showingHistory = history
+        // 进行中页没有可多选的终态记录，切过去就退出多选。
+        if (!history) {
+            selecting = false
+            selected.clear()
+        }
         paintTabs()
+        paintSelection()
         refreshNow()
+    }
+
+    /** 多选态的界面对齐：顶部入口文案、底部操作栏显隐与可用性。 */
+    private fun paintSelection() {
+        selectBar.visibility = if (selecting) View.VISIBLE else View.GONE
+        btnSelect.text = if (selecting) "取消" else "选择"
+        btnSelect.visibility = if (showingHistory || selecting) View.VISIBLE else View.GONE
+        btnClear.visibility = if (selecting) View.GONE else View.VISIBLE
+        selectInfo.text = DownloadFileLogic.selectionHint(selected.size)
+        val enabled = selected.isNotEmpty()
+        listOf(btnShareSelected, btnDeleteSelected).forEach {
+            it.isEnabled = enabled
+            it.alpha = if (enabled) 1f else 0.4f
+        }
+    }
+
+    private fun enterSelection(taskId: Long? = null) {
+        selecting = true
+        selected.clear()
+        taskId?.let(selected::add)
+        paintSelection()
+        render(force = true)
+    }
+
+    private fun exitSelection() {
+        selecting = false
+        selected.clear()
+        paintSelection()
+        // 记录可能刚被删掉，退出时顺手对齐列表。
+        refreshNow()
+    }
+
+    private fun toggleSelected(id: Long) {
+        if (!selected.add(id)) selected.remove(id)
+        paintSelection()
+        render(force = true)
     }
 
     private fun refreshNow() {
@@ -178,7 +241,10 @@ class DownloadActivity : AppCompatActivity() {
         // speeds 每秒都在变，放进 key 会让视图每秒被 removeAllViews() 重建，
         // 把「总长未知」的 indeterminate 进度条动画反复重置。只在任务/记录本身变化时重绘；
         // 速度文本仍从 speeds 读最新值，且 bytesDone 变化时 key 自然会变。
-        val key = "$showingHistory|$historyFilter|$tasks|$uploads"
+        val successfulIds = tasks.filter { it.state == DownloadState.SUCCESS }.map { it.id }.toSet()
+        // 记录被删/被清空后，多选集合里不该留下已经不存在的 id。
+        selected.retainAll(successfulIds)
+        val key = "$showingHistory|$historyFilter|$selecting|$selected|$tasks|$uploads"
         if (!force && key == lastRenderKey) return
         lastRenderKey = key
         val activeDownloads = tasks.filter {
@@ -245,7 +311,8 @@ class DownloadActivity : AppCompatActivity() {
         }
         storageHint.text =
             "下载保存到 下载 / ${DownloadLogic.FOLDER}/ · 上传保存到 百度/夸克网盘当前目录\n" +
-                "长按已完成的下载可分享 · 共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
+                "长按记录可分享 / 重命名 / 删除 · 共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
+        paintSelection()
     }
 
     /** 历史页把两类终态记录按完成时间混排，再按天分组。 */
@@ -401,6 +468,18 @@ class DownloadActivity : AppCompatActivity() {
 
     private fun addHistoryRow(task: DownloadTask) {
         val row = card()
+        // 多选态只允许勾成功的记录：失败记录没有文件，分享与删文件都无从谈起。
+        val selectable = selecting && task.state == DownloadState.SUCCESS
+        if (selecting) {
+            row.addView(CheckBox(this).apply {
+                isChecked = selected.contains(task.id)
+                isClickable = false
+                isFocusable = false
+                isEnabled = selectable
+                contentDescription = "选择 ${task.name}"
+                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+            })
+        }
         row.addView(typeIcon(task.name))
         val main = vertical().apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -415,14 +494,19 @@ class DownloadActivity : AppCompatActivity() {
         ).joinToString(" · ")
         main.addView(meta(detail, if (task.state == DownloadState.FAILED) R.color.danger else R.color.ink3))
         row.addView(main)
-        row.addView(action(if (task.state == DownloadState.FAILED) retryLabel(task) else "打开") {
-            if (task.state == DownloadState.FAILED) {
-                retryDownload(task)
-            } else if (!DownloadCenter.open(this, task)) {
-                toast("没有可打开此文件的应用")
-            }
-        })
-        if (task.state == DownloadState.SUCCESS || task.state == DownloadState.FAILED) {
+        // 多选态下隐藏行尾按钮：整行点击就是「勾选/取消」，避免误触打开文件。
+        if (!selecting) {
+            row.addView(action(if (task.state == DownloadState.FAILED) retryLabel(task) else "打开") {
+                if (task.state == DownloadState.FAILED) {
+                    retryDownload(task)
+                } else if (!DownloadCenter.open(this, task)) {
+                    toast("没有可打开此文件的应用")
+                }
+            })
+        }
+        if (selecting) {
+            if (selectable) row.setOnClickListener { toggleSelected(task.id) }
+        } else if (task.state == DownloadState.SUCCESS || task.state == DownloadState.FAILED) {
             attachMoreMenu(row, task)
         }
         taskList.addView(row)
@@ -430,7 +514,7 @@ class DownloadActivity : AppCompatActivity() {
 
     /**
      * 长按终态记录 → 更多操作菜单。分享直接把 uri 交给系统面板；重命名/删除作用于
-     * MediaStore 里的真实文件；「移除记录」只动列表，避免误删公共「下载 / 拾课」里的文件。
+     * MediaStore 里的真实文件；「删除」默认只移除记录，勾选后才动文件。
      */
     private fun attachMoreMenu(row: View, task: DownloadTask) {
         if (DownloadFileLogic.actions(task.state).isEmpty()) return
@@ -445,15 +529,21 @@ class DownloadActivity : AppCompatActivity() {
         PopupMenu(this, anchor).apply {
             // itemId 用「当前展示的下标」而不是 ordinal：失败记录只有一项，ordinal 会越界。
             actions.forEachIndexed { index, action ->
-                menu.add(0, index, index, DownloadFileLogic.label(action))
+                menu.add(0, index, index, DownloadFileLogic.label(action, task.state))
             }
             setOnMenuItemClickListener { item ->
                 when (actions.getOrNull(item.itemId)) {
                     MoreAction.SHARE -> shareFile(task)
                     MoreAction.RENAME -> promptRename(task)
+                    MoreAction.COPY_NAME ->
+                        copyText(task.name, DownloadFileLogic.copiedNameMessage())
+                    MoreAction.COPY_PATH -> {
+                        val path = DownloadFileLogic.locationOf(task.name)
+                        copyText(path, DownloadFileLogic.copiedPathMessage(path))
+                    }
                     MoreAction.INFO -> showFileInfo(task)
-                    MoreAction.REMOVE_RECORD -> confirmRemoveRecord(task)
-                    MoreAction.DELETE_FILE -> confirmDeleteFile(task)
+                    MoreAction.REVEAL -> revealFolder(task)
+                    MoreAction.DELETE -> confirmDelete(task)
                     null -> return@setOnMenuItemClickListener false
                 }
                 true
@@ -470,6 +560,81 @@ class DownloadActivity : AppCompatActivity() {
             DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
         }
     }
+
+    private fun copyText(value: String, message: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java)
+        if (clipboard == null) {
+            toast("复制失败，请稍后重试")
+            return
+        }
+        clipboard.setPrimaryClip(ClipData.newPlainText("拾课", value))
+        toast(message)
+    }
+
+    /** 「打开所在文件夹」打不开时退回复制路径——至少用户能自己贴到文件管理器里。 */
+    private fun revealFolder(task: DownloadTask) {
+        if (DownloadFileOps.reveal(this)) return
+        val path = DownloadFileLogic.locationOf(task.name)
+        copyText(path, DownloadFileLogic.revealFallbackMessage(path))
+    }
+
+    /** 多选批量分享：一次 ACTION_SEND_MULTIPLE 把选中的文件交给系统面板。 */
+    private fun shareSelected() {
+        val picked = selectedTasks()
+        if (picked.isEmpty()) {
+            toast("选中的记录里没有可分享的文件")
+            return
+        }
+        AppIo.execute {
+            val outcome = DownloadShare.shareMultiple(this, picked)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                when (outcome) {
+                    DownloadShare.Outcome.LAUNCHED -> exitSelection()
+                    DownloadShare.Outcome.NOT_READY -> toast("选中的文件都已不在下载目录，请重新下载")
+                    DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
+                }
+            }
+        }
+    }
+
+    /** 多选批量删除：与单条一样，默认只移除记录，勾选后才连文件一起删。 */
+    private fun confirmDeleteSelected() {
+        val picked = selectedTasks()
+        if (picked.isEmpty()) {
+            toast("选中的记录里没有可删除的文件")
+            return
+        }
+        val count = picked.size
+        val option = CheckBox(this).apply {
+            text = DownloadFileLogic.DELETE_FILE_OPTION
+            isChecked = false
+        }
+        AlertDialog.Builder(this)
+            .setTitle(DownloadFileLogic.batchDeleteTitle(count))
+            .setMessage(DownloadFileLogic.batchDeleteMessage(count))
+            .setView(padded(option))
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确定") { _, _ ->
+                val withFile = option.isChecked
+                AppIo.execute {
+                    val failed = picked.count { DownloadFileOps.delete(this, it, withFile) == DownloadFileOps.Result.FAILED }
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        exitSelection()
+                        toast(when {
+                            failed > 0 -> "有 $failed 个文件删除失败，记录已保留"
+                            withFile -> "已删除 $count 个文件和记录"
+                            else -> "已移除 $count 条记录，文件仍在下载目录"
+                        })
+                    }
+                }
+            }
+            .show()
+    }
+
+    private fun selectedTasks(): List<DownloadTask> =
+        tasks.filter { it.id in selected && it.state == DownloadState.SUCCESS }
 
     /** 改名默认填记录里的原名（不含下载时的 `时间戳-id_` 前缀），顺手就能改成干净名字。 */
     private fun promptRename(task: DownloadTask) {
@@ -534,34 +699,39 @@ class DownloadActivity : AppCompatActivity() {
         }
     }
 
-    private fun confirmRemoveRecord(task: DownloadTask) {
-        AlertDialog.Builder(this)
-            .setTitle("移除记录")
-            .setMessage(DownloadFileLogic.REMOVE_RECORD_CONFIRM)
+    /**
+     * 删除弹窗：一个入口，用勾选项区分「只清列表」和「连文件一起删」。
+     *
+     * 勾选项默认不勾——文件在公共的「下载 / 拾课」里，先删文件是收不回来的那种错。
+     * 失败记录本来就没有文件，不显示勾选项。
+     */
+    private fun confirmDelete(task: DownloadTask) {
+        val hasFile = task.state == DownloadState.SUCCESS
+        val option = CheckBox(this).apply {
+            text = DownloadFileLogic.DELETE_FILE_OPTION
+            isChecked = false
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(DownloadFileLogic.deleteTitle(task.state))
+            .setMessage(DownloadFileLogic.deleteMessage(task.state, task.name))
             .setNegativeButton("取消", null)
-            .setPositiveButton("移除") { _, _ ->
-                DownloadCenter.forget(this, task.id)
-                refreshNow()
-            }
-            .show()
-    }
-
-    private fun confirmDeleteFile(task: DownloadTask) {
-        AlertDialog.Builder(this)
-            .setTitle("删除文件")
-            .setMessage(DownloadFileLogic.deleteFileConfirm(task.name))
-            .setNegativeButton("取消", null)
-            .setPositiveButton("删除") { _, _ ->
+            .setPositiveButton("确定") { _, _ ->
+                val withFile = hasFile && option.isChecked
                 AppIo.execute {
-                    val result = DownloadFileOps.deleteFile(this, task)
+                    val result = DownloadFileOps.delete(this, task, withFile)
                     runOnUiThread {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         refreshNow()
-                        toast(if (result == DownloadFileOps.Result.OK) "已删除文件" else "无法删除文件，请检查文件是否还在")
+                        toast(when {
+                            result == DownloadFileOps.Result.FAILED -> "无法删除文件，记录已保留"
+                            withFile -> "已删除文件和记录"
+                            else -> "已移除记录，文件仍在下载目录"
+                        })
                     }
                 }
             }
-            .show()
+        if (hasFile) builder.setView(padded(option))
+        builder.show()
     }
 
     /** 进行中的上传：只有「取消」，没有暂停（前台服务不提供 App 主动暂停）。 */

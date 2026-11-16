@@ -220,7 +220,7 @@ internal object DownloadCenter {
         write(context, list, durable = true)
     }
 
-    /** 只移除记录，不动已发布的文件（文件由 [DownloadFileOps.deleteFile] 单独处理）。 */
+    /** 只移除记录，不动已发布的文件（是否删文件由 [DownloadFileOps.delete] 的 withFile 决定）。 */
     fun forget(context: Context, id: Long) = synchronized(lock) {
         val list = read(context)
         val index = list.indexOfFirst { it.id == id }

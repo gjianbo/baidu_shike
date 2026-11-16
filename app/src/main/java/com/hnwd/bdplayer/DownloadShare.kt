@@ -54,6 +54,41 @@ internal object DownloadShare {
         }.getOrDefault(Outcome.NO_TARGET)
     }
 
+    /**
+     * 批量分享：一次 ACTION_SEND_MULTIPLE 带多个 uri，同样不复制文件。
+     * 只要有一条的 uri 已经读不到（文件被清理），就把它跳过，剩下的照常发。
+     */
+    fun shareMultiple(context: Context, tasks: List<DownloadTask>): Outcome {
+        val items = tasks.mapNotNull { task ->
+            if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return@mapNotNull null
+            val uri = uriOf(context, task) ?: return@mapNotNull null
+            if (!readable(context, uri)) return@mapNotNull null
+            uri to ShareLogic.typeOf(task.mediaType, task.name) { extension ->
+                MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+            }
+        }
+        if (items.isEmpty()) return Outcome.NOT_READY
+        val uris = ArrayList(items.map { it.first })
+        val type = ShareLogic.multiType(items.map { it.second })
+        val clip = ClipData.newRawUri(ShareLogic.CHOOSER_TITLE, uris.first()).apply {
+            uris.drop(1).forEach { addItem(ClipData.Item(it)) }
+        }
+        val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            this.type = type
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            putExtra(Intent.EXTRA_SUBJECT, ShareLogic.multiChooserTitle(uris.size))
+            clipData = clip
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val chooser = Intent.createChooser(send, ShareLogic.multiChooserTitle(uris.size)).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching {
+            context.startActivity(chooser)
+            Outcome.LAUNCHED
+        }.getOrDefault(Outcome.NO_TARGET)
+    }
+
     /** 打开一次文件描述符就够判断：能打开才值得把 uri 交给别人。 */
     private fun readable(context: Context, uri: Uri): Boolean = runCatching {
         context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false

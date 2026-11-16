@@ -8,11 +8,11 @@ import org.junit.Test
 class DownloadFileLogicTest {
 
     @Test
-    fun actions_successOffersAllFileOperations() {
+    fun actions_successHasSingleDeleteEntry() {
         assertEquals(
             listOf(
-                MoreAction.SHARE, MoreAction.RENAME, MoreAction.INFO,
-                MoreAction.REMOVE_RECORD, MoreAction.DELETE_FILE,
+                MoreAction.SHARE, MoreAction.RENAME, MoreAction.COPY_NAME, MoreAction.COPY_PATH,
+                MoreAction.INFO, MoreAction.REVEAL, MoreAction.DELETE,
             ),
             DownloadFileLogic.actions(DownloadState.SUCCESS),
         )
@@ -20,7 +20,7 @@ class DownloadFileLogicTest {
 
     @Test
     fun actions_failedOnlyAllowsRemovingRecord() {
-        assertEquals(listOf(MoreAction.REMOVE_RECORD), DownloadFileLogic.actions(DownloadState.FAILED))
+        assertEquals(listOf(MoreAction.DELETE), DownloadFileLogic.actions(DownloadState.FAILED))
     }
 
     @Test
@@ -31,11 +31,29 @@ class DownloadFileLogicTest {
 
     @Test
     fun labels_areStable() {
-        assertEquals("分享", DownloadFileLogic.label(MoreAction.SHARE))
-        assertEquals("重命名", DownloadFileLogic.label(MoreAction.RENAME))
-        assertEquals("文件信息", DownloadFileLogic.label(MoreAction.INFO))
-        assertEquals("移除记录", DownloadFileLogic.label(MoreAction.REMOVE_RECORD))
-        assertEquals("删除文件", DownloadFileLogic.label(MoreAction.DELETE_FILE))
+        assertEquals("分享", DownloadFileLogic.label(MoreAction.SHARE, DownloadState.SUCCESS))
+        assertEquals("重命名", DownloadFileLogic.label(MoreAction.RENAME, DownloadState.SUCCESS))
+        assertEquals("复制文件名", DownloadFileLogic.label(MoreAction.COPY_NAME, DownloadState.SUCCESS))
+        assertEquals("复制路径", DownloadFileLogic.label(MoreAction.COPY_PATH, DownloadState.SUCCESS))
+        assertEquals("文件信息", DownloadFileLogic.label(MoreAction.INFO, DownloadState.SUCCESS))
+        assertEquals("打开所在文件夹", DownloadFileLogic.label(MoreAction.REVEAL, DownloadState.SUCCESS))
+        assertEquals("删除", DownloadFileLogic.label(MoreAction.DELETE, DownloadState.SUCCESS))
+        assertEquals("移除记录", DownloadFileLogic.label(MoreAction.DELETE, DownloadState.FAILED))
+    }
+
+    @Test
+    fun locationOf_matchesInfoPanelPath() {
+        assertEquals(
+            "Download/${DownloadLogic.FOLDER}/第 3 课.mp4",
+            DownloadFileLogic.locationOf("第 3 课.mp4"),
+        )
+        assertTrue(DownloadFileLogic.copiedPathMessage(DownloadFileLogic.locationOf("a.pdf")).contains("a.pdf"))
+    }
+
+    @Test
+    fun selectionHint_countsSelection() {
+        assertEquals(DownloadFileLogic.SELECTION_EMPTY_HINT, DownloadFileLogic.selectionHint(0))
+        assertEquals("已选 2 项", DownloadFileLogic.selectionHint(2))
     }
 
     @Test
@@ -84,9 +102,23 @@ class DownloadFileLogicTest {
     }
 
     @Test
-    fun confirms_explainWhatIsAffected() {
-        assertTrue(DownloadFileLogic.REMOVE_RECORD_CONFIRM.contains("文件会保留"))
-        assertTrue(DownloadFileLogic.deleteFileConfirm("第 3 课.mp4").contains("第 3 课.mp4"))
-        assertTrue(DownloadFileLogic.deleteFileConfirm("第 3 课.mp4").contains("无法恢复"))
+    fun deleteTexts_explainWhatIsAffected() {
+        assertEquals("删除记录", DownloadFileLogic.deleteTitle(DownloadState.SUCCESS))
+        assertEquals("移除记录", DownloadFileLogic.deleteTitle(DownloadState.FAILED))
+        val success = DownloadFileLogic.deleteMessage(DownloadState.SUCCESS, "第 3 课.mp4")
+        assertTrue(success.contains("第 3 课.mp4"))
+        assertTrue(success.contains("文件仍留在"))
+        assertTrue(success.contains("勾选"))
+        // 失败记录没有文件，文案不能提「删除文件」。
+        val failed = DownloadFileLogic.deleteMessage(DownloadState.FAILED, "第 3 课.mp4")
+        assertTrue(failed.contains("不涉及本地文件"))
+        assertTrue(DownloadFileLogic.DELETE_FILE_OPTION.contains("无法恢复"))
+    }
+
+    @Test
+    fun batchTexts_carryCount() {
+        assertEquals("删除 5 项记录", DownloadFileLogic.batchDeleteTitle(5))
+        assertTrue(DownloadFileLogic.batchDeleteMessage(5).contains("5 条"))
+        assertTrue(DownloadFileLogic.batchDeleteMessage(5).contains("勾选"))
     }
 }

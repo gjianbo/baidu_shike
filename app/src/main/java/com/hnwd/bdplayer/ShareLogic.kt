@@ -40,4 +40,18 @@ internal object ShareLogic {
         state == DownloadState.FAILED -> "下载失败的记录不能分享"
         else -> "下载完成后才能分享"
     }
+
+    /**
+     * 批量分享的 MIME：多选里类型一致才给具体值，混合类型退回通配的 ALL_TYPES。
+     * 给单一类型却夹着别的文件时，很多接收方会把不匹配的那几个直接丢掉。
+     */
+    fun multiType(types: List<String>): String {
+        val distinct = types.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        return if (distinct.size == 1) distinct.first() else ALL_TYPES
+    }
+
+    const val ALL_TYPES = "*/*"
+
+    fun multiChooserTitle(count: Int): String = "分享 $count 个文件"
+
 }

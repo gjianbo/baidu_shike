@@ -2,7 +2,9 @@ package com.hnwd.bdplayer
 
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
 
@@ -41,14 +43,18 @@ internal object DownloadFileOps {
     }
 
     /**
-     * 删除文件并移除记录。条目已经被系统清理过时（delete 返回 0）同样按成功处理：
-     * 用户的目标是「文件不在了」，此时只需要把记录一起清掉。
+     * 删除记录；[withFile] 为真时连 MediaStore 里的真实文件一起删。
+     *
+     * 条目已经被系统清理过时（delete 返回 0）同样按成功处理：用户的目标是「文件不在了」，
+     * 此时只需要把记录一起清掉。
      */
-    fun deleteFile(context: Context, task: DownloadTask): Result {
-        val uri = DownloadShare.uriOf(context, task)
-        if (uri != null) {
-            val removed = runCatching { context.contentResolver.delete(uri, null, null) }
-            if (removed.isFailure) return Result.FAILED
+    fun delete(context: Context, task: DownloadTask, withFile: Boolean): Result {
+        if (withFile) {
+            val uri = DownloadShare.uriOf(context, task)
+            if (uri != null) {
+                val removed = runCatching { context.contentResolver.delete(uri, null, null) }
+                if (removed.isFailure) return Result.FAILED
+            }
         }
         DownloadCenter.forget(context, task.id)
         return Result.OK
@@ -85,9 +91,32 @@ internal object DownloadFileOps {
         return DownloadFileInfo(name, size, dir + name, mime)
     }
 
+    /**
+     * 打开系统文件管理器的「下载 / 拾课」目录。
+     *
+     * Android 没有「在文件夹中高亮选中某个文件」的标准 API，[DocumentsContract] 的
+     * externalstorage 目录 uri 是唯一被文件管理器普遍认的入口；ROM 没有处理器时返回
+     * false，由调用方退回「已复制路径」的提示。
+     */
+    fun reveal(context: Context): Boolean {
+        val dir = "primary:${Environment.DIRECTORY_DOWNLOADS}/${DownloadLogic.FOLDER}"
+        val folder = runCatching {
+            DocumentsContract.buildDocumentUri(EXTERNAL_STORAGE_DOCS, dir)
+        }.getOrNull() ?: return false
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(folder, DocumentsContract.Document.MIME_TYPE_DIR)
+            putExtra(DocumentsContract.EXTRA_INITIAL_URI, folder)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        return runCatching { context.startActivity(intent) }.isSuccess
+    }
+
     private fun mimeOf(name: String): String? {
         val extension = DownloadFileLogic.extensionOf(name)
         if (extension.isEmpty()) return null
         return MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
     }
+
+    /** 系统文件管理器的存储目录 provider（AOSP 与各 ROM 通用）。 */
+    private const val EXTERNAL_STORAGE_DOCS = "com.android.externalstorage.documents"
 }
