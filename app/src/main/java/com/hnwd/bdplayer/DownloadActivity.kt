@@ -243,7 +243,7 @@ class DownloadActivity : AppCompatActivity() {
         }
         storageHint.text =
             "下载保存到 下载 / ${DownloadLogic.FOLDER}/ · 上传保存到 百度/夸克网盘当前目录\n" +
-                "共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
+                "长按已完成的下载可分享 · 共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
     }
 
     /** 历史页把两类终态记录按完成时间混排，再按天分组。 */
@@ -418,7 +418,24 @@ class DownloadActivity : AppCompatActivity() {
                 toast("没有可打开此文件的应用")
             }
         })
+        if (task.state == DownloadState.SUCCESS) attachShare(row, task)
         taskList.addView(row)
+    }
+
+    /**
+     * 长按已完成的下载 → 系统分享面板。
+     * 文件本身在 MediaStore 的「下载/拾课」，直接以 content uri 交给接收方，不做二次拷贝。
+     */
+    private fun attachShare(row: View, task: DownloadTask) {
+        row.setOnLongClickListener {
+            when (DownloadShare.share(this, task)) {
+                DownloadShare.Outcome.LAUNCHED -> Unit
+                DownloadShare.Outcome.NOT_READY ->
+                    toast(ShareLogic.unavailableMessage(task.state, task.publishing))
+                DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
+            }
+            true
+        }
     }
 
     /** 进行中的上传：只有「取消」，没有暂停（前台服务不提供 App 主动暂停）。 */
