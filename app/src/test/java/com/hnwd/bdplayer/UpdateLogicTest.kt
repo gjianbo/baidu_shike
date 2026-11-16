@@ -16,6 +16,26 @@ import org.junit.Test
  */
 class UpdateLogicTest {
 
+    @Test
+    fun `备用 API 按版本号选出已上传正式安装包的新版本`() {
+        val json = """
+            [
+              {"tag_name":"v1.9.0","assets":[{"name":"baidu-shike-1.9.0-release.apk","state":"uploaded"}]},
+              {"tag_name":"v2.0.0","assets":[{"name":"baidu-shike-2.0.0-debug.apk","state":"uploaded"}]},
+              {"tag_name":"v3.0.0","assets":[{"name":"baidu-shike-3.0.0-release.apk","state":"starter"}]},
+              {"tag_name":"v4.0.0","draft":true,"assets":[{"name":"baidu-shike-4.0.0-release.apk","state":"uploaded"}]},
+              {"tag_name":"v1.10.0","name":"拾课","body":"更新说明",
+               "assets":[{"name":"baidu-shike-1.10.0-release.apk","state":"uploaded"}]}
+            ]
+        """.trimIndent()
+
+        assertEquals(
+            ApiRelease("v1.10.0", AppVersion(1, 10, 0), "拾课", "更新说明"),
+            newestApiRelease(json, AppVersion(1, 2, 2)),
+        )
+        assertNull(newestApiRelease(json, AppVersion(1, 10, 0)))
+    }
+
     private val sampleAtom = """
         <?xml version="1.0" encoding="UTF-8"?>
         <feed xmlns="http://www.w3.org/2005/Atom" xml:lang="en-US">

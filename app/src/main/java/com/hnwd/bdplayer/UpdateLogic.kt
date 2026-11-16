@@ -1,21 +1,23 @@
 package com.hnwd.bdplayer
 
+import org.json.JSONArray
+
 /**
  * 版本检测里不依赖 Android / OkHttp 的纯逻辑：Atom 解析、语义化版本比较、
  * 候选筛选、下载直链拼装、更新说明清洗、自动检查节流与忽略判定。
  *
  * UpdateManager 只负责发请求 / 下载 / 验签 / 安装，所有判定落在这里，便于 JVM 单测。
  *
- * 版本源刻意选 releases.atom 而不是 api.github.com：后者匿名调用有 60 次/小时/IP
- * 的限流（实测当前出口 IP 直接 403），而 Atom 是 github.com 的静态 feed。
- * 另外 GitHub 的 /releases/latest 不等于「版本号最大」（实测指向带 Latest 标记的
- * v0.1.21，而 Atom 里已有 v1.0.1），所以必须自己按版本号排序 + 探测 APK 是否存在。
+ * GitHub 的 /releases/latest 可能指向手动标为 Latest 的旧版本。
+ * Atom 和备用 API 都按版本号筛选，并确认有对应的 APK。
  */
 
 internal const val UPDATE_REPO_OWNER = "gjianbo"
 internal const val UPDATE_REPO_NAME = "baidu_shike"
 internal const val UPDATE_ATOM_URL =
     "https://github.com/$UPDATE_REPO_OWNER/$UPDATE_REPO_NAME/releases.atom"
+internal const val UPDATE_API_URL =
+    "https://api.github.com/repos/$UPDATE_REPO_OWNER/$UPDATE_REPO_NAME/releases?per_page=30"
 internal const val UPDATE_APK_NAME_PREFIX = "baidu-shike-"
 internal const val UPDATE_APK_NAME_SUFFIX = "-release.apk"
 internal const val UPDATE_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
@@ -122,8 +124,34 @@ internal fun apkDownloadUrl(tag: String, version: String): String =
     "https://github.com/$UPDATE_REPO_OWNER/$UPDATE_REPO_NAME/releases/download/$tag/" +
         "$UPDATE_APK_NAME_PREFIX$version$UPDATE_APK_NAME_SUFFIX"
 
-internal fun releasePageUrl(tag: String): String =
-    "https://github.com/$UPDATE_REPO_OWNER/$UPDATE_REPO_NAME/releases/tag/$tag"
+internal data class ApiRelease(val tag: String, val version: AppVersion, val title: String, val notes: String)
+
+internal fun newestApiRelease(json: String, current: AppVersion): ApiRelease? {
+    val releases = JSONArray(json)
+    return (0 until releases.length()).asSequence().mapNotNull { index ->
+        val release = releases.getJSONObject(index)
+        val tag = release.getString("tag_name")
+        val version = parseAppVersion(tag) ?: return@mapNotNull null
+        if (release.optBoolean("draft") || version <= current) return@mapNotNull null
+
+        val assets = release.getJSONArray("assets")
+        val apkName = "$UPDATE_APK_NAME_PREFIX$version$UPDATE_APK_NAME_SUFFIX"
+        val hasApk = (0 until assets.length()).any { assetIndex ->
+            val asset = assets.getJSONObject(assetIndex)
+            asset.optString("name") == apkName && asset.optString("state") == "uploaded"
+        }
+        if (!hasApk) return@mapNotNull null
+
+        val title = if (release.isNull("name")) tag else release.getString("name")
+        val notes = if (release.isNull("body")) "" else release.getString("body").trim()
+        ApiRelease(tag, version, title, notes)
+    }.maxByOrNull { it.version }
+}
+
+internal fun releasePageUrl(tag: String? = null): String {
+    val releases = "https://github.com/$UPDATE_REPO_OWNER/$UPDATE_REPO_NAME/releases"
+    return if (tag == null) releases else "$releases/tag/$tag"
+}
 
 private val BLOCK_BREAK_RE = Regex(
     """(?i)<\s*br\s*/?>|</\s*(p|li|h[1-6]|ul|ol|blockquote|div)\s*>"""

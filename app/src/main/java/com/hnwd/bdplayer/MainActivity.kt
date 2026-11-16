@@ -189,6 +189,8 @@ class MainActivity : AppCompatActivity() {
         }
     internal var videoLoading: AlertDialog? = null
     internal var videoOpenError: AlertDialog? = null
+    internal var appUpdateCheck: UpdateManager.CheckRequest? = null
+    internal var appUpdateLoadingDialog: AlertDialog? = null
     internal var videoPage: VideoPlaybackPage? = null
     internal val videoSleepTimer = SleepTimer()
     internal var controllerFuture: ListenableFuture<MediaController>? = null
@@ -958,6 +960,7 @@ class MainActivity : AppCompatActivity() {
         uploadObserver?.let { UploadCenter.removeListener(it) }
         uploadObserver = null
         dismissVideoOpenError()
+        cancelAppUpdateCheck()
         homeRefreshFeedback?.clear()
         searchSectionRef?.dismiss()
         requestId++

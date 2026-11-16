@@ -1,5 +1,7 @@
 package com.hnwd.bdplayer
 
+import android.content.res.ColorStateList
+import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -17,22 +19,84 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal fun MainActivity.checkAppUpdate(force: Boolean = false) {
     if (isFinishing || isDestroyed) return
-    UpdateManager.check(this, force) { result ->
+    if (force && appUpdateLoadingDialog?.isShowing != true) {
+        showAppUpdateLoading()
+    }
+    // 手动检查可以显示已有后台请求的进度，避免重复联网。
+    if (appUpdateCheck != null) return
+    val check = UpdateManager.CheckRequest()
+    appUpdateCheck = check
+    UpdateManager.check(applicationContext, force, check) { result ->
         runOnUiThread {
-            if (isFinishing || isDestroyed) return@runOnUiThread
+            if (appUpdateCheck !== check) return@runOnUiThread
+            appUpdateCheck = null
+            val loading = appUpdateLoadingDialog
+            val manual = loading?.isShowing == true
+            appUpdateLoadingDialog = null
+            loading?.dismiss()
+            if (isFinishing || isDestroyed || (loading != null && !manual)) return@runOnUiThread
             when (result) {
                 is UpdateManager.CheckResult.Available -> {
                     val info = result.info
-                    if (shouldNotify(info.version, UpdateManager.ignoredVersion(this@checkAppUpdate), force)) {
+                    if (shouldNotify(info.version, UpdateManager.ignoredVersion(this@checkAppUpdate), manual)) {
                         showUpdateDialog(info)
                     }
                 }
-                UpdateManager.CheckResult.UpToDate -> if (force) toast("已是最新版本")
+                UpdateManager.CheckResult.UpToDate -> if (manual) toast("已是最新版本")
                 UpdateManager.CheckResult.Skipped -> Unit
-                is UpdateManager.CheckResult.Failed -> if (force) toast("检查更新失败：${result.message}")
+                is UpdateManager.CheckResult.Failed -> if (manual) {
+                    AlertDialog.Builder(this@checkAppUpdate)
+                        .setTitle("检查更新失败")
+                        .setMessage(result.message)
+                        .setNegativeButton("关闭", null)
+                        .setNeutralButton("查看发布页") { _, _ -> UpdateManager.openReleasePage(this@checkAppUpdate) }
+                        .setPositiveButton("重试") { _, _ -> checkAppUpdate(force = true) }
+                        .show()
+                }
             }
         }
     }
+}
+
+private fun MainActivity.showAppUpdateLoading() {
+    val progress = ProgressBar(this, null, android.R.attr.progressBarStyleSmall).apply {
+        isIndeterminate = true
+        indeterminateTintList = ColorStateList.valueOf(color(R.color.accent))
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    val label = TextView(this).apply {
+        text = "正在检查更新…"
+        textSize = 16f
+        setTextColor(color(R.color.ink))
+    }
+    val panel = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(24), dp(24), dp(24), dp(8))
+        addView(progress, LinearLayout.LayoutParams(dp(24), dp(24)))
+        addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            marginStart = dp(16)
+        })
+    }
+    appUpdateLoadingDialog = AlertDialog.Builder(this)
+        .setView(panel)
+        .setNegativeButton("取消") { dialog, _ ->
+            if (appUpdateLoadingDialog === dialog) cancelAppUpdateCheck()
+        }
+        .setOnCancelListener { dialog ->
+            if (appUpdateLoadingDialog === dialog) cancelAppUpdateCheck()
+        }
+        .create().apply {
+            setCanceledOnTouchOutside(false)
+            show()
+        }
+}
+
+internal fun MainActivity.cancelAppUpdateCheck() {
+    appUpdateCheck?.cancel()
+    appUpdateCheck = null
+    appUpdateLoadingDialog?.dismiss()
+    appUpdateLoadingDialog = null
 }
 
 private enum class UpdateState { IDLE, DOWNLOADING, READY, FAILED }

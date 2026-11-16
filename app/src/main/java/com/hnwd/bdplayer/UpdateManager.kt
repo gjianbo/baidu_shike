@@ -6,12 +6,17 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.provider.Settings
+import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.core.content.edit
 import androidx.core.net.toUri
+import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import org.json.JSONException
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
@@ -21,9 +26,8 @@ import java.util.concurrent.TimeUnit
  * 所有回调都发生在 AppIo 的后台线程上，UI 层自行 runOnUiThread。判定逻辑全在
  * [UpdateLogic.kt]，这里只做 IO 与 Android API 接线。
  *
- * 版本源是 releases.atom（不是 api.github.com，后者匿名有 60 次/小时/IP 限流，
- * 实测当前出口 IP 直接 403）。取到候选版本后逐个用 Range 探测 release asset，
- * 因为 /releases/latest 会指向带 Latest 标记的旧版，而且并非每个 tag 都上传了 APK。
+ * 优先使用 releases.atom，避免消耗匿名 API 配额。版本列表或 APK 探测失败时，
+ * 改用 GitHub REST API，它在版本列表里直接提供已上传的 APK 信息。
  */
 internal object UpdateManager {
 
@@ -42,6 +46,9 @@ internal object UpdateManager {
             .followRedirects(true)
             .followSslRedirects(true)
             .build()
+    }
+    private val checkClient by lazy {
+        client.newBuilder().callTimeout(10, TimeUnit.SECONDS).build()
     }
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -76,67 +83,123 @@ internal object UpdateManager {
         data class Failed(val message: String) : CheckResult()
     }
 
+    class CheckRequest {
+        private var currentCall: Call? = null
+        @Volatile var isCancelled = false
+            private set
+
+        @Synchronized
+        fun cancel() {
+            isCancelled = true
+            currentCall?.cancel()
+        }
+
+        fun <T> execute(request: Request, read: (Response) -> T): T {
+            val call = checkClient.newCall(request)
+            synchronized(this) {
+                if (isCancelled) throw IOException("检查更新已取消")
+                currentCall = call
+            }
+            try {
+                return call.execute().use(read)
+            } finally {
+                synchronized(this) { currentCall = null }
+            }
+        }
+    }
+
     /**
      * [force] 为手动检查：跳过 24h 节流（忽略版本的判定仍由 UI 层用 [shouldNotify] 决定）。
      */
-    fun check(context: Context, force: Boolean, onResult: (CheckResult) -> Unit) {
+    fun check(context: Context, force: Boolean, check: CheckRequest, onResult: (CheckResult) -> Unit) {
         val now = System.currentTimeMillis()
         if (!force && !shouldAutoCheck(lastCheckAt(context), now)) {
             onResult(CheckResult.Skipped)
             return
         }
         AppIo.execute {
-            val result = runCatching { checkBlocking(context) }
-                .getOrElse { CheckResult.Failed(it.message ?: "检查更新失败") }
-            if (result !is CheckResult.Failed) markChecked(context, now)
+            if (check.isCancelled) return@execute
+            val result = check.checkBlocking(context) ?: return@execute
+            synchronized(check) {
+                if (check.isCancelled) return@execute
+                if (result !is CheckResult.Failed) markChecked(context, now)
+            }
             onResult(result)
         }
     }
 
-    private fun checkBlocking(context: Context): CheckResult {
+    private fun CheckRequest.checkBlocking(context: Context): CheckResult? {
+        val current = currentVersion(context) ?: return CheckResult.Failed("无法读取当前版本。")
+        try {
+            return checkAtom(current)
+        } catch (error: IOException) {
+            if (isCancelled) return null
+            Log.w("UpdateManager", "GitHub Atom 检查失败，尝试 REST API", error)
+        }
+        try {
+            return checkApi(current)
+        } catch (error: IOException) {
+            if (isCancelled) return null
+            Log.w("UpdateManager", "GitHub REST API 检查失败", error)
+        } catch (error: JSONException) {
+            Log.w("UpdateManager", "无法解析 GitHub REST API 响应", error)
+        }
+        return CheckResult.Failed("暂时无法从 GitHub 获取版本信息。请检查网络后重试，或在浏览器中查看发布页。")
+    }
+
+    private fun CheckRequest.fetchReleaseData(url: String, accept: String): String {
         val request = Request.Builder()
-            .url(UPDATE_ATOM_URL)
+            .url(url)
             .header("User-Agent", USER_AGENT)
-            .header("Accept", "application/atom+xml")
+            .header("Accept", accept)
             .header("Cache-Control", "no-cache")
             .build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) return CheckResult.Failed("GitHub 返回 HTTP ${response.code}")
-            val xml = response.body?.string().orEmpty()
-            val current = currentVersion(context)
-                ?: return CheckResult.Failed("无法读取当前版本")
-            val candidates = candidateReleases(parseReleaseAtom(xml), current)
-                .take(UPDATE_MAX_PROBE)
-            if (candidates.isEmpty()) return CheckResult.UpToDate
-
-            for (release in candidates) {
-                val version = release.version.toString()
-                val url = apkDownloadUrl(release.tag, version)
-                if (!assetReachable(url)) continue
-                return CheckResult.Available(
-                    ReleaseInfo(
-                        version = version,
-                        tag = release.tag,
-                        title = release.title,
-                        notes = stripHtmlNotes(release.notesHtml),
-                        apkUrl = url,
-                    )
-                )
-            }
-            // 有更新的 tag，但都没上传 release APK（例如只发了 pre-release）。
-            return CheckResult.UpToDate
+        return execute(request) { response ->
+            if (!response.isSuccessful) throw IOException("GitHub 返回 HTTP ${response.code}")
+            response.body?.string() ?: throw IOException("GitHub 响应为空")
         }
     }
 
+    private fun CheckRequest.checkAtom(current: AppVersion): CheckResult {
+        val xml = fetchReleaseData(UPDATE_ATOM_URL, "application/atom+xml")
+        if (!xml.contains("<feed") || !xml.contains("</feed>")) throw IOException("无效的 Atom 响应")
+        val candidates = candidateReleases(parseReleaseAtom(xml), current).take(UPDATE_MAX_PROBE)
+        for (release in candidates) {
+            val version = release.version.toString()
+            val url = apkDownloadUrl(release.tag, version)
+            if (assetExists(url)) {
+                return CheckResult.Available(
+                    ReleaseInfo(version, release.tag, release.title, stripHtmlNotes(release.notesHtml), url)
+                )
+            }
+        }
+        return CheckResult.UpToDate
+    }
+
+    private fun CheckRequest.checkApi(current: AppVersion): CheckResult {
+        val json = fetchReleaseData(UPDATE_API_URL, "application/vnd.github+json")
+        val release = newestApiRelease(json, current) ?: return CheckResult.UpToDate
+        val version = release.version.toString()
+        return CheckResult.Available(
+            ReleaseInfo(version, release.tag, release.title, release.notes, apkDownloadUrl(release.tag, version))
+        )
+    }
+
     /** 用 Range: bytes=0-0 探测，比 HEAD 更不容易被 CDN 拒绝，且不会真的下载整个包。 */
-    private fun assetReachable(url: String): Boolean = runCatching {
+    private fun CheckRequest.assetExists(url: String): Boolean {
         val probe = Request.Builder()
             .url(url)
             .header("Range", "bytes=0-0")
             .header("User-Agent", USER_AGENT)
             .build()
-        client.newCall(probe).execute().use { it.isSuccessful }
-    }.getOrDefault(false)
+        return execute(probe) { response ->
+            when {
+                response.isSuccessful -> true
+                response.code == 404 -> false
+                else -> throw IOException("APK 探测返回 HTTP ${response.code}")
+            }
+        }
+    }
 
     sealed class DownloadResult {
         data class Success(val file: File) : DownloadResult()
@@ -296,7 +359,7 @@ internal object UpdateManager {
     }
 
     /** 国内直连 GitHub 失败时的兜底：让用户用浏览器去 Release 页下载。 */
-    fun openReleasePage(context: Context, tag: String) {
+    fun openReleasePage(context: Context, tag: String? = null) {
         val intent = Intent(Intent.ACTION_VIEW, releasePageUrl(tag).toUri())
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { context.startActivity(intent) }
