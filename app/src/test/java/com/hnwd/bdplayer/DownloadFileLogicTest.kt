@@ -121,4 +121,54 @@ class DownloadFileLogicTest {
         assertTrue(DownloadFileLogic.batchDeleteMessage(5).contains("5 条"))
         assertTrue(DownloadFileLogic.batchDeleteMessage(5).contains("勾选"))
     }
+
+    @Test
+    fun deleteResultMessage_neverClaimsFileDeletedWhenItWasNot() {
+        // 失败记录没有文件，不能说「文件仍在下载目录」。
+        assertEquals(
+            "已移除这条失败记录",
+            DownloadFileLogic.deleteResultMessage(DownloadState.FAILED, withFile = false, fileDeleted = false),
+        )
+        // 勾了删文件、也确实删到了。
+        assertEquals(
+            "已删除文件和记录",
+            DownloadFileLogic.deleteResultMessage(DownloadState.SUCCESS, withFile = true, fileDeleted = true),
+        )
+        // 勾了删文件但定位不到文件：不能谎报「已删除文件和记录」。
+        assertEquals(
+            "文件已不在，记录已移除",
+            DownloadFileLogic.deleteResultMessage(DownloadState.SUCCESS, withFile = true, fileDeleted = false),
+        )
+        // 没勾删文件：文件确实还在。
+        assertEquals(
+            "已移除记录，文件仍在下载目录",
+            DownloadFileLogic.deleteResultMessage(DownloadState.SUCCESS, withFile = false, fileDeleted = false),
+        )
+    }
+
+    @Test
+    fun batchDeleteResultMessage_reportsFailedAndMissingSeparately() {
+        assertEquals(
+            "有 2 个文件删除失败，这些记录已保留",
+            DownloadFileLogic.batchDeleteResultMessage(5, withFile = true, failed = 2, missingFiles = 1),
+        )
+        assertEquals(
+            "已移除 5 条记录，文件仍在下载目录",
+            DownloadFileLogic.batchDeleteResultMessage(5, withFile = false, failed = 0, missingFiles = 0),
+        )
+        assertEquals(
+            "已删除 3 个文件和记录，另有 2 个文件已不在",
+            DownloadFileLogic.batchDeleteResultMessage(5, withFile = true, failed = 0, missingFiles = 2),
+        )
+        assertEquals(
+            "已删除 5 个文件和记录",
+            DownloadFileLogic.batchDeleteResultMessage(5, withFile = true, failed = 0, missingFiles = 0),
+        )
+    }
+
+    @Test
+    fun multiShareMessage_surfacesSkippedCount() {
+        assertEquals("已分享 3 个文件", DownloadFileLogic.multiShareMessage(3, 0))
+        assertEquals("已分享 2 个文件，1 个文件已不在", DownloadFileLogic.multiShareMessage(2, 1))
+    }
 }

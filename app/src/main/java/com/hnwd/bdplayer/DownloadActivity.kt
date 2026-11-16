@@ -17,6 +17,7 @@ import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowInsetsControllerCompat
@@ -49,6 +50,8 @@ class DownloadActivity : AppCompatActivity() {
     /** 多选态：只在历史页可用，选中集合按记录 id 记（每次渲染都会重建视图）。 */
     private var selecting = false
     private val selected = linkedSetOf<Long>()
+    /** 多选态下每行的勾选框：勾选时只改这一个 View，不重建整个列表（否则长列表会跳）。 */
+    private val rowChecks = mutableMapOf<Long, CheckBox>()
     private var tasks: List<DownloadTask> = emptyList()
     private var uploads: List<UploadRecord> = emptyList()
     private var speeds: Map<Long, Double> = emptyMap()
@@ -97,6 +100,20 @@ class DownloadActivity : AppCompatActivity() {
         btnDeleteSelected.setOnClickListener { confirmDeleteSelected() }
         tabActive.setOnClickListener { switchTab(false) }
         tabHistory.setOnClickListener { switchTab(true) }
+        // 多选态下返回键先退出多选，而不是直接关掉传输中心。
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (selecting) {
+                    exitSelection()
+                    return
+                }
+                // 交给系统默认行为（finish）。临时关掉自己避免递归，随后恢复，
+                // 否则第一次关闭页面后这个回调永久失效，下次进多选就退不出来了。
+                isEnabled = false
+                onBackPressedDispatcher.onBackPressed()
+                isEnabled = true
+            }
+        })
         switchTab(false)
     }
 
@@ -186,10 +203,9 @@ class DownloadActivity : AppCompatActivity() {
         }
     }
 
-    private fun enterSelection(taskId: Long? = null) {
+    private fun enterSelection() {
         selecting = true
         selected.clear()
-        taskId?.let(selected::add)
         paintSelection()
         render(force = true)
     }
@@ -197,6 +213,7 @@ class DownloadActivity : AppCompatActivity() {
     private fun exitSelection() {
         selecting = false
         selected.clear()
+        rowChecks.clear()
         paintSelection()
         // 记录可能刚被删掉，退出时顺手对齐列表。
         refreshNow()
@@ -204,8 +221,9 @@ class DownloadActivity : AppCompatActivity() {
 
     private fun toggleSelected(id: Long) {
         if (!selected.add(id)) selected.remove(id)
+        // 只翻这一个勾选框：整表重建会让 ScrollView 的滚动位置跳一下。
+        rowChecks[id]?.isChecked = selected.contains(id)
         paintSelection()
-        render(force = true)
     }
 
     private fun refreshNow() {
@@ -242,10 +260,11 @@ class DownloadActivity : AppCompatActivity() {
         // 把「总长未知」的 indeterminate 进度条动画反复重置。只在任务/记录本身变化时重绘；
         // 速度文本仍从 speeds 读最新值，且 bytesDone 变化时 key 自然会变。
         val successfulIds = tasks.filter { it.state == DownloadState.SUCCESS }.map { it.id }.toSet()
-        // 记录被删/被清空后，多选集合里不该留下已经不存在的 id。
-        selected.retainAll(successfulIds)
-        val key = "$showingHistory|$historyFilter|$selecting|$selected|$tasks|$uploads"
-        if (!force && key == lastRenderKey) return
+        // 记录被删/被清空后，多选集合里不该留下已经不存在的 id；真清掉了就重建一次对齐。
+        val pruned = selected.retainAll(successfulIds)
+        // key 里刻意不放 selected：勾选由行内 CheckBox 自己维护，勾一下不该重建整张表。
+        val key = "$showingHistory|$historyFilter|$selecting|$tasks|$uploads"
+        if (!force && !pruned && key == lastRenderKey) return
         lastRenderKey = key
         val activeDownloads = tasks.filter {
             it.state == DownloadState.QUEUED || it.state == DownloadState.RUNNING
@@ -263,6 +282,7 @@ class DownloadActivity : AppCompatActivity() {
         tabActive.text = "进行中 ${activeDownloads.size + activeUploads.size}"
         tabHistory.text = "历史 ${counts.all}"
         taskList.removeAllViews()
+        rowChecks.clear()
         if (showingHistory) {
             addFilterChips(counts)
             val history = (
@@ -471,14 +491,17 @@ class DownloadActivity : AppCompatActivity() {
         // 多选态只允许勾成功的记录：失败记录没有文件，分享与删文件都无从谈起。
         val selectable = selecting && task.state == DownloadState.SUCCESS
         if (selecting) {
-            row.addView(CheckBox(this).apply {
+            val check = CheckBox(this).apply {
                 isChecked = selected.contains(task.id)
                 isClickable = false
                 isFocusable = false
                 isEnabled = selectable
                 contentDescription = "选择 ${task.name}"
                 layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
-            })
+            }
+            // 只登记可勾的行：失败行没有文件，勾了也没意义。
+            if (selectable) rowChecks[task.id] = check
+            row.addView(check)
         }
         row.addView(typeIcon(task.name))
         val main = vertical().apply {
@@ -586,11 +609,15 @@ class DownloadActivity : AppCompatActivity() {
             return
         }
         AppIo.execute {
-            val outcome = DownloadShare.shareMultiple(this, picked)
+            val result = DownloadShare.shareMultiple(this, picked)
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
-                when (outcome) {
-                    DownloadShare.Outcome.LAUNCHED -> exitSelection()
+                when (result.outcome) {
+                    DownloadShare.Outcome.LAUNCHED -> {
+                        exitSelection()
+                        // 有文件已被清理时要说出来，不然用户不知道少发了几个。
+                        if (result.skipped > 0) toast(DownloadFileLogic.multiShareMessage(result.shared, result.skipped))
+                    }
                     DownloadShare.Outcome.NOT_READY -> toast("选中的文件都已不在下载目录，请重新下载")
                     DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
                 }
@@ -618,15 +645,19 @@ class DownloadActivity : AppCompatActivity() {
             .setPositiveButton("确定") { _, _ ->
                 val withFile = option.isChecked
                 AppIo.execute {
-                    val failed = picked.count { DownloadFileOps.delete(this, it, withFile) == DownloadFileOps.Result.FAILED }
+                    // 记录一次写盘，删文件逐条做。
+                    val summary = DownloadFileOps.deleteMany(this, picked, withFile)
                     runOnUiThread {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         exitSelection()
-                        toast(when {
-                            failed > 0 -> "有 $failed 个文件删除失败，记录已保留"
-                            withFile -> "已删除 $count 个文件和记录"
-                            else -> "已移除 $count 条记录，文件仍在下载目录"
-                        })
+                        toast(
+                            DownloadFileLogic.batchDeleteResultMessage(
+                                count = count,
+                                withFile = withFile,
+                                failed = summary.failed,
+                                missingFiles = summary.missingFiles,
+                            ),
+                        )
                     }
                 }
             }
@@ -669,7 +700,9 @@ class DownloadActivity : AppCompatActivity() {
                             refreshNow()
                             toast("已重命名")
                         }
-                        DownloadFileOps.Result.UNAVAILABLE -> toast("文件已不存在，只能移除记录")
+                        DownloadFileOps.Result.UNAVAILABLE,
+                        DownloadFileOps.Result.NO_FILE,
+                        -> toast("文件已不存在，只能移除记录")
                         DownloadFileOps.Result.FAILED -> toast("重命名失败，请稍后重试")
                     }
                 }
@@ -722,11 +755,17 @@ class DownloadActivity : AppCompatActivity() {
                     runOnUiThread {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         refreshNow()
-                        toast(when {
-                            result == DownloadFileOps.Result.FAILED -> "无法删除文件，记录已保留"
-                            withFile -> "已删除文件和记录"
-                            else -> "已移除记录，文件仍在下载目录"
-                        })
+                        toast(
+                            if (result == DownloadFileOps.Result.FAILED) {
+                                "无法删除文件，记录已保留"
+                            } else {
+                                DownloadFileLogic.deleteResultMessage(
+                                    state = task.state,
+                                    withFile = withFile,
+                                    fileDeleted = result == DownloadFileOps.Result.OK,
+                                )
+                            },
+                        )
                     }
                 }
             }
@@ -793,6 +832,17 @@ class DownloadActivity : AppCompatActivity() {
     /** 有持久读取授权的失败任务可以重新上传。 */
     private fun addUploadHistoryRow(record: UploadRecord) {
         val row = card()
+        // 多选态只针对下载记录：上传行补一个禁用的勾选框占位，并把行尾按钮收掉，
+        // 否则用户会以为「重试」也是批量操作的一部分。
+        if (selecting) {
+            row.addView(CheckBox(this).apply {
+                isEnabled = false
+                isClickable = false
+                isFocusable = false
+                contentDescription = "上传记录不支持多选"
+                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
+            })
+        }
         row.addView(typeIcon(record.name))
         val main = vertical().apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -813,22 +863,24 @@ class DownloadActivity : AppCompatActivity() {
             meta(detail, if (record.state == UploadRecordState.FAILED) R.color.danger else R.color.ink3),
         )
         row.addView(main)
-        if (UploadRecordLogic.canRetry(record)) {
-            row.addView(action("重试") {
-                if (!UploadCenter.retry(this, record.id)) {
-                    toast("原文件授权已失效，请重新选择文件")
-                } else {
-                    try {
-                        UploadForegroundService.start(this)
-                        switchTab(false)
-                    } catch (error: IllegalStateException) {
-                        UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
-                        refreshNow()
+        if (!selecting) {
+            if (UploadRecordLogic.canRetry(record)) {
+                row.addView(action("重试") {
+                    if (!UploadCenter.retry(this, record.id)) {
+                        toast("原文件授权已失效，请重新选择文件")
+                    } else {
+                        try {
+                            UploadForegroundService.start(this)
+                            switchTab(false)
+                        } catch (error: IllegalStateException) {
+                            UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
+                            refreshNow()
+                        }
                     }
-                }
-            })
-        } else {
-            row.addView(tag(if (record.state == UploadRecordState.SUCCESS) "已上传" else "失败"))
+                })
+            } else {
+                row.addView(tag(if (record.state == UploadRecordState.SUCCESS) "已上传" else "失败"))
+            }
         }
         taskList.addView(row)
     }

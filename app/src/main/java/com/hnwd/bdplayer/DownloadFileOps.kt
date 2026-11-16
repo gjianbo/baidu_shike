@@ -17,6 +17,15 @@ internal data class DownloadFileInfo(
 )
 
 /**
+ * 一次删除（或批量删除）的结果。
+ *
+ * [failed] 是删文件失败的条数（这些记录保留）；[missingFiles] 是用户勾了「同时删除本地文件」、
+ * 但记录定位不到文件（条目已被系统清理/外部改过）的条数——记录会删掉，但确实没删到文件，
+ * 文案不能谎报「已删除文件」。
+ */
+internal data class DeleteSummary(val failed: Int = 0, val missingFiles: Int = 0)
+
+/**
  * 长按菜单里真正动文件的动作：重命名 / 删除 / 读取文件信息。
  *
  * 文件在 MediaStore 的「下载/拾课」，App 是这些条目的 owner，所以 update 与 delete
@@ -24,7 +33,18 @@ internal data class DownloadFileInfo(
  */
 internal object DownloadFileOps {
 
-    enum class Result { OK, UNAVAILABLE, FAILED }
+    enum class Result {
+        /** 记录已删；勾了删文件时文件也已删掉。 */
+        OK,
+
+        /** 记录已删，但没删到文件：定位不到 uri（勾了删文件也没用）。 */
+        NO_FILE,
+
+        /** 连条目都找不到，什么都没做成。 */
+        UNAVAILABLE,
+
+        FAILED,
+    }
 
     /**
      * 改名只改 MediaStore 的 DISPLAY_NAME（MediaProvider 会同步重命名真实文件），
@@ -45,19 +65,50 @@ internal object DownloadFileOps {
     /**
      * 删除记录；[withFile] 为真时连 MediaStore 里的真实文件一起删。
      *
-     * 条目已经被系统清理过时（delete 返回 0）同样按成功处理：用户的目标是「文件不在了」，
-     * 此时只需要把记录一起清掉。
+     * 条目已经被系统清理过时（delete 返回 0）按成功处理：用户的目标是「文件不在了」，
+     * 此时只需要把记录一起清掉；但**定位不到 uri** 的情况返回 [Result.NO_FILE]，
+     * 让调用方说「记录已删，文件没删到」而不是谎报删掉了文件。
      */
     fun delete(context: Context, task: DownloadTask, withFile: Boolean): Result {
+        var fileGone = !withFile
         if (withFile) {
             val uri = DownloadShare.uriOf(context, task)
             if (uri != null) {
                 val removed = runCatching { context.contentResolver.delete(uri, null, null) }
                 if (removed.isFailure) return Result.FAILED
+                fileGone = true
             }
         }
         DownloadCenter.forget(context, task.id)
-        return Result.OK
+        return if (fileGone) Result.OK else Result.NO_FILE
+    }
+
+    /**
+     * 批量删除：删除文件逐条做（每条一个 MediaStore 调用），记录**一次写盘**。
+     * 逐条 [DownloadCenter.forget] 会做 N 次 `commit()`（每次 fsync + 重写整张表），
+     * 删二十条能卡出几百毫秒的磁盘写入。
+     */
+    fun deleteMany(context: Context, tasks: List<DownloadTask>, withFile: Boolean): DeleteSummary {
+        val done = mutableListOf<Long>()
+        var failed = 0
+        var missing = 0
+        tasks.forEach { task ->
+            if (withFile) {
+                val uri = DownloadShare.uriOf(context, task)
+                if (uri == null) {
+                    missing++
+                } else {
+                    val removed = runCatching { context.contentResolver.delete(uri, null, null) }
+                    if (removed.isFailure) {
+                        failed++
+                        return@forEach
+                    }
+                }
+            }
+            done += task.id
+        }
+        if (done.isNotEmpty()) DownloadCenter.forgetMany(context, done)
+        return DeleteSummary(failed = failed, missingFiles = missing)
     }
 
     /** 直接查 MediaStore，拿真实文件名 / 体积 / 目录；查询失败退回记录里的字段。 */
@@ -108,6 +159,8 @@ internal object DownloadFileOps {
             putExtra(DocumentsContract.EXTRA_INITIAL_URI, folder)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+        // 不做 resolveActivity 预检：targetSdk 35 的包可见性限制会让系统 DocumentsUI
+        // 查不到（返回 null），反而把能用的机型也判成不支持。直接试，失败再兜底。
         return runCatching { context.startActivity(intent) }.isSuccess
     }
 

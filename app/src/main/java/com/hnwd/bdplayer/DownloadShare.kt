@@ -20,6 +20,9 @@ internal object DownloadShare {
 
     enum class Outcome { LAUNCHED, NOT_READY, NO_TARGET }
 
+    /** 批量分享的结果：[skipped] 是文件已不在（uri 读不到）而被跳过的条数。 */
+    data class MultiResult(val outcome: Outcome, val shared: Int = 0, val skipped: Int = 0)
+
     /** 记录对应的文件 uri：优先 MediaStore 输出 uri，历史记录退回系统下载队列。 */
     fun uriOf(context: Context, task: DownloadTask): Uri? =
         task.outputUri.takeIf(String::isNotBlank)?.toUri()
@@ -56,9 +59,9 @@ internal object DownloadShare {
 
     /**
      * 批量分享：一次 ACTION_SEND_MULTIPLE 带多个 uri，同样不复制文件。
-     * 只要有一条的 uri 已经读不到（文件被清理），就把它跳过，剩下的照常发。
+     * 读不到的文件（已被清理）会被跳过，跳过几条如实回传，界面要说出来。
      */
-    fun shareMultiple(context: Context, tasks: List<DownloadTask>): Outcome {
+    fun shareMultiple(context: Context, tasks: List<DownloadTask>): MultiResult {
         val items = tasks.mapNotNull { task ->
             if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return@mapNotNull null
             val uri = uriOf(context, task) ?: return@mapNotNull null
@@ -67,7 +70,8 @@ internal object DownloadShare {
                 MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
             }
         }
-        if (items.isEmpty()) return Outcome.NOT_READY
+        val skipped = tasks.size - items.size
+        if (items.isEmpty()) return MultiResult(Outcome.NOT_READY, shared = 0, skipped = skipped)
         val uris = ArrayList(items.map { it.first })
         val type = ShareLogic.multiType(items.map { it.second })
         val clip = ClipData.newRawUri(ShareLogic.CHOOSER_TITLE, uris.first()).apply {
@@ -76,7 +80,6 @@ internal object DownloadShare {
         val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             this.type = type
             putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-            putExtra(Intent.EXTRA_SUBJECT, ShareLogic.multiChooserTitle(uris.size))
             clipData = clip
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -85,8 +88,8 @@ internal object DownloadShare {
         }
         return runCatching {
             context.startActivity(chooser)
-            Outcome.LAUNCHED
-        }.getOrDefault(Outcome.NO_TARGET)
+            MultiResult(Outcome.LAUNCHED, shared = uris.size, skipped = skipped)
+        }.getOrDefault(MultiResult(Outcome.NO_TARGET, shared = 0, skipped = skipped))
     }
 
     /** 打开一次文件描述符就够判断：能打开才值得把 uri 交给别人。 */

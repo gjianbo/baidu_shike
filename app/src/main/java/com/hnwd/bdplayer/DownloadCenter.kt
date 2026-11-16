@@ -231,6 +231,20 @@ internal object DownloadCenter {
         write(context, list, durable = true)
     }
 
+    /**
+     * 批量移除记录：一次读写、一次 `commit()`。
+     * 逐条调 [forget] 是 N 次 fsync + N 次整表重写，删几十条能卡出几百毫秒。
+     */
+    fun forgetMany(context: Context, ids: Collection<Long>) = synchronized(lock) {
+        if (ids.isEmpty()) return@synchronized
+        val list = read(context)
+        val targets = list.filter { it.id in ids }
+        if (targets.isEmpty()) return@synchronized
+        targets.forEach { cleanupStage(context, it) }
+        val kept = list.filterNot { it.id in ids }
+        write(context, kept, durable = true)
+    }
+
     fun clearFinished(context: Context) = synchronized(lock) {
         val list = read(context)
         if (list.removeAll {

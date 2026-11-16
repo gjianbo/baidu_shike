@@ -93,6 +93,35 @@ internal object DownloadFileLogic {
     /** 弹窗里的勾选项。默认不勾——公共下载目录里的文件不该被顺手删掉。 */
     const val DELETE_FILE_OPTION = "同时删除本地文件（删除后无法恢复）"
 
+    /**
+     * 单条删除的结果文案。
+     * 失败记录本来就没有文件，不能说「文件仍在下载目录」；勾了删文件却定位不到 uri 时，
+     * 也不能谎报「已删除文件」。
+     */
+    fun deleteResultMessage(state: DownloadState, withFile: Boolean, fileDeleted: Boolean): String = when {
+        state == DownloadState.FAILED -> "已移除这条失败记录"
+        withFile && fileDeleted -> "已删除文件和记录"
+        withFile -> "文件已不在，记录已移除"
+        else -> "已移除记录，文件仍在下载目录"
+    }
+
+    /** 批量删除的结果文案：删除失败与「文件本来就没了」要分开说，条数必须对得上。 */
+    fun batchDeleteResultMessage(
+        count: Int,
+        withFile: Boolean,
+        failed: Int,
+        missingFiles: Int,
+    ): String = when {
+        failed > 0 -> "有 $failed 个文件删除失败，这些记录已保留"
+        !withFile -> "已移除 $count 条记录，文件仍在下载目录"
+        missingFiles > 0 -> "已删除 ${count - missingFiles} 个文件和记录，另有 $missingFiles 个文件已不在"
+        else -> "已删除 $count 个文件和记录"
+    }
+
+    /** 批量分享的结果文案：被跳过的条数要让用户看见。 */
+    fun multiShareMessage(shared: Int, skipped: Int): String =
+        if (skipped > 0) "已分享 $shared 个文件，$skipped 个文件已不在" else "已分享 $shared 个文件"
+
     /** 批量操作栏：未选任何项时的提示。 */
     const val SELECTION_EMPTY_HINT = "点选要处理的下载记录"
 
