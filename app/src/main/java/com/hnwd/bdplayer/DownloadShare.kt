@@ -31,65 +31,61 @@ internal object DownloadShare {
             }.getOrNull()
 
     fun share(context: Context, task: DownloadTask): Outcome {
-        if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return Outcome.NOT_READY
-        val uri = uriOf(context, task) ?: return Outcome.NOT_READY
-        // 文件可能已被用户在系统文件管理器里删掉：记录还在，uri 已经读不到了。
-        if (!readable(context, uri)) return Outcome.NOT_READY
+        val file = shareableFile(context, task) ?: return Outcome.NOT_READY
+        return launchChooser(context, singleFileIntent(context, file), ShareLogic.CHOOSER_TITLE)
+    }
 
+    /** 先过滤读不到的文件，再按实际文件数选择分享方式。 */
+    fun shareMultiple(context: Context, tasks: List<DownloadTask>): MultiResult {
+        val files = tasks.mapNotNull { shareableFile(context, it) }
+        val skipped = tasks.size - files.size
+        if (files.isEmpty()) return MultiResult(Outcome.NOT_READY, skipped = skipped)
+
+        val single = files.singleOrNull()
+        val intent = if (single != null) singleFileIntent(context, single) else multipleFilesIntent(files)
+        val title = if (single != null) ShareLogic.CHOOSER_TITLE else ShareLogic.multiChooserTitle(files.size)
+        val outcome = launchChooser(context, intent, title)
+        return MultiResult(outcome, if (outcome == Outcome.LAUNCHED) files.size else 0, skipped)
+    }
+
+    private data class ShareableFile(val uri: Uri, val type: String, val name: String)
+
+    private fun shareableFile(context: Context, task: DownloadTask): ShareableFile? {
+        if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return null
+        val uri = uriOf(context, task) ?: return null
+        if (!readable(context, uri)) return null
         val type = ShareLogic.typeOf(task.mediaType, task.name) { extension ->
             MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
         }
-        val send = Intent(Intent.ACTION_SEND).apply {
-            this.type = type
-            putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, task.name)
-            // ClipData 让系统的授权逻辑与「最近分享」都能拿到正确的 uri 与类型。
-            clipData = ClipData.newUri(context.contentResolver, task.name, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        return ShareableFile(uri, type, task.name)
+    }
+
+    private fun singleFileIntent(context: Context, file: ShareableFile): Intent =
+        Intent(Intent.ACTION_SEND).apply {
+            type = file.type
+            putExtra(Intent.EXTRA_STREAM, file.uri)
+            putExtra(Intent.EXTRA_SUBJECT, file.name)
+            clipData = ClipData.newUri(context.contentResolver, file.name, file.uri)
         }
-        val chooser = Intent.createChooser(send, ShareLogic.CHOOSER_TITLE).apply {
-            // 部分 ROM 的选择器会丢掉内层 flag，这里再挂一次。
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+
+    private fun multipleFilesIntent(files: List<ShareableFile>): Intent =
+        Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            val uris = ArrayList(files.map { it.uri })
+            type = ShareLogic.multiType(files.map { it.type })
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            clipData = ClipData.newRawUri(ShareLogic.CHOOSER_TITLE, uris.first()).apply {
+                uris.drop(1).forEach { addItem(ClipData.Item(it)) }
+            }
         }
+
+    private fun launchChooser(context: Context, intent: Intent, title: String): Outcome {
+        val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+        intent.addFlags(flags)
+        val chooser = Intent.createChooser(intent, title).addFlags(flags)
         return runCatching {
             context.startActivity(chooser)
             Outcome.LAUNCHED
         }.getOrDefault(Outcome.NO_TARGET)
-    }
-
-    /**
-     * 批量分享：一次 ACTION_SEND_MULTIPLE 带多个 uri，同样不复制文件。
-     * 读不到的文件（已被清理）会被跳过，跳过几条如实回传，界面要说出来。
-     */
-    fun shareMultiple(context: Context, tasks: List<DownloadTask>): MultiResult {
-        val items = tasks.mapNotNull { task ->
-            if (!ShareLogic.canShare(task.state, task.outputUri, task.downloadId)) return@mapNotNull null
-            val uri = uriOf(context, task) ?: return@mapNotNull null
-            if (!readable(context, uri)) return@mapNotNull null
-            uri to ShareLogic.typeOf(task.mediaType, task.name) { extension ->
-                MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
-            }
-        }
-        val skipped = tasks.size - items.size
-        if (items.isEmpty()) return MultiResult(Outcome.NOT_READY, shared = 0, skipped = skipped)
-        val uris = ArrayList(items.map { it.first })
-        val type = ShareLogic.multiType(items.map { it.second })
-        val clip = ClipData.newRawUri(ShareLogic.CHOOSER_TITLE, uris.first()).apply {
-            uris.drop(1).forEach { addItem(ClipData.Item(it)) }
-        }
-        val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-            this.type = type
-            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-            clipData = clip
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        val chooser = Intent.createChooser(send, ShareLogic.multiChooserTitle(uris.size)).apply {
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        return runCatching {
-            context.startActivity(chooser)
-            MultiResult(Outcome.LAUNCHED, shared = uris.size, skipped = skipped)
-        }.getOrDefault(MultiResult(Outcome.NO_TARGET, shared = 0, skipped = skipped))
     }
 
     /** 打开一次文件描述符就够判断：能打开才值得把 uri 交给别人。 */

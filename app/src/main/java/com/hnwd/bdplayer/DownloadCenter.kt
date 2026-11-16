@@ -245,20 +245,24 @@ internal object DownloadCenter {
         write(context, kept, durable = true)
     }
 
-    fun clearFinished(context: Context) = synchronized(lock) {
+    fun clearFinished(context: Context, ids: Set<Long>): Int = synchronized(lock) {
+        if (ids.isEmpty()) return@synchronized 0
         val list = read(context)
+        val before = list.size
         if (list.removeAll {
-            if (it.state != DownloadState.SUCCESS) return@removeAll false
+            if (it.state != DownloadState.SUCCESS || it.id !in ids) return@removeAll false
             cleanupStage(context, it)
             true
         }) write(context, list)
+        before - list.size
     }
 
-    fun clearFailed(context: Context): Int = synchronized(lock) {
+    fun clearFailed(context: Context, ids: Set<Long>? = null): Int = synchronized(lock) {
+        if (ids?.isEmpty() == true) return@synchronized 0
         val list = read(context)
         val before = list.size
         if (list.removeAll { task ->
-            if (task.state != DownloadState.FAILED) return@removeAll false
+            if (task.state != DownloadState.FAILED || (ids != null && task.id !in ids)) return@removeAll false
             if (task.publishing) {
                 task.outputUri.takeIf(String::isNotBlank)?.toUri()?.let {
                     DownloadedFileStore.discardPending(context, it)

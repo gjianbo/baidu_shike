@@ -49,12 +49,25 @@ internal object UploadStore {
         write(context, records(context) + queued)
     }
 
-    fun retry(context: Context, record: UploadRecord) = synchronized(lock) {
+    fun retry(context: Context, id: Long, onQueued: (UploadRecord) -> Unit): Boolean = synchronized(lock) {
+        val list = records(context).toMutableList()
+        val index = list.indexOfFirst { it.id == id }
+        if (index < 0) return@synchronized false
+        val record = list[index]
+        if (!UploadRecordLogic.canRetry(record)) return@synchronized false
+        val source = Uri.parse(record.sourceUri)
+        if (context.contentResolver.persistedUriPermissions.none { it.uri == source && it.isReadPermission }) {
+            return@synchronized false
+        }
         val queued = record.copy(
             state = UploadRecordState.QUEUED, finishedAt = 0,
             percent = 0, message = "", label = "排队中",
         )
-        write(context, records(context).map { if (it.id == record.id) queued else it })
+        list[index] = queued
+        write(context, list)
+        // 锁内登记队列，避免并发读取把尚未登记的排队记录当作中断任务。
+        onQueued(queued)
+        true
     }
 
     /** 上传文件选择器是应用唯一持有持久读取授权的入口。 */
@@ -107,20 +120,16 @@ internal object UploadStore {
         }
     }
 
-    /** 只清成功记录，失败项留着看原因；不删除网盘上已上传的文件。 */
-    fun clearFinished(context: Context): Unit = synchronized(lock) {
-        val list = records(context).toMutableList()
-        if (list.removeAll { it.state == UploadRecordState.SUCCESS }) write(context, list)
-    }
-
-    /** 「清理失败的记录」：只删 FAILED，成功记录与活跃任务不动；返回清掉的条数。 */
-    fun clearFailed(context: Context): Int = synchronized(lock) {
-        val list = records(context).toMutableList()
-        val before = list.size
-        if (list.removeAll { it.state == UploadRecordState.FAILED }) {
-            write(context, list)
+    /** 比较确认时的终态快照，保留已经重试过的任务。 */
+    fun removeHistory(context: Context, selected: List<UploadRecord>): List<UploadRecord> = synchronized(lock) {
+        val selectedById = selected.associateBy { it.id }
+        val (removed, kept) = records(context).partition {
+            !UploadRecordLogic.isActive(it) && selectedById[it.id] == it
+        }
+        if (removed.isNotEmpty()) {
+            write(context, kept)
             releaseUnusedGrants(context)
         }
-        before - list.size
+        removed
     }
 }

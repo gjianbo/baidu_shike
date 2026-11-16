@@ -11,11 +11,19 @@ class DownloadFileLogicTest {
     fun actions_successHasSingleDeleteEntry() {
         assertEquals(
             listOf(
-                MoreAction.SHARE, MoreAction.RENAME, MoreAction.COPY_NAME, MoreAction.COPY_PATH,
+                MoreAction.SHARE, MoreAction.RENAME, MoreAction.COPY_PATH,
                 MoreAction.INFO, MoreAction.REVEAL, MoreAction.DELETE,
             ),
             DownloadFileLogic.actions(DownloadState.SUCCESS),
         )
+    }
+
+    @Test
+    fun actions_successFitsInTwoRows() {
+        val rows = actionGridRows(DownloadFileLogic.actions(DownloadState.SUCCESS))
+        assertEquals(2, rows.size)
+        assertEquals(4, rows[0].size)
+        assertTrue(rows[1].size <= 4)
     }
 
     @Test
@@ -33,12 +41,51 @@ class DownloadFileLogicTest {
     fun labels_areStable() {
         assertEquals("分享", DownloadFileLogic.label(MoreAction.SHARE, DownloadState.SUCCESS))
         assertEquals("重命名", DownloadFileLogic.label(MoreAction.RENAME, DownloadState.SUCCESS))
-        assertEquals("复制文件名", DownloadFileLogic.label(MoreAction.COPY_NAME, DownloadState.SUCCESS))
         assertEquals("复制路径", DownloadFileLogic.label(MoreAction.COPY_PATH, DownloadState.SUCCESS))
-        assertEquals("文件信息", DownloadFileLogic.label(MoreAction.INFO, DownloadState.SUCCESS))
-        assertEquals("打开所在文件夹", DownloadFileLogic.label(MoreAction.REVEAL, DownloadState.SUCCESS))
+        assertEquals("文件详情", DownloadFileLogic.label(MoreAction.INFO, DownloadState.SUCCESS))
+        assertEquals("打开位置", DownloadFileLogic.label(MoreAction.REVEAL, DownloadState.SUCCESS))
         assertEquals("删除", DownloadFileLogic.label(MoreAction.DELETE, DownloadState.SUCCESS))
         assertEquals("移除记录", DownloadFileLogic.label(MoreAction.DELETE, DownloadState.FAILED))
+    }
+
+    @Test
+    fun labels_fitTheGridCell() {
+        // 面板是 4 列，单格只放得下 5 个中文字，标签超长会被截断。
+        MoreAction.entries.forEach { action ->
+            listOf(DownloadState.SUCCESS, DownloadState.FAILED).forEach { state ->
+                val label = DownloadFileLogic.label(action, state)
+                assertTrue("$label 太长", label.length <= 5)
+            }
+        }
+    }
+
+    @Test
+    fun gridRows_splitsIntoFourColumnsAndKeepsOrder() {
+        val actions = DownloadFileLogic.actions(DownloadState.SUCCESS)
+        val rows = actionGridRows(actions)
+        assertEquals(2, rows.size)
+        assertEquals(listOf(4, 2), rows.map { it.size })
+        assertEquals(actions, rows.flatten())
+    }
+
+    @Test
+    fun gridRows_singleActionStaysOnOneRow() {
+        assertEquals(
+            listOf(listOf(MoreAction.DELETE)),
+            actionGridRows(DownloadFileLogic.actions(DownloadState.FAILED)),
+        )
+    }
+
+    @Test
+    fun gridRows_nineActionsUseFiveColumnsAndStayInTwoRows() {
+        val actions = (1..9).toList()
+        assertEquals(listOf(actions.take(5), actions.drop(5)), actionGridRows(actions))
+    }
+
+    @Test
+    fun gridRows_fiveActionsFitOnOneRow() {
+        val actions = (1..5).toList()
+        assertEquals(listOf(actions), actionGridRows(actions))
     }
 
     @Test
@@ -48,12 +95,6 @@ class DownloadFileLogicTest {
             DownloadFileLogic.locationOf("第 3 课.mp4"),
         )
         assertTrue(DownloadFileLogic.copiedPathMessage(DownloadFileLogic.locationOf("a.pdf")).contains("a.pdf"))
-    }
-
-    @Test
-    fun selectionHint_countsSelection() {
-        assertEquals(DownloadFileLogic.SELECTION_EMPTY_HINT, DownloadFileLogic.selectionHint(0))
-        assertEquals("已选 2 项", DownloadFileLogic.selectionHint(2))
     }
 
     @Test
@@ -164,6 +205,14 @@ class DownloadFileLogicTest {
             "已删除 5 个文件和记录",
             DownloadFileLogic.batchDeleteResultMessage(5, withFile = true, failed = 0, missingFiles = 0),
         )
+    }
+
+    @Test
+    fun batchDeleteConfirmation_limitsFileDeletionToCompletedDownloads() {
+        assertEquals("选中的 2 条失败记录会从列表移除。", DownloadFileLogic.batchDeleteMessage(2, failedRecords = 2))
+        val mixed = DownloadFileLogic.batchDeleteMessage(3, failedRecords = 2)
+        assertTrue(mixed.contains("其中 2 条传输失败"))
+        assertTrue(mixed.contains("只会删除已完成下载对应的本地文件"))
     }
 
     @Test

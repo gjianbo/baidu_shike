@@ -50,7 +50,7 @@
             <ImageView
                 android:layout_width="44dp"
                 android:layout_height="44dp"
-                android:contentDescription="传输管理"
+                android:contentDescription="@string/transfer_history"
                 android:padding="10dp"
                 android:src="@drawable/ic_download" />
 
@@ -257,6 +257,8 @@
         android:textColor="@color/ink3"
         android:textSize="11.5sp" />
 
+    <include layout="@layout/view_file_selection_bar" />
+
     <HorizontalScrollView
         android:id="@+id/crumbsScroll"
         android:layout_width="match_parent"
@@ -423,32 +425,6 @@
                             android:text="全选" />
 
                         <TextView
-                            android:id="@+id/batchMove"
-                            style="@style/HeadAction"
-                            android:layout_width="wrap_content"
-                            android:layout_height="40dp"
-                            android:text="移动"
-                            android:visibility="gone" />
-
-                        <TextView
-                            android:id="@+id/batchCopy"
-                            style="@style/HeadAction"
-                            android:layout_width="wrap_content"
-                            android:layout_height="40dp"
-                            android:layout_marginStart="8dp"
-                            android:text="复制"
-                            android:visibility="gone" />
-
-                        <TextView
-                            android:id="@+id/batchDelete"
-                            style="@style/HeadAction"
-                            android:layout_width="wrap_content"
-                            android:layout_height="40dp"
-                            android:layout_marginStart="8dp"
-                            android:text="删除"
-                            android:visibility="gone" />
-
-                        <TextView
                             android:id="@+id/batchFav"
                             style="@style/HeadAction"
                             android:layout_width="wrap_content"
@@ -527,6 +503,19 @@
                 android:src="@drawable/ic_add" />
         </FrameLayout>
     </FrameLayout>
+
+    <LinearLayout
+        android:id="@+id/diskActionBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="14dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="4dp"
+        android:background="@drawable/bg_sheet_action"
+        android:orientation="vertical"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone" />
 
     <include
         layout="@layout/view_course_switch"

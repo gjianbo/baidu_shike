@@ -21,6 +21,12 @@ internal fun Activity.dp(value: Int) = (value * resources.displayMetrics.density
 
 internal fun Activity.color(id: Int) = resources.getColor(id, theme)
 
+internal fun ImageView.paintSelectionCircle(checked: Boolean) {
+    isSelected = checked
+    setImageResource(if (checked) R.drawable.ic_check_local else 0)
+    setColorFilter(context.getColor(R.color.onAccent))
+}
+
 internal fun Activity.toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
 
 internal fun Activity.column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }

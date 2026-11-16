@@ -53,7 +53,7 @@ internal fun linkErrorTarget(lane: RequestLane): LinkErrorTarget = when (lane) {
     RequestLane.AUDIO -> LinkErrorTarget.AUDIO
     RequestLane.LIST, RequestLane.SEARCH, RequestLane.COURSE, RequestLane.DIRECTORY_PICKER,
     RequestLane.RENEWAL, RequestLane.WRITE, RequestLane.DELETE_CHECK,
-    RequestLane.DOWNLOAD -> LinkErrorTarget.STATUS
+    RequestLane.DOWNLOAD, RequestLane.VIDEO -> LinkErrorTarget.STATUS
 }
 
 /**

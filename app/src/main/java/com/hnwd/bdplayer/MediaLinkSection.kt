@@ -138,6 +138,8 @@ internal class MediaLinkSection(private val host: MediaLinkHost) {
                                     connection.connectTimeout = 6_000
                                     connection.readTimeout = 6_000
                                     connection.setRequestProperty("User-Agent", userAgent)
+                                    // 与 PdfFileFetcher.download() 对齐：dlink 链路带 Referer，避免 CDN 侧鉴权差异。
+                                    connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
                                     if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
                                     check(connection.responseCode == HttpURLConnection.HTTP_MOVED_TEMP)
                                     connection.getHeaderField("Location").orEmpty().toUri()

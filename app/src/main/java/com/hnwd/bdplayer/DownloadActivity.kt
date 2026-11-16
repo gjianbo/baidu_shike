@@ -13,6 +13,7 @@ import android.view.Gravity
 import android.view.View
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.ProgressBar
@@ -20,6 +21,7 @@ import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -34,32 +36,50 @@ import java.util.Locale
  * 两条链路都不挂在本 Activity 上，退出页面或退到后台都不会中断任务。
  */
 class DownloadActivity : AppCompatActivity() {
+    private lateinit var activeList: LinearLayout
     private lateinit var taskList: LinearLayout
     private lateinit var storageHint: TextView
-    private lateinit var tabActive: TextView
-    private lateinit var tabHistory: TextView
+    private lateinit var tabDownloads: TextView
+    private lateinit var tabUploads: TextView
+    private lateinit var historyFilterButton: TextView
     private lateinit var btnSelect: TextView
     private lateinit var btnClear: TextView
     private lateinit var selectBar: LinearLayout
-    private lateinit var selectInfo: TextView
-    private lateinit var btnShareSelected: TextView
-    private lateinit var btnDeleteSelected: TextView
+    private lateinit var transferHeader: View
+    private lateinit var transferTabs: View
+    private lateinit var selectionBar: FileSelectionBar
 
-    private var showingHistory = false
-    private var historyFilter = HistoryFilter.ALL
-    /** 多选态：只在历史页可用，选中集合按记录 id 记（每次渲染都会重建视图）。 */
+    private var showingUploads = false
+    private var downloadFilter = HistoryFilter.ALL
+    private var uploadFilter = HistoryFilter.ALL
+    private var historyFilter: HistoryFilter
+        get() = if (showingUploads) uploadFilter else downloadFilter
+        set(value) {
+            if (showingUploads) uploadFilter = value else downloadFilter = value
+        }
+    private var historyCounts = TransferFilter.Counts(0, 0, 0)
+    /** 多选态：只对当前页签的历史记录生效，选中集合按记录 id 记（每次渲染都会重建视图）。 */
     private var selecting = false
-    private val selected = linkedSetOf<Long>()
-    /** 多选态下每行的勾选框：勾选时只改这一个 View，不重建整个列表（否则长列表会跳）。 */
-    private val rowChecks = mutableMapOf<Long, CheckBox>()
+    private data class HistoryKey(val id: Long, val upload: Boolean = false)
+    private val selected = linkedSetOf<HistoryKey>()
+    /** 多选时直接刷新已渲染的行，保留列表滚动位置。 */
+    private val selectableRows = mutableMapOf<HistoryKey, Pair<LinearLayout, ImageView>>()
     private var tasks: List<DownloadTask> = emptyList()
     private var uploads: List<UploadRecord> = emptyList()
     private var speeds: Map<Long, Double> = emptyMap()
     private var lastBytes: Map<Long, Long> = emptyMap()
     private var lastSampleAt = 0L
-    private var tick = 0
-    /** 轮询结果与上次一致时不重建视图，避免进度条动画被每秒重置、空页面反复重绘。 */
-    private var lastRenderKey = ""
+    private data class HistoryViewState(
+        val showingUploads: Boolean,
+        val filter: HistoryFilter,
+        val selecting: Boolean,
+        val downloads: List<DownloadTask>,
+        val uploads: List<UploadRecord>,
+    )
+
+    private var lastHistoryState: HistoryViewState? = null
+    private var lastActiveDownloads = emptyList<DownloadTask>()
+    private var lastActiveUploads = emptyList<UploadRecord>()
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
@@ -67,9 +87,7 @@ class DownloadActivity : AppCompatActivity() {
             tasks = DownloadCenter.refresh(this@DownloadActivity)
             uploads = UploadStore.records(this@DownloadActivity)
             sampleSpeeds()
-            tick++
-            // 历史页不需要每秒重绘，仍保持轮询以便任务完成时状态能落到历史里。
-            if (!showingHistory || tick % 5 == 0) render()
+            render()
             handler.postDelayed(this, 1_000)
         }
     }
@@ -83,23 +101,27 @@ class DownloadActivity : AppCompatActivity() {
             isAppearanceLightNavigationBars = !ThemeStore.isDark(this@DownloadActivity)
         }
         setContentView(R.layout.activity_download)
+        activeList = findViewById(R.id.activeList)
         taskList = findViewById(R.id.taskList)
         storageHint = findViewById(R.id.storageHint)
-        tabActive = findViewById(R.id.tabActive)
-        tabHistory = findViewById(R.id.tabHistory)
+        tabDownloads = findViewById(R.id.tabDownloads)
+        tabUploads = findViewById(R.id.tabUploads)
+        historyFilterButton = findViewById(R.id.historyFilterButton)
         btnSelect = findViewById(R.id.btnSelect)
         btnClear = findViewById(R.id.btnClear)
         selectBar = findViewById(R.id.selectBar)
-        selectInfo = findViewById(R.id.selectInfo)
-        btnShareSelected = findViewById(R.id.btnShareSelected)
-        btnDeleteSelected = findViewById(R.id.btnDeleteSelected)
-        findViewById<View>(R.id.btnBack).setOnClickListener { finish() }
+        selectBar.clipToOutline = true
+        transferHeader = findViewById(R.id.transferHeader)
+        transferTabs = findViewById(R.id.transferTabs)
+        selectionBar = FileSelectionBar(findViewById(R.id.fileSelectionBar), ::exitSelection, ::toggleAllSelected)
+        findViewById<View>(R.id.btnBack).setOnClickListener {
+            if (selecting) exitSelection() else finish()
+        }
         btnClear.setOnClickListener { showClearMenu(it) }
-        btnSelect.setOnClickListener { if (selecting) exitSelection() else enterSelection() }
-        btnShareSelected.setOnClickListener { shareSelected() }
-        btnDeleteSelected.setOnClickListener { confirmDeleteSelected() }
-        tabActive.setOnClickListener { switchTab(false) }
-        tabHistory.setOnClickListener { switchTab(true) }
+        btnSelect.setOnClickListener { enterSelection() }
+        tabDownloads.setOnClickListener { switchTab(false) }
+        tabUploads.setOnClickListener { switchTab(true) }
+        historyFilterButton.setOnClickListener { showHistoryFilter() }
         // 多选态下返回键先退出多选，而不是直接关掉传输中心。
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -114,20 +136,22 @@ class DownloadActivity : AppCompatActivity() {
                 isEnabled = true
             }
         })
-        switchTab(false)
+        showingUploads = savedInstanceState?.getBoolean(EXTRA_SHOW_UPLOADS)
+            ?: intent.getBooleanExtra(EXTRA_SHOW_UPLOADS, false)
+        downloadFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_DOWNLOAD_FILTER) ?: 0]
+        uploadFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_UPLOAD_FILTER) ?: 0]
+        refreshNow()
     }
 
-    /**
-     * 右上「清空」的两个选项：清空已完成 / 清理失败的记录（带数量，为 0 时禁用）。
-     * 清失败项时还会删掉下载器里的半成品文件与上传私有缓存残留；成功与进行中记录、
-     * 已完成文件、网盘上的文件一律不动。
-     */
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(EXTRA_SHOW_UPLOADS, showingUploads)
+        outState.putInt(STATE_DOWNLOAD_FILTER, downloadFilter.ordinal)
+        outState.putInt(STATE_UPLOAD_FILTER, uploadFilter.ordinal)
+        super.onSaveInstanceState(outState)
+    }
+
     private fun showClearMenu(anchor: View) {
-        val counts = TransferFilter.counts(
-            tasks.filter { it.state == DownloadState.SUCCESS || it.state == DownloadState.FAILED }
-                .map { it.state },
-            uploads.filterNot(UploadRecordLogic::isActive).map { it.state },
-        )
+        val counts = historyCounts
         PopupMenu(this, anchor).apply {
             menu.add(0, MENU_CLEAR_SUCCESS, 0, TransferCleanup.menuSuccessLabel(counts.success))
                 .isEnabled = counts.success > 0
@@ -135,34 +159,55 @@ class DownloadActivity : AppCompatActivity() {
                 .isEnabled = counts.failed > 0
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
-                    MENU_CLEAR_SUCCESS -> {
-                        DownloadCenter.clearFinished(this@DownloadActivity)
-                        UploadStore.clearFinished(this@DownloadActivity)
-                        refreshNow()
-                        toast(TransferCleanup.clearSuccessMessage(counts.success))
-                        true
-                    }
-                    MENU_CLEAR_FAILED -> {
-                        clearFailedRecords()
-                        true
-                    }
-                    else -> false
+                    MENU_CLEAR_SUCCESS -> confirmClearHistory(failed = false)
+                    MENU_CLEAR_FAILED -> confirmClearHistory(failed = true)
+                    else -> return@setOnMenuItemClickListener false
                 }
+                true
             }
             show()
         }
     }
 
-    private fun clearFailedRecords() {
-        // 先取失败任务的 id（用于清私有缓存），再删记录；活跃任务的缓存由纯逻辑保护。
-        val failedUploadIds = UploadStore.records(this)
-            .filter { it.state == UploadRecordState.FAILED }
-            .map { it.id }.toSet()
-        val downloadCleared = DownloadCenter.clearFailed(this)
-        val uploadCleared = UploadStore.clearFailed(this)
-        val files = UploadCenter.clearFailedArtifacts(this, failedUploadIds)
-        refreshNow()
-        toast(TransferCleanup.clearFailedMessage(downloadCleared + uploadCleared, files))
+    private fun confirmClearHistory(failed: Boolean) {
+        val uploadTab = showingUploads
+        val direction = if (uploadTab) "上传" else "下载"
+        val status = if (failed) "失败" else "已完成"
+        val uploadState = if (failed) UploadRecordState.FAILED else UploadRecordState.SUCCESS
+        val downloadState = if (failed) DownloadState.FAILED else DownloadState.SUCCESS
+        val pickedUploads = if (uploadTab) uploads.filter { it.state == uploadState } else emptyList()
+        val downloadIds = if (uploadTab) emptySet() else
+            tasks.filter { it.state == downloadState }.mapTo(mutableSetOf()) { it.id }
+        val count = pickedUploads.size + downloadIds.size
+        if (count == 0) return
+
+        AlertDialog.Builder(this)
+            .setTitle("清理 $count 条${status}${direction}记录？")
+            .setMessage("清理范围为当前${direction}页签的全部${status}记录，已完成的文件会保留。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("清理") { _, _ ->
+                AppIo.execute {
+                    val message = when {
+                        uploadTab -> {
+                            val removed = UploadStore.removeHistory(this, pickedUploads)
+                            if (failed) {
+                                val files = UploadCenter.clearFailedArtifacts(this, removed.mapTo(mutableSetOf()) { it.id })
+                                TransferCleanup.clearFailedMessage(removed.size, files)
+                            } else {
+                                TransferCleanup.clearSuccessMessage(removed.size)
+                            }
+                        }
+                        failed -> TransferCleanup.clearFailedMessage(DownloadCenter.clearFailed(this, downloadIds), 0)
+                        else -> TransferCleanup.clearSuccessMessage(DownloadCenter.clearFinished(this, downloadIds))
+                    }
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        refreshNow()
+                        toast(message)
+                    }
+                }
+            }
+            .show()
     }
 
     override fun onResume() {
@@ -177,53 +222,89 @@ class DownloadActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private fun switchTab(history: Boolean) {
-        showingHistory = history
-        // 进行中页没有可多选的终态记录，切过去就退出多选。
-        if (!history) {
-            selecting = false
-            selected.clear()
-        }
-        paintTabs()
-        paintSelection()
-        refreshNow()
+    private fun switchTab(uploadTab: Boolean) {
+        if (showingUploads == uploadTab) return
+        showingUploads = uploadTab
+        render(force = true)
+        findViewById<View>(R.id.downloadScroll).scrollTo(0, 0)
     }
 
     /** 多选态的界面对齐：顶部入口文案、底部操作栏显隐与可用性。 */
     private fun paintSelection() {
-        selectBar.visibility = if (selecting) View.VISIBLE else View.GONE
-        btnSelect.text = if (selecting) "取消" else "选择"
-        btnSelect.visibility = if (showingHistory || selecting) View.VISIBLE else View.GONE
-        btnClear.visibility = if (selecting) View.GONE else View.VISIBLE
-        selectInfo.text = DownloadFileLogic.selectionHint(selected.size)
-        val enabled = selected.isNotEmpty()
-        listOf(btnShareSelected, btnDeleteSelected).forEach {
-            it.isEnabled = enabled
-            it.alpha = if (enabled) 1f else 0.4f
+        selectBar.visibility = if (selecting && selected.isNotEmpty()) View.VISIBLE else View.GONE
+        val browseVisibility = if (selecting) View.GONE else View.VISIBLE
+        storageHint.visibility = browseVisibility
+        transferHeader.visibility = browseVisibility
+        transferTabs.visibility = browseVisibility
+        selectionBar.render(selecting, selected.size, selectableRows.size)
+        if (showingUploads) {
+            val picked = selectedUploads()
+            val retryable = picked.filter(UploadRecordLogic::canRetry)
+            renderActionGrid(selectBar, buildList {
+                if (retryable.isNotEmpty()) add(ActionGridItem("重试", R.drawable.ic_refresh) {
+                    retryUploads(retryable.map { it.id }, picked.size)
+                })
+                if (picked.isNotEmpty()) add(ActionGridItem("移除记录", R.drawable.ic_trash, true) {
+                    confirmRemoveUploads(picked)
+                })
+            })
+            return
+        }
+        val state = if (selectedDownloads().any { it.state == DownloadState.SUCCESS }) {
+            DownloadState.SUCCESS
+        } else {
+            DownloadState.FAILED
+        }
+        val actions = when (selected.size) {
+            0 -> emptyList()
+            1 -> DownloadFileLogic.actions(state)
+            else -> if (state == DownloadState.SUCCESS) listOf(MoreAction.SHARE, MoreAction.DELETE) else listOf(MoreAction.DELETE)
+        }
+        renderTransferActions(selectBar, actions, state) { action ->
+            val task = selectedDownloads().singleOrNull()?.takeIf { selected.size == 1 && it.state == DownloadState.SUCCESS }
+            when {
+                task != null -> runMoreAction(task, action)
+                action == MoreAction.SHARE -> shareSelected()
+                action == MoreAction.DELETE -> confirmDeleteSelected()
+            }
         }
     }
 
-    private fun enterSelection() {
+    private fun enterSelection(initialId: HistoryKey? = null) {
         selecting = true
         selected.clear()
-        paintSelection()
+        initialId?.let(selected::add)
         render(force = true)
     }
 
     private fun exitSelection() {
         selecting = false
         selected.clear()
-        rowChecks.clear()
-        paintSelection()
+        selectableRows.clear()
         // 记录可能刚被删掉，退出时顺手对齐列表。
         refreshNow()
     }
 
-    private fun toggleSelected(id: Long) {
+    private fun toggleSelected(id: HistoryKey) {
         if (!selected.add(id)) selected.remove(id)
-        // 只翻这一个勾选框：整表重建会让 ScrollView 的滚动位置跳一下。
-        rowChecks[id]?.isChecked = selected.contains(id)
+        paintSelectedRow(id)
         paintSelection()
+    }
+
+    private fun toggleAllSelected() {
+        val visibleIds = selectableRows.keys
+        if (visibleIds.isEmpty()) return
+        if (selected.containsAll(visibleIds)) selected.clear() else selected.addAll(visibleIds)
+        visibleIds.forEach(::paintSelectedRow)
+        paintSelection()
+    }
+
+    private fun paintSelectedRow(id: HistoryKey) {
+        val (row, circle) = selectableRows[id] ?: return
+        val checked = id in selected
+        circle.paintSelectionCircle(checked)
+        row.isSelected = checked
+        ViewCompat.setStateDescription(row, if (checked) "已选" else "未选")
     }
 
     private fun refreshNow() {
@@ -248,144 +329,113 @@ class DownloadActivity : AppCompatActivity() {
     }
 
     private fun paintTabs() {
-        val activeOn = !showingHistory
-        tabActive.setBackgroundResource(if (activeOn) R.drawable.bg_chip_on else R.drawable.bg_chip)
-        tabActive.setTextColor(color(if (activeOn) R.color.accentInk else R.color.ink3))
-        tabHistory.setBackgroundResource(if (activeOn) R.drawable.bg_chip else R.drawable.bg_chip_on)
-        tabHistory.setTextColor(color(if (activeOn) R.color.ink3 else R.color.accentInk))
+        val downloadTab = !showingUploads
+        tabDownloads.isSelected = downloadTab
+        tabUploads.isSelected = showingUploads
+        tabDownloads.setBackgroundResource(if (downloadTab) R.drawable.bg_chip_on else R.drawable.bg_chip)
+        tabDownloads.setTextColor(color(if (downloadTab) R.color.accentInk else R.color.ink3))
+        tabUploads.setBackgroundResource(if (downloadTab) R.drawable.bg_chip else R.drawable.bg_chip_on)
+        tabUploads.setTextColor(color(if (downloadTab) R.color.ink3 else R.color.accentInk))
+        historyFilterButton.text = TransferFilter.title(historyFilter)
     }
 
     private fun render(force: Boolean = false) {
-        // speeds 每秒都在变，放进 key 会让视图每秒被 removeAllViews() 重建，
-        // 把「总长未知」的 indeterminate 进度条动画反复重置。只在任务/记录本身变化时重绘；
-        // 速度文本仍从 speeds 读最新值，且 bytesDone 变化时 key 自然会变。
-        val successfulIds = tasks.filter { it.state == DownloadState.SUCCESS }.map { it.id }.toSet()
-        // 记录被删/被清空后，多选集合里不该留下已经不存在的 id；真清掉了就重建一次对齐。
-        val pruned = selected.retainAll(successfulIds)
-        // key 里刻意不放 selected：勾选由行内 CheckBox 自己维护，勾一下不该重建整张表。
-        val key = "$showingHistory|$historyFilter|$selecting|$tasks|$uploads"
-        if (!force && !pruned && key == lastRenderKey) return
-        lastRenderKey = key
-        val activeDownloads = tasks.filter {
-            it.state == DownloadState.QUEUED || it.state == DownloadState.RUNNING
-        }.sortedByDescending { it.createdAt }
-        val finishedDownloads = tasks.filter {
-            it.state == DownloadState.SUCCESS || it.state == DownloadState.FAILED
-        }.sortedByDescending { it.finishedAt }
-        val activeUploads = uploads.filter(UploadRecordLogic::isActive).sortedByDescending { it.createdAt }
-        val runningUploads = activeUploads.filter { it.state == UploadRecordState.RUNNING }
-        val queuedUploads = activeUploads.filter(UploadRecordLogic::isQueued)
-        val finishedUploads = uploads.filterNot(UploadRecordLogic::isActive).sortedByDescending { it.finishedAt }
-        val counts = TransferFilter.counts(
-            finishedDownloads.map { it.state }, finishedUploads.map { it.state },
-        )
-        tabActive.text = "进行中 ${activeDownloads.size + activeUploads.size}"
-        tabHistory.text = "历史 ${counts.all}"
+        val pageDownloads = if (showingUploads) emptyList() else tasks
+        val pageUploads = if (showingUploads) uploads else emptyList()
+        val (activeDownloads, finishedDownloads) = pageDownloads.partition(DownloadLogic::isActive)
+        val (activeUploads, finishedUploads) = pageUploads.partition(UploadRecordLogic::isActive)
+        renderActive(activeDownloads, activeUploads)
+
+        val historyState = HistoryViewState(showingUploads, historyFilter, selecting, finishedDownloads, finishedUploads)
+        if (!force && historyState == lastHistoryState) return
+        lastHistoryState = historyState
+        historyCounts = TransferFilter.counts(finishedDownloads.map { it.state }, finishedUploads.map { it.state })
         taskList.removeAllViews()
-        rowChecks.clear()
-        if (showingHistory) {
-            addFilterChips(counts)
-            val history = (
-                finishedDownloads
-                    .filter { TransferFilter.keepDownload(it.state, historyFilter) }
-                    .map { HistoryEntry.Down(it) } +
-                    finishedUploads
-                        .filter { TransferFilter.keepUpload(it.state, historyFilter) }
-                        .map { HistoryEntry.Up(it) }
-                ).sortedByDescending { it.time }
-            if (history.isEmpty()) {
-                addEmpty(TransferFilter.emptyText(historyFilter))
-            } else {
-                history.groupBy { dayLabel(it.time) }.forEach { (label, items) ->
-                    addSection(label)
-                    items.forEach { entry ->
-                        when (entry) {
-                            is HistoryEntry.Down -> addHistoryRow(entry.task)
-                            is HistoryEntry.Up -> addUploadHistoryRow(entry.record)
-                        }
+        selectableRows.clear()
+
+        val visibleDownloads = finishedDownloads.filter(::canSelectDownload)
+        val visibleUploads = finishedUploads.filter(::canSelectUpload)
+        val hasHistory = visibleDownloads.isNotEmpty() || visibleUploads.isNotEmpty()
+        btnSelect.visibility = if (hasHistory) View.VISIBLE else View.GONE
+        btnClear.visibility = if (historyCounts.all > 0) View.VISIBLE else View.GONE
+        if (hasHistory) {
+            if (showingUploads) {
+                visibleUploads.sortedByDescending { it.finishedAt }.groupBy { dayLabel(it.finishedAt) }
+                    .forEach { (day, records) ->
+                        addSection(day)
+                        records.forEach(::addUploadHistoryRow)
                     }
-                }
+            } else {
+                visibleDownloads.sortedByDescending { it.finishedAt }.groupBy { dayLabel(it.finishedAt) }
+                    .forEach { (day, records) ->
+                        addSection(day)
+                        records.forEach(::addHistoryRow)
+                    }
             }
         } else {
-            addSummary(activeDownloads, runningUploads.size, queuedUploads.size)
-            if (activeDownloads.isEmpty() && activeUploads.isEmpty()) {
-                addEmpty("当前没有传输任务")
-            }
-            if (runningUploads.isNotEmpty()) {
-                addSection("正在上传")
-                runningUploads.forEach { addUploadActiveRow(it) }
-            }
-            if (queuedUploads.isNotEmpty()) {
-                addSection("排队中 ${queuedUploads.size}")
-                queuedUploads.forEach { addQueuedUploadRow(it) }
-            }
-            if (activeDownloads.isNotEmpty()) {
-                addSection("正在下载")
-                activeDownloads.forEach { addActiveRow(it) }
-            }
-            val failed = finishedDownloads.filter { it.state == DownloadState.FAILED }
-            if (failed.isNotEmpty()) {
-                addSection("需要重试")
-                failed.forEach { addActiveRow(it) }
-            }
+            addEmpty(when {
+                historyFilter != HistoryFilter.ALL -> TransferFilter.emptyText(historyFilter)
+                showingUploads -> "还没有上传记录"
+                else -> "还没有下载记录"
+            })
         }
-        storageHint.text =
-            "下载保存到 下载 / ${DownloadLogic.FOLDER}/ · 上传保存到 百度/夸克网盘当前目录\n" +
-                "长按记录可分享 / 重命名 / 删除 · 共 ${tasks.size + uploads.size} 条记录 · 清空记录不会删除文件"
+        if (selecting) selected.retainAll(selectableRows.keys)
+        storageHint.text = if (showingUploads) "上传保存到网盘目标目录" else "下载保存到 下载 / ${DownloadLogic.FOLDER}/"
+        paintTabs()
         paintSelection()
     }
 
-    /** 历史页把两类终态记录按完成时间混排，再按天分组。 */
-    private sealed class HistoryEntry {
-        abstract val time: Long
-
-        data class Down(val task: DownloadTask) : HistoryEntry() {
-            override val time: Long get() = task.finishedAt
+    // 进度刷新只重绘进行中分区，避免打断历史行上的长按和勾选。
+    private fun renderActive(downloads: List<DownloadTask>, uploads: List<UploadRecord>) {
+        activeList.visibility = if (selecting) View.GONE else View.VISIBLE
+        if (selecting || downloads == lastActiveDownloads && uploads == lastActiveUploads) return
+        lastActiveDownloads = downloads
+        lastActiveUploads = uploads
+        activeList.removeAllViews()
+        if (downloads.isNotEmpty()) {
+            addSection("进行中 ${downloads.size}", activeList)
+            addSummary(downloads)
+            downloads.sortedByDescending { it.createdAt }.forEach(::addActiveRow)
         }
-
-        data class Up(val record: UploadRecord) : HistoryEntry() {
-            override val time: Long get() = record.finishedAt
+        val (running, queued) = uploads.sortedByDescending { it.createdAt }.partition { it.state == UploadRecordState.RUNNING }
+        if (running.isNotEmpty()) {
+            addSection("正在上传 ${running.size}", activeList)
+            running.forEach(::addUploadActiveRow)
         }
+        if (queued.isNotEmpty()) {
+            addSection("排队中 ${queued.size}", activeList)
+            queued.forEach(::addQueuedUploadRow)
+        }
+        if (downloads.isNotEmpty() || uploads.isNotEmpty()) addSection("历史记录", activeList)
     }
 
-    /** 历史页顶部的二级状态筛选；chip 上的计数基于全量，不随当前筛选缩水。 */
-    private fun addFilterChips(counts: TransferFilter.Counts) {
-        val row = horizontal().apply {
-            gravity = Gravity.CENTER_VERTICAL
-            (layoutParams as LinearLayout.LayoutParams).bottomMargin = dp(6)
-        }
-        HistoryFilter.entries.forEach { filter ->
-            val selected = filter == historyFilter
-            val chip = TextView(this).apply {
-                text = TransferFilter.label(filter, counts)
-                textSize = 11f
-                gravity = Gravity.CENTER
-                setTextColor(color(if (selected) R.color.accentInk else R.color.ink3))
-                setBackgroundResource(if (selected) R.drawable.bg_chip_on else R.drawable.bg_chip)
-                setPadding(dp(6), dp(7), dp(6), dp(7))
-                isClickable = true
-                isFocusable = true
-                setOnClickListener {
-                    if (historyFilter == filter) return@setOnClickListener
+    private fun showHistoryFilter() {
+        if (selecting) return
+        PopupMenu(this, historyFilterButton).apply {
+            HistoryFilter.entries.forEach { filter ->
+                menu.add(0, filter.ordinal, filter.ordinal, TransferFilter.label(filter, historyCounts))
+            }
+            menu.setGroupCheckable(0, true, true)
+            menu.findItem(historyFilter.ordinal).isChecked = true
+            setOnMenuItemClickListener { item ->
+                val filter = HistoryFilter.entries[item.itemId]
+                if (filter != historyFilter) {
                     historyFilter = filter
                     render(force = true)
+                    findViewById<View>(R.id.downloadScroll).scrollTo(0, 0)
                 }
-                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                    .apply { marginEnd = dp(6) }
+                true
             }
-            row.addView(chip)
+            show()
         }
-        taskList.addView(row)
     }
 
-    private fun addSummary(active: List<DownloadTask>, runningUploads: Int, queuedUploads: Int) {
+    private fun addSummary(active: List<DownloadTask>) {
         val running = active.count { it.state == DownloadState.RUNNING }
         val queuedDownloads = active.size - running
         val headline = buildString {
             append("$running 个下载中")
             if (queuedDownloads > 0) append(" · $queuedDownloads 个排队")
-            if (runningUploads > 0) append(" · $runningUploads 个上传中")
-            if (queuedUploads > 0) append(" · $queuedUploads 个待上传")
         }
         val total = active.sumOf { if (it.bytesTotal > 0) it.bytesTotal else it.sizeBytes }
         val done = active.sumOf { it.bytesDone }
@@ -409,7 +459,7 @@ class DownloadActivity : AppCompatActivity() {
             addView(summaryText("已下载 ${DownloadLogic.formatBytes(done)} / 共 ${DownloadLogic.formatBytes(total)}", false, R.color.ink3))
             addView(summaryText("最多同时 ${DownloadLogic.MAX_PARALLEL} 个", false, R.color.ink3))
         })
-        taskList.addView(card)
+        activeList.addView(card)
     }
 
     private fun addActiveRow(task: DownloadTask) {
@@ -431,7 +481,6 @@ class DownloadActivity : AppCompatActivity() {
         val display = DownloadLogic.taskProgress(task.state, task.bytesDone, task.bytesTotal)
         if (display.visible) main.addView(progressBar(display.percent, display.indeterminate))
         val foot = when {
-            task.state == DownloadState.FAILED -> task.error.ifBlank { "下载失败" }
             task.publishing -> "正在保存到下载目录…"
             task.state == DownloadState.QUEUED && task.downloadId >= 0 -> "等待系统下载"
             task.state == DownloadState.QUEUED -> "等待中 · 前面还有 ${queuedAhead(task)} 个"
@@ -441,14 +490,10 @@ class DownloadActivity : AppCompatActivity() {
                 speed,
             )}".trimEnd(' ', '·')
         }
-        main.addView(meta(foot, if (task.state == DownloadState.FAILED) R.color.danger else R.color.ink3))
+        main.addView(meta(foot))
         row.addView(main)
-        if (task.state == DownloadState.FAILED || !task.publishing &&
-            (task.downloadId < 0 || task.stagingName.isNotBlank())
-        ) row.addView(action(if (task.state == DownloadState.FAILED) retryLabel(task) else "取消") {
-            if (task.state == DownloadState.FAILED) {
-                retryDownload(task)
-            } else {
+        if (!task.publishing && (task.downloadId < 0 || task.stagingName.isNotBlank())) {
+            row.addView(action("取消") {
                 val cancelled = DownloadCenter.cancel(this, task.id)
                 refreshNow()
                 toast(when {
@@ -457,11 +502,9 @@ class DownloadActivity : AppCompatActivity() {
                         "文件已下载完成，正在保存到下载目录"
                     else -> "无法取消下载，请稍后重试"
                 })
-            }
-        })
-        // 「需要重试」分区里的失败记录也可以长按移除，不必绕到历史页。
-        if (task.state == DownloadState.FAILED) attachMoreMenu(row, task)
-        taskList.addView(row)
+            })
+        }
+        activeList.addView(row)
     }
 
     private fun retryLabel(task: DownloadTask): String =
@@ -479,7 +522,8 @@ class DownloadActivity : AppCompatActivity() {
             return
         }
         if (DownloadCenter.retry(this, task.id)) {
-            switchTab(false)
+            refreshNow()
+            findViewById<View>(R.id.downloadScroll).scrollTo(0, 0)
         } else {
             toast("无法重新加入下载队列，请稍后重试")
             refreshNow()
@@ -487,22 +531,9 @@ class DownloadActivity : AppCompatActivity() {
     }
 
     private fun addHistoryRow(task: DownloadTask) {
-        val row = card()
-        // 多选态只允许勾成功的记录：失败记录没有文件，分享与删文件都无从谈起。
-        val selectable = selecting && task.state == DownloadState.SUCCESS
-        if (selecting) {
-            val check = CheckBox(this).apply {
-                isChecked = selected.contains(task.id)
-                isClickable = false
-                isFocusable = false
-                isEnabled = selectable
-                contentDescription = "选择 ${task.name}"
-                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
-            }
-            // 只登记可勾的行：失败行没有文件，勾了也没意义。
-            if (selectable) rowChecks[task.id] = check
-            row.addView(check)
-        }
+        val key = HistoryKey(task.id)
+        val row = card(selecting)
+        if (selecting) addRecordSelector(row, key)
         row.addView(typeIcon(task.name))
         val main = vertical().apply {
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -527,51 +558,55 @@ class DownloadActivity : AppCompatActivity() {
                 }
             })
         }
-        if (selecting) {
-            if (selectable) row.setOnClickListener { toggleSelected(task.id) }
-        } else if (task.state == DownloadState.SUCCESS || task.state == DownloadState.FAILED) {
-            attachMoreMenu(row, task)
+        if (!selecting) row.setOnLongClickListener {
+            enterSelection(key)
+            true
         }
         taskList.addView(row)
     }
 
-    /**
-     * 长按终态记录 → 更多操作菜单。分享直接把 uri 交给系统面板；重命名/删除作用于
-     * MediaStore 里的真实文件；「删除」默认只移除记录，勾选后才动文件。
-     */
-    private fun attachMoreMenu(row: View, task: DownloadTask) {
-        if (DownloadFileLogic.actions(task.state).isEmpty()) return
-        row.setOnLongClickListener {
-            showMoreMenu(row, task)
-            true
+    private fun addRecordSelector(row: LinearLayout, key: HistoryKey) {
+        val circle = ImageView(this).apply {
+            setBackgroundResource(R.drawable.bg_check_circle)
+            setPadding(dp(4), dp(4), dp(4), dp(4))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }
+        row.addView(circle, LinearLayout.LayoutParams(dp(22), dp(22)).apply { marginEnd = dp(10) })
+        selectableRows[key] = row to circle
+        paintSelectedRow(key)
+        row.setOnClickListener { toggleSelected(key) }
     }
 
-    private fun showMoreMenu(anchor: View, task: DownloadTask) {
-        val actions = DownloadFileLogic.actions(task.state)
-        PopupMenu(this, anchor).apply {
-            // itemId 用「当前展示的下标」而不是 ordinal：失败记录只有一项，ordinal 会越界。
-            actions.forEachIndexed { index, action ->
-                menu.add(0, index, index, DownloadFileLogic.label(action, task.state))
+    private fun renderTransferActions(
+        container: LinearLayout,
+        actions: List<MoreAction>,
+        state: DownloadState,
+        onClick: (MoreAction) -> Unit,
+    ) {
+        renderActionGrid(container, actions.map { action ->
+            ActionGridItem(DownloadFileLogic.label(action, state), iconOf(action), action == MoreAction.DELETE) {
+                onClick(action)
             }
-            setOnMenuItemClickListener { item ->
-                when (actions.getOrNull(item.itemId)) {
-                    MoreAction.SHARE -> shareFile(task)
-                    MoreAction.RENAME -> promptRename(task)
-                    MoreAction.COPY_NAME ->
-                        copyText(task.name, DownloadFileLogic.copiedNameMessage())
-                    MoreAction.COPY_PATH -> {
-                        val path = DownloadFileLogic.locationOf(task.name)
-                        copyText(path, DownloadFileLogic.copiedPathMessage(path))
-                    }
-                    MoreAction.INFO -> showFileInfo(task)
-                    MoreAction.REVEAL -> revealFolder(task)
-                    MoreAction.DELETE -> confirmDelete(task)
-                    null -> return@setOnMenuItemClickListener false
-                }
-                true
-            }
-            show()
+        })
+    }
+
+    private fun iconOf(action: MoreAction): Int = when (action) {
+        MoreAction.SHARE -> R.drawable.ic_share
+        MoreAction.RENAME -> R.drawable.ic_rename
+        MoreAction.COPY_PATH -> R.drawable.ic_link
+        MoreAction.INFO -> R.drawable.ic_info
+        MoreAction.REVEAL -> R.drawable.ic_folder
+        MoreAction.DELETE -> R.drawable.ic_trash
+    }
+
+    private fun runMoreAction(task: DownloadTask, action: MoreAction) {
+        when (action) {
+            MoreAction.SHARE -> shareFile(task)
+            MoreAction.RENAME -> promptRename(task)
+            MoreAction.COPY_PATH -> copyFilePath(task, DownloadFileLogic::copiedPathMessage)
+            MoreAction.INFO -> showFileInfo(task)
+            MoreAction.REVEAL -> revealFolder(task)
+            MoreAction.DELETE -> confirmDelete(task)
         }
     }
 
@@ -594,16 +629,25 @@ class DownloadActivity : AppCompatActivity() {
         toast(message)
     }
 
-    /** 「打开所在文件夹」打不开时退回复制路径——至少用户能自己贴到文件管理器里。 */
+    /** 文件管理器无法打开下载目录时，将文件路径复制到剪贴板。 */
     private fun revealFolder(task: DownloadTask) {
         if (DownloadFileOps.reveal(this)) return
-        val path = DownloadFileLogic.locationOf(task.name)
-        copyText(path, DownloadFileLogic.revealFallbackMessage(path))
+        copyFilePath(task, DownloadFileLogic::revealFallbackMessage)
     }
 
-    /** 多选批量分享：一次 ACTION_SEND_MULTIPLE 把选中的文件交给系统面板。 */
+    private fun copyFilePath(task: DownloadTask, message: (String) -> String) {
+        AppIo.execute {
+            val path = DownloadFileOps.info(this, task).location
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                copyText(path, message(path))
+            }
+        }
+    }
+
     private fun shareSelected() {
-        val picked = selectedTasks()
+        val picked = selectedDownloads().filter { it.state == DownloadState.SUCCESS }
+        val omitted = selected.size - picked.size
         if (picked.isEmpty()) {
             toast("选中的记录里没有可分享的文件")
             return
@@ -616,7 +660,11 @@ class DownloadActivity : AppCompatActivity() {
                     DownloadShare.Outcome.LAUNCHED -> {
                         exitSelection()
                         // 有文件已被清理时要说出来，不然用户不知道少发了几个。
-                        if (result.skipped > 0) toast(DownloadFileLogic.multiShareMessage(result.shared, result.skipped))
+                        if (omitted > 0) {
+                            toast("已打开分享，跳过 ${omitted + result.skipped} 条无法分享的记录")
+                        } else if (result.skipped > 0) {
+                            toast(DownloadFileLogic.multiShareMessage(result.shared, result.skipped))
+                        }
                     }
                     DownloadShare.Outcome.NOT_READY -> toast("选中的文件都已不在下载目录，请重新下载")
                     DownloadShare.Outcome.NO_TARGET -> toast(ShareLogic.NO_TARGET_MESSAGE)
@@ -625,47 +673,101 @@ class DownloadActivity : AppCompatActivity() {
         }
     }
 
-    /** 多选批量删除：与单条一样，默认只移除记录，勾选后才连文件一起删。 */
     private fun confirmDeleteSelected() {
-        val picked = selectedTasks()
-        if (picked.isEmpty()) {
-            toast("选中的记录里没有可删除的文件")
-            return
-        }
-        val count = picked.size
+        val (completed, failedDownloads) = selectedDownloads().partition { it.state == DownloadState.SUCCESS }
+        val failedDownloadIds = failedDownloads.map { it.id }.toSet()
+        val failedCount = failedDownloadIds.size
+        val count = completed.size + failedCount
+        if (count == 0) return
+
         val option = CheckBox(this).apply {
             text = DownloadFileLogic.DELETE_FILE_OPTION
-            isChecked = false
         }
-        AlertDialog.Builder(this)
-            .setTitle(DownloadFileLogic.batchDeleteTitle(count))
-            .setMessage(DownloadFileLogic.batchDeleteMessage(count))
-            .setView(padded(option))
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (completed.isEmpty()) "移除 $count 条失败记录" else DownloadFileLogic.batchDeleteTitle(count))
+            .setMessage(DownloadFileLogic.batchDeleteMessage(count, failedCount))
             .setNegativeButton("取消", null)
             .setPositiveButton("确定") { _, _ ->
-                val withFile = option.isChecked
+                val withFile = completed.isNotEmpty() && option.isChecked
                 AppIo.execute {
-                    // 记录一次写盘，删文件逐条做。
-                    val summary = DownloadFileOps.deleteMany(this, picked, withFile)
+                    val summary = DownloadFileOps.deleteMany(this, completed, withFile)
+                    val removedFailed = DownloadCenter.clearFailed(this, failedDownloadIds)
                     runOnUiThread {
                         if (isFinishing || isDestroyed) return@runOnUiThread
                         exitSelection()
-                        toast(
-                            DownloadFileLogic.batchDeleteResultMessage(
-                                count = count,
-                                withFile = withFile,
-                                failed = summary.failed,
-                                missingFiles = summary.missingFiles,
-                            ),
-                        )
+                        val messages = buildList {
+                            if (completed.isNotEmpty()) add(
+                                DownloadFileLogic.batchDeleteResultMessage(completed.size, withFile, summary.failed, summary.missingFiles),
+                            )
+                            if (failedCount > 0) {
+                                val remaining = failedCount - removedFailed
+                                add(if (remaining > 0) {
+                                    "已移除 $removedFailed 条失败记录，另有 $remaining 条未移除"
+                                } else {
+                                    "已移除 $removedFailed 条失败记录"
+                                })
+                            }
+                        }
+                        toast(messages.joinToString("。"))
+                    }
+                }
+            }
+        if (completed.isNotEmpty()) dialog.setView(padded(option))
+        dialog.show()
+    }
+
+    private fun canSelectDownload(task: DownloadTask): Boolean =
+        (task.state == DownloadState.SUCCESS || task.state == DownloadState.FAILED) &&
+            TransferFilter.keepDownload(task.state, historyFilter)
+
+    private fun canSelectUpload(record: UploadRecord): Boolean =
+        !UploadRecordLogic.isActive(record) && TransferFilter.keepUpload(record.state, historyFilter)
+
+    private fun selectedDownloads(): List<DownloadTask> =
+        tasks.filter { HistoryKey(it.id) in selected && canSelectDownload(it) }
+
+    private fun selectedUploads(): List<UploadRecord> =
+        uploads.filter { HistoryKey(it.id, upload = true) in selected && canSelectUpload(it) }
+
+    private fun confirmRemoveUploads(picked: List<UploadRecord>) {
+        AlertDialog.Builder(this)
+            .setTitle("移除 ${picked.size} 条上传记录")
+            .setMessage("记录会从本机历史移除，已上传的网盘文件会保留。")
+            .setNegativeButton("取消", null)
+            .setPositiveButton("确定") { _, _ ->
+                AppIo.execute {
+                    val removed = UploadStore.removeHistory(this, picked)
+                    val failed = removed.filter { it.state == UploadRecordState.FAILED }.map { it.id }.toSet()
+                    UploadCenter.clearFailedArtifacts(this, failed)
+                    runOnUiThread {
+                        if (isFinishing || isDestroyed) return@runOnUiThread
+                        exitSelection()
+                        val remaining = picked.size - removed.size
+                        val skipped = if (remaining > 0) "，另有 $remaining 条未移除" else ""
+                        toast("已移除 ${removed.size} 条上传记录$skipped")
                     }
                 }
             }
             .show()
     }
 
-    private fun selectedTasks(): List<DownloadTask> =
-        tasks.filter { it.id in selected && it.state == DownloadState.SUCCESS }
+    private fun retryUploads(ids: List<Long>, selectedCount: Int = ids.size) {
+        val accepted = ids.count { UploadCenter.retry(this, it) }
+        if (accepted == 0) {
+            toast("无法重试该上传，请检查记录或重新选择文件")
+            refreshNow()
+            return
+        }
+        try {
+            UploadForegroundService.start(this)
+            val skipped = selectedCount - accepted
+            if (skipped > 0) toast("已重试 $accepted 条，另有 $skipped 条无法重试")
+        } catch (error: IllegalStateException) {
+            UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
+        }
+        exitSelection()
+        findViewById<View>(R.id.downloadScroll).scrollTo(0, 0)
+    }
 
     /** 改名默认填记录里的原名（不含下载时的 `时间戳-id_` 前缀），顺手就能改成干净名字。 */
     private fun promptRename(task: DownloadTask) {
@@ -724,7 +826,7 @@ class DownloadActivity : AppCompatActivity() {
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 AlertDialog.Builder(this)
-                    .setTitle("文件信息")
+                    .setTitle(DownloadFileLogic.label(MoreAction.INFO, task.state))
                     .setMessage(text)
                     .setPositiveButton("知道了", null)
                     .show()
@@ -799,7 +901,7 @@ class DownloadActivity : AppCompatActivity() {
             else toast("文件正在提交或已结束，请查看传输结果")
             refreshNow()
         })
-        taskList.addView(row)
+        activeList.addView(row)
     }
 
     /** 排队中的上传：不画进度条，可单独移出队列。 */
@@ -826,22 +928,20 @@ class DownloadActivity : AppCompatActivity() {
             if (UploadCenter.cancel(this, record.id)) toast("已处理取消请求")
             refreshNow()
         })
-        taskList.addView(row)
+        activeList.addView(row)
     }
 
     /** 有持久读取授权的失败任务可以重新上传。 */
     private fun addUploadHistoryRow(record: UploadRecord) {
-        val row = card()
-        // 多选态只针对下载记录：上传行补一个禁用的勾选框占位，并把行尾按钮收掉，
-        // 否则用户会以为「重试」也是批量操作的一部分。
+        val key = HistoryKey(record.id, upload = true)
+        val row = card(selecting)
         if (selecting) {
-            row.addView(CheckBox(this).apply {
-                isEnabled = false
-                isClickable = false
-                isFocusable = false
-                contentDescription = "上传记录不支持多选"
-                layoutParams = LinearLayout.LayoutParams(dp(32), dp(32))
-            })
+            addRecordSelector(row, key)
+        } else {
+            row.setOnLongClickListener {
+                enterSelection(key)
+                true
+            }
         }
         row.addView(typeIcon(record.name))
         val main = vertical().apply {
@@ -865,19 +965,7 @@ class DownloadActivity : AppCompatActivity() {
         row.addView(main)
         if (!selecting) {
             if (UploadRecordLogic.canRetry(record)) {
-                row.addView(action("重试") {
-                    if (!UploadCenter.retry(this, record.id)) {
-                        toast("原文件授权已失效，请重新选择文件")
-                    } else {
-                        try {
-                            UploadForegroundService.start(this)
-                            switchTab(false)
-                        } catch (error: IllegalStateException) {
-                            UploadCenter.stop(this, "无法启动后台上传，请返回应用后重试")
-                            refreshNow()
-                        }
-                    }
-                })
+                row.addView(action("重试") { retryUploads(listOf(record.id)) })
             } else {
                 row.addView(tag(if (record.state == UploadRecordState.SUCCESS) "已上传" else "失败"))
             }
@@ -903,10 +991,10 @@ class DownloadActivity : AppCompatActivity() {
 
     // ===================== 视图小工具 =====================
 
-    private fun card() = LinearLayout(this).apply {
+    private fun card(selectable: Boolean = false) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        setBackgroundResource(R.drawable.bg_card)
+        setBackgroundResource(if (selectable) R.drawable.bg_transfer_selection_card else R.drawable.bg_card)
         setPadding(dp(12), dp(11), dp(12), dp(11))
         layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1007,8 +1095,8 @@ class DownloadActivity : AppCompatActivity() {
         ).apply { marginStart = dp(10) }
     }
 
-    private fun addSection(label: String) {
-        taskList.addView(TextView(this).apply {
+    private fun addSection(label: String, container: LinearLayout = taskList) {
+        container.addView(TextView(this).apply {
             text = label
             textSize = 11f
             setTypeface(null, Typeface.BOLD)
@@ -1042,6 +1130,9 @@ class DownloadActivity : AppCompatActivity() {
         if (time <= 0) "" else SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(time))
 
     companion object {
+        internal const val EXTRA_SHOW_UPLOADS = "show_transfer_uploads"
+        private const val STATE_DOWNLOAD_FILTER = "transfer_download_filter"
+        private const val STATE_UPLOAD_FILTER = "transfer_upload_filter"
         internal const val EXTRA_VERIFY_DOWNLOAD = "verify_download"
         private const val MENU_CLEAR_SUCCESS = 1
         private const val MENU_CLEAR_FAILED = 2

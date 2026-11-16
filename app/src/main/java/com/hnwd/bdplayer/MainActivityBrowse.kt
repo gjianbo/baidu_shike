@@ -292,6 +292,7 @@ internal fun MainActivity.applySourceProvider(target: SourceProvider) {
 
 
 internal fun MainActivity.applyDiskProvider(target: SourceProvider) {
+    clearSelectionIfActive()
     diskProvider = target
     getSharedPreferences("account_scope", android.content.Context.MODE_PRIVATE).edit {
         putString(AccountScope.key("disk_provider"), target.name)
@@ -306,6 +307,7 @@ internal fun MainActivity.applyDiskProvider(target: SourceProvider) {
 
 internal fun MainActivity.refreshDisk() {
     requestId++
+    courseRequestId++
     clearHomeUpdatePrompt()
     homeDisplayedEntries = emptyList()
     redrawFilteredRows = null
@@ -442,8 +444,13 @@ internal fun MainActivity.ensureBdstoken(
 
 internal fun MainActivity.loadDiskPage(dir: String, page: Int, cacheKey: String, previousButton: View? = null) {
     val expectedParentKey = courseParentKey
+    val tokenRequestGeneration = courseRequestId
+    fun isCurrentDirectory() = screen == Screen.DISK && diskProvider == SourceProvider.BAIDU &&
+        courseParentKey == expectedParentKey
+    fun isCurrentTokenRequest() = isCurrentDirectory() && courseRequestId == tokenRequestGeneration
     ensureBdstoken(
         onReady = { token ->
+            if (!isCurrentTokenRequest()) return@ensureBdstoken
             val request = BaiduPersonalDrive(token).list(dir, page, 100)
             load(
                 request.url, lane = RequestLane.COURSE,
@@ -457,8 +464,8 @@ internal fun MainActivity.loadDiskPage(dir: String, page: Int, cacheKey: String,
                         status.text = "读取我的网盘失败，请刷新重试。"
                     }
                 },
+                requestCurrent = ::isCurrentDirectory,
             ) { json ->
-                if (screen != Screen.DISK || courseParentKey != expectedParentKey) return@load
                 val (entries, hasMore) = request.decode(json)
                 val changed = courseCache.writeIfChanged(
                     cacheKey, page, entries, if (hasMore) "more" else "",
@@ -471,15 +478,18 @@ internal fun MainActivity.loadDiskPage(dir: String, page: Int, cacheKey: String,
                 cacheNote = "已同步 ${courseCache.syncLabel(cacheKey)}"
                 renderCourse()
                 if (all.isEmpty()) content.addView(label("此目录暂无内容", 12f))
-                filterBar.visibility = if (hasFilterOptions(all)) View.VISIBLE else View.GONE
+                filterBar.visibility = if (!selectionMode && hasFilterOptions(all)) View.VISIBLE else View.GONE
                 renderDiskMore(dir, cacheKey)
                 status.text = if (!changed && page == 1) "$cacheNote · 无更新" else cacheNote
             }
         },
         onFailure = {
             previousButton?.isEnabled = true
-            if (courseCache.readAll(cacheKey).isEmpty()) status.text = "无法读取我的网盘，请登录后重试。"
+            if (isCurrentTokenRequest() && courseCache.readAll(cacheKey).isEmpty()) {
+                status.text = "无法读取我的网盘，请登录后重试。"
+            }
         },
+        requestCurrent = ::isCurrentTokenRequest,
     )
 }
 

@@ -143,11 +143,13 @@ internal fun MainActivity.updateNav() {
     renderSourcePicker()
     updateFavoritesBadge()
     val browsing = screen == Screen.HOME || screen == Screen.DISK || screen == Screen.GROUPS
+    val diskSelection = screen == Screen.DISK && selectionMode
     sourceButton.visibility = if (screen == Screen.GROUPS) View.VISIBLE else View.GONE
     homeGroupChip?.visibility = if (screen == Screen.HOME) View.VISIBLE else View.GONE
     btnFavorites.visibility = if (screen == Screen.DISK || screen == Screen.GROUPS) View.VISIBLE else View.GONE
     btnBack.visibility = if (screen == Screen.FAVORITES) View.VISIBLE else View.GONE
     appSub.visibility = when {
+        diskSelection -> View.GONE
         screen == Screen.HOME && hasVerifiedAccount() && verifiedAccountName.isNotBlank() -> View.VISIBLE
         screen == Screen.DISK -> View.VISIBLE
         browsing && (folders.isNotEmpty() || !hasActiveSession()) -> View.VISIBLE
@@ -159,7 +161,7 @@ internal fun MainActivity.updateNav() {
             currentPageProvider() == SourceProvider.BAIDU && sourceKindOf(gid) == SourceKind.GROUP))
     ) View.VISIBLE else View.GONE
     if (fabReady()) {
-        val diskManage = screen == Screen.DISK && hasActiveSession()
+        val diskManage = screen == Screen.DISK && hasActiveSession() && !selectionMode
         fabAdd.visibility = if (diskManage) View.VISIBLE else View.GONE
         updateFabPosition()
     }
@@ -170,7 +172,7 @@ internal fun MainActivity.updateNav() {
     )
     crumbsScroll.visibility =
         if (browsing && folders.isNotEmpty()) View.VISIBLE else View.GONE
-    sectionRow.visibility = if (browsing) View.VISIBLE else View.GONE
+    sectionRow.visibility = if (browsing && !diskSelection) View.VISIBLE else View.GONE
     sectionTitle.text = when (screen) {
         Screen.HOME -> "群组"
         Screen.DISK, Screen.GROUPS -> "文件"
@@ -443,30 +445,37 @@ internal fun MainActivity.sheetMaxHeight(available: Int): Int =
 
 internal fun MainActivity.renderBatchBar() {
     if (!batchBarReady()) return
-    if (batchMoveReady()) {
-        val diskSel = selectionMode && selectionScreen == Screen.DISK
-        batchMove.visibility = if (diskSel) View.VISIBLE else View.GONE
-        batchCopy.visibility = if (diskSel) View.VISIBLE else View.GONE
-        batchDelete.visibility = if (diskSel) View.VISIBLE else View.GONE
-        batchFav.visibility = if (diskSel) View.GONE else View.VISIBLE
-        batchDownload.visibility = if (selectionMode && visibleSelectionEntries().any(DownloadLogic::canDownload)) {
-            View.VISIBLE
-        } else {
-            View.GONE
-        }
+    val diskSel = selectionMode && selectionScreen == Screen.DISK
+    val entries = if (selectionMode) visibleSelectionEntries() else emptyList()
+    val allSelected = lastRenderedEntries.isNotEmpty() && entries.size == lastRenderedEntries.size
+    if (screen == Screen.DISK) {
+        val browseVisibility = if (diskSel) View.GONE else View.VISIBLE
+        shell.findViewById<View>(R.id.brandRow).visibility = browseVisibility
+        shell.findViewById<View>(R.id.titleRow).visibility = browseVisibility
+        appSub.visibility = browseVisibility
+        sectionRow.visibility = if (!diskSel && hasActiveSession()) View.VISIBLE else View.GONE
+        status.visibility = browseVisibility
     }
-    batchBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
+    diskSelectionBar.render(diskSel, entries.size, lastRenderedEntries.size)
+    val diskActions = if (diskSel) diskSelectionActions(entries) else emptyList()
+    diskActionBar.visibility = if (diskActions.isEmpty()) View.GONE else View.VISIBLE
+    renderActionGrid(diskActionBar, diskActions)
+    batchCount.visibility = if (diskSel) View.GONE else View.VISIBLE
+    batchFav.visibility = if (diskSel) View.GONE else View.VISIBLE
+    batchDownload.visibility = if (!diskSel && entries.any(DownloadLogic::canDownload)) View.VISIBLE else View.GONE
+    if (fabReady() && screen == Screen.DISK) {
+        fabAdd.visibility = if (!selectionMode && hasActiveSession()) View.VISIBLE else View.GONE
+    }
+    batchBar.visibility = if (selectionMode && !diskSel) View.VISIBLE else View.GONE
     if (selectionMode) {
-        batchCount.text = "已选 ${selectedKeys.size} 项"
-        sectionTitle.text = "已选 ${selectedKeys.size} 项"
+        val count = if (diskSel) entries.size else selectedKeys.size
+        batchCount.text = "已选 $count 项"
+        sectionTitle.text = "已选 $count 项"
         filterCount.visibility = View.GONE
         sortButton.visibility = View.GONE
-        val entries = visibleSelectionEntries()
         val allStarred = entries.isNotEmpty() && entries.all { favorites.has(it) }
         batchFav.text = if (allStarred) "取消收藏" else "收藏"
-        batchAll.text = if (lastRenderedEntries.isNotEmpty() &&
-            selectedKeys.containsAll(lastRenderedEntries.map(::entryKey))
-        ) "取消全选" else "全选"
+        batchAll.text = if (allSelected) "取消全选" else "全选"
     } else {
         filterCount.visibility = View.VISIBLE
         sectionTitle.text = when (screen) {

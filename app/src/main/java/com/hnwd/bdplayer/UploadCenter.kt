@@ -105,18 +105,12 @@ internal object UploadCenter {
 
     fun retry(context: Context, id: Long): Boolean {
         val app = context.applicationContext
-        val record = UploadStore.records(app).firstOrNull {
-            it.id == id && UploadRecordLogic.canRetry(it)
-        } ?: return false
-        val uri = record.sourceUri.toUri()
-        if (app.contentResolver.persistedUriPermissions.none { it.uri == uri && it.isReadPermission }) {
-            return false
+        val accepted = UploadStore.retry(app, id) { record ->
+            val task = Task(record.id, record.sourceUri.toUri(), record.dir, record.folderId, record.provider, record.accountId)
+            liveIds = liveIds + task.id
+            queue.addLast(task)
         }
-        // 重新执行该条任务，继续使用原网盘和目录。
-        val task = Task(record.id, uri, record.dir, record.folderId, record.provider, record.accountId)
-        liveIds = liveIds + task.id
-        queue.addLast(task)
-        UploadStore.retry(app, record)
+        if (!accepted) return false
         queued(app, 1)
         return true
     }

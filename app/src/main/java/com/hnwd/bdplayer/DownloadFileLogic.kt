@@ -3,7 +3,7 @@ package com.hnwd.bdplayer
 import java.util.Locale
 
 /** 长按已完成/失败记录弹出的菜单项。顺序即展示顺序。 */
-internal enum class MoreAction { SHARE, RENAME, COPY_NAME, COPY_PATH, INFO, REVEAL, DELETE }
+internal enum class MoreAction { SHARE, RENAME, COPY_PATH, INFO, REVEAL, DELETE }
 
 /**
  * 下载记录长按菜单的纯逻辑：菜单项、改名校验、删除/信息文案。
@@ -13,30 +13,34 @@ internal object DownloadFileLogic {
 
     /**
      * 菜单项。
-     * - 成功：分享 / 重命名 / 复制文件名 / 复制路径 / 文件信息 / 打开所在文件夹 / 删除；
+     * - 成功：分享 / 重命名 / 复制路径 / 文件详情 / 打开位置 / 删除，4 列 2 行；
      * - 失败：只有「移除记录」（没有文件可删），重试与验证仍在行内按钮上；
      * - 进行中与排队中不挂长按（取消按钮已经足够）。
      *
      * 「移除记录」与「删除文件」合并成一个 [MoreAction.DELETE]：是否连文件一起删，
      * 由弹窗里的勾选项决定，不给用户两个长得几乎一样的入口。
+     * 「复制文件名」已去掉：文件名就在面板标题上，长按选中不比自己看方便多少。
      */
     fun actions(state: DownloadState): List<MoreAction> = when (state) {
         DownloadState.SUCCESS -> listOf(
-            MoreAction.SHARE, MoreAction.RENAME, MoreAction.COPY_NAME, MoreAction.COPY_PATH,
+            MoreAction.SHARE, MoreAction.RENAME, MoreAction.COPY_PATH,
             MoreAction.INFO, MoreAction.REVEAL, MoreAction.DELETE,
         )
         DownloadState.FAILED -> listOf(MoreAction.DELETE)
         DownloadState.RUNNING, DownloadState.QUEUED -> emptyList()
     }
 
-    /** 同一个入口在成功记录上叫「删除」，在失败记录上叫「移除记录」。 */
+    /**
+     * 同一个入口在成功记录上叫「删除」，在失败记录上叫「移除记录」。
+     *
+     * 面板是 4 列网格，标签使用简短文案。
+     */
     fun label(action: MoreAction, state: DownloadState): String = when (action) {
         MoreAction.SHARE -> "分享"
         MoreAction.RENAME -> "重命名"
-        MoreAction.COPY_NAME -> "复制文件名"
         MoreAction.COPY_PATH -> "复制路径"
-        MoreAction.INFO -> "文件信息"
-        MoreAction.REVEAL -> "打开所在文件夹"
+        MoreAction.INFO -> "文件详情"
+        MoreAction.REVEAL -> "打开位置"
         MoreAction.DELETE -> if (state == DownloadState.FAILED) "移除记录" else "删除"
     }
 
@@ -59,10 +63,8 @@ internal object DownloadFileLogic {
         }
     }
 
-    /** 「复制路径」用的相对路径，与「文件信息」里显示的「位置」同一口径。 */
+    /** 读不到本地文件信息时使用的相对路径。 */
     fun locationOf(name: String): String = "Download/${DownloadLogic.FOLDER}/$name"
-
-    fun copiedNameMessage(): String = "已复制文件名"
 
     fun copiedPathMessage(path: String): String = "已复制路径：$path"
 
@@ -87,8 +89,11 @@ internal object DownloadFileLogic {
     /** 批量删除的标题与文案：条数写在标题里，避免用户误以为只删一条。 */
     fun batchDeleteTitle(count: Int): String = "删除 $count 项记录"
 
-    fun batchDeleteMessage(count: Int): String =
-        "选中的 $count 条记录会从列表移除。记录移除后文件仍留在「下载 / ${DownloadLogic.FOLDER}」里，勾选下面的选项才会连文件一起删。"
+    fun batchDeleteMessage(count: Int, failedRecords: Int = 0): String = when {
+        failedRecords == count -> "选中的 $count 条失败记录会从列表移除。"
+        failedRecords > 0 -> "选中的 $count 条记录会从列表移除，其中 $failedRecords 条传输失败。勾选后只会删除已完成下载对应的本地文件。"
+        else -> "选中的 $count 条记录会从列表移除。记录移除后文件仍留在「下载 / ${DownloadLogic.FOLDER}」里，勾选下面的选项才会连文件一起删。"
+    }
 
     /** 弹窗里的勾选项。默认不勾——公共下载目录里的文件不该被顺手删掉。 */
     const val DELETE_FILE_OPTION = "同时删除本地文件（删除后无法恢复）"
@@ -121,12 +126,6 @@ internal object DownloadFileLogic {
     /** 批量分享的结果文案：被跳过的条数要让用户看见。 */
     fun multiShareMessage(shared: Int, skipped: Int): String =
         if (skipped > 0) "已分享 $shared 个文件，$skipped 个文件已不在" else "已分享 $shared 个文件"
-
-    /** 批量操作栏：未选任何项时的提示。 */
-    const val SELECTION_EMPTY_HINT = "点选要处理的下载记录"
-
-    fun selectionHint(count: Int): String =
-        if (count <= 0) SELECTION_EMPTY_HINT else "已选 $count 项"
 
     /** 文件信息面板：名称 / 大小 / 位置 / 完成时间 / 来源 / 类型，一行一项。 */
     fun infoText(

@@ -28,7 +28,9 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionResult
@@ -36,6 +38,10 @@ import java.io.File
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+
+/** 31341「视频正在转码」是服务端异步排队：最多取址 4 次，每次失败后等 2s 再试（共约 6s）。 */
+private const val VIDEO_TRANSCODING_ATTEMPTS = 4
+private const val VIDEO_TRANSCODING_RETRY_MS = 2_000L
 
 /**
  * 播放链路：取址、后台续播、音频/视频页与播放队列。
@@ -312,7 +318,7 @@ internal fun MainActivity.resolveDiskAudio(entry: PanEntry, openPlayer: Boolean)
                     }
                     result.onSuccess(::playStream).onFailure { error ->
                         when {
-                            error !is AudioTranscodingPending -> failAudioRequest(
+                            error !is TranscodingPending -> failAudioRequest(
                                 (error as? IllegalStateException)?.message ?: "获取网盘音频失败，请重试。",
                             )
                             attempt < 4 -> web.postDelayed({ fetch() }, 2_000)
@@ -1132,6 +1138,9 @@ internal fun MainActivity.startVideo(
     // 取址期间旧播放器可能已经到点暂停，换页也要遵守本次切换开始时的截止时间。
     val sleepDeadline = videoSleepTimer.deadlineElapsedMs
     dismissVideoOpenError()
+    // 作废上一次 VIDEO 通道的取址与验证码，避免旧回调或验证码弹窗串进新播放。
+    videoRequestId++
+    mediaLinks.dismissCaptcha(RequestLane.VIDEO)
     pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
     loadingVideo = VideoPlaybackPage.Snapshot(
         entry, account, positionMs, playWhenReady, audioOnly, fullscreen, orientationBeforeFullscreen, recording,
@@ -1149,6 +1158,8 @@ internal fun MainActivity.startVideo(
             videoLoading = null
             loadingVideo = null
             pendingQueue = null
+            videoRequestId++
+            mediaLinks.dismissCaptcha(RequestLane.VIDEO)
             videoResolver.cancel()
             releaseIdlePreviousPage()
         }
@@ -1183,7 +1194,10 @@ internal fun MainActivity.startVideo(
                 sleepTimer = videoSleepTimer,
                 onRetry = { snapshot, automatic ->
                     if (videoLoading == null && account == playbackAccount(entry)) {
-                        if (!quark) mediaAddresses.clearPlaylist(key)
+                        if (!quark) {
+                            mediaAddresses.clearPlaylist(key)
+                            mediaAddresses.clearLink(key)
+                        }
                         startVideo(
                             entry, snapshot.positionMs, snapshot.playWhenReady, retryOnExpiredLink = !automatic,
                             audioOnly = snapshot.audioOnly, fullscreen = snapshot.fullscreen,
@@ -1246,6 +1260,7 @@ internal fun MainActivity.startVideo(
             val error = AlertDialog.Builder(this)
                 .setTitle("无法原生播放")
                 .setMessage((it as? QuarkLoginRequired)?.message
+                    ?: (it as? TranscodingPending)?.let { "视频正在转码，请稍后重试" }
                     ?: (it as? IllegalStateException)?.message ?: "读取视频播放地址失败。")
                 .setPositiveButton("关闭", null)
                 .setNeutralButton("重试") { _, _ ->
@@ -1264,6 +1279,13 @@ internal fun MainActivity.startVideo(
     fun mediaItem(uri: Uri) = MediaItem.Builder().setUri(uri)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(entry.name).setArtist("拾课").build())
         .build()
+    /** 原始 mp4 CDN 直链：dlink 签名绑定 WebView UA，不能用 DLINK_USER_AGENT（大文件 403 sign error）。 */
+    fun progressiveSource(link: Uri): MediaSource {
+        val http = DefaultHttpDataSource.Factory()
+            .setUserAgent(web.settings.userAgentString)
+            .setDefaultRequestProperties(mapOf("Referer" to "https://pan.baidu.com/disk/main"))
+        return DefaultMediaSourceFactory(http).createMediaSource(mediaItem(link))
+    }
     if (quark) {
         resolveQuarkPlayback(entry) { result ->
             openStream(result.mapCatching { it.mediaSource(this, mediaItem(it.uri)) })
@@ -1272,13 +1294,63 @@ internal fun MainActivity.startVideo(
     }
     val playlist = if (entry.isDisk) PanApi.diskVideoPlaylist(entry) else PanApi.videoPlaylist(entry)
     val cached = mediaAddresses.playlist(key, playlist)
+    val cachedLink = mediaAddresses.link(key)
     if (cached != null) {
         openStream(runCatching { cached.mediaSource(mediaItem(cached.uri)) })
+    } else if (cachedLink != null) {
+        // 上一次 31341 兜底拿到的原始 mp4 直链仍在缓存内：直接播，跳过转码等待。
+        openStream(runCatching { progressiveSource(cachedLink) })
     } else {
-        videoResolver.start(playlist, web.settings.userAgentString) { result ->
-            result.getOrNull()?.let { mediaAddresses.savePlaylist(key, it) }
-            openStream(result.mapCatching { it.mediaSource(mediaItem(it.uri)) })
+        // 31341「视频正在转码」是服务端异步转码排队：接口不等待，冷文件首次取址必然失败。
+        // 音频链路早已有「重试 + 原始文件兜底」，这里给视频补齐同样的语义。
+        var attempt = 0
+        fun fetch() {
+            if (videoLoading !== loading || isDestroyed || isFinishing) return
+            attempt++
+            videoResolver.start(playlist, web.settings.userAgentString) { result ->
+                if (videoLoading !== loading || isDestroyed || isFinishing) return@start
+                val stream = result.getOrNull()
+                if (stream != null) {
+                    mediaAddresses.savePlaylist(key, stream)
+                    openStream(result.mapCatching { it.mediaSource(mediaItem(it.uri)) })
+                    return@start
+                }
+                val error = result.exceptionOrNull()
+                if (error is TranscodingPending && attempt < VIDEO_TRANSCODING_ATTEMPTS) {
+                    loading.setMessage("视频正在转码，请稍候…")
+                    web.postDelayed({ fetch() }, VIDEO_TRANSCODING_RETRY_MS)
+                    return@start
+                }
+                if (error is TranscodingPending && entry.isDisk) {
+                    // 转码迟迟不就绪：退回 /api/download 的原始 mp4 CDN 直链。
+                    loading.setMessage("转码未完成，正在改用原始文件播放…")
+                    ensureBdstoken(
+                        lane = RequestLane.VIDEO,
+                        requestCurrent = { videoLoading === loading },
+                        onReady = { token ->
+                            if (videoLoading !== loading) return@ensureBdstoken
+                            mediaLinks.requestDiskLink(
+                                entry, token, RequestLane.VIDEO,
+                                isCurrent = { videoLoading === loading },
+                                onFailure = {
+                                    openStream(Result.failure(IllegalStateException("无法打开原始视频，请稍后重试。")))
+                                },
+                            ) { link ->
+                                if (videoLoading !== loading) return@requestDiskLink
+                                mediaAddresses.saveLink(key, link)
+                                openStream(runCatching { progressiveSource(link) })
+                            }
+                        },
+                        onFailure = {
+                            openStream(Result.failure(IllegalStateException("无法读取我的网盘，请登录后重试。")))
+                        },
+                    )
+                    return@start
+                }
+                openStream(result.mapCatching { it.mediaSource(mediaItem(it.uri)) })
+            }
         }
+        fetch()
     }
 }
 

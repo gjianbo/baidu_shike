@@ -98,10 +98,9 @@ class MainActivity : AppCompatActivity() {
     internal lateinit var batchAll: TextView
     internal lateinit var batchFav: TextView
     internal lateinit var batchDone: TextView
-    internal lateinit var batchMove: TextView
-    internal lateinit var batchCopy: TextView
-    internal lateinit var batchDelete: TextView
     internal lateinit var batchDownload: TextView
+    internal lateinit var diskSelectionBar: FileSelectionBar
+    internal lateinit var diskActionBar: LinearLayout
     internal lateinit var fabAdd: View
     internal lateinit var crumbsScroll: View
     internal lateinit var crumbsRow: LinearLayout
@@ -115,6 +114,7 @@ class MainActivity : AppCompatActivity() {
     internal var writeRequestId = 0
     internal var deleteCheckRequestId = 0
     internal var downloadRequestId = 0
+    internal var videoRequestId = 0
     /**
      * 网盘写操作（新建/重命名/移动/复制/删除/分享/转存）集中在这里，状态与锁都在它内部。
      *
@@ -599,18 +599,15 @@ class MainActivity : AppCompatActivity() {
         batchAll.setOnClickListener { selectAllVisible() }
         batchFav.setOnClickListener { batchFavoriteSelected() }
         batchDone.setOnClickListener { exitSelection() }
-        batchMove = shell.findViewById(R.id.batchMove)
-        batchCopy = shell.findViewById(R.id.batchCopy)
-        batchDelete = shell.findViewById(R.id.batchDelete)
+        diskSelectionBar = FileSelectionBar(shell.findViewById(R.id.fileSelectionBar), this::exitSelection, this::selectAllVisible)
+        diskActionBar = shell.findViewById(R.id.diskActionBar)
+        diskActionBar.clipToOutline = true
         batchDownload = shell.findViewById(R.id.batchDownload)
         batchDownload.setOnClickListener {
             val entries = visibleSelectionEntries()
             exitSelection()
             downloads.start(entries)
         }
-        batchMove.setOnClickListener { diskWrites.batchMoveSelected() }
-        batchCopy.setOnClickListener { diskWrites.batchCopySelected() }
-        batchDelete.setOnClickListener { diskWrites.batchDeleteSelected() }
         fabAdd = shell.findViewById(R.id.fabAdd)
         fabAdd.setOnClickListener { showAddSheet() }
         nowPlaying.setOnClickListener { controller?.let { showPlayback(it) } }
@@ -904,6 +901,7 @@ class MainActivity : AppCompatActivity() {
         when {
             audioPage != null -> closeAudioPage()
             native.isGone -> showApp()
+            screen == Screen.DISK && selectionMode -> exitSelection()
             screen == Screen.FAVORITES -> closeFavorites()
             folders.isNotEmpty() -> returnToFolder(folders.lastIndex)
             screen != Screen.HOME -> showScreen(Screen.HOME)
@@ -999,7 +997,6 @@ class MainActivity : AppCompatActivity() {
     // lateinit 的 ::prop.isInitialized 需要访问 backing field，扩展文件无法直接使用；
     // 由类内 helper 暴露，语义与原检查完全一致。
     internal fun batchBarReady() = ::batchBar.isInitialized
-    internal fun batchMoveReady() = ::batchMove.isInitialized
     internal fun fabReady() = ::fabAdd.isInitialized
 
     /** 迷你播放条占据右下角时把 FAB 上移，避免两个浮层叠在一起。 */
@@ -1055,6 +1052,7 @@ class MainActivity : AppCompatActivity() {
             RequestLane.WRITE -> ++writeRequestId
             RequestLane.DELETE_CHECK -> ++deleteCheckRequestId
             RequestLane.DOWNLOAD -> ++downloadRequestId
+            RequestLane.VIDEO -> ++videoRequestId
         }
         mediaLinks.dismissCaptcha(lane)
         val playToken = audioPlayToken.takeIf { lane == RequestLane.AUDIO }
@@ -1072,6 +1070,7 @@ class MainActivity : AppCompatActivity() {
                 RequestLane.WRITE -> writeRequestId
                 RequestLane.DELETE_CHECK -> deleteCheckRequestId
                 RequestLane.DOWNLOAD -> downloadRequestId
+                RequestLane.VIDEO -> videoRequestId
             }
         ) && (playToken == null || AudioPlayRequestGate.isCurrent(playToken)) && requestCurrent()
         fun showError(message: String?) {
@@ -1080,7 +1079,7 @@ class MainActivity : AppCompatActivity() {
                 RequestLane.LIST -> status.text = text
                 RequestLane.AUDIO -> failAudioRequest(text)
                 RequestLane.SEARCH, RequestLane.COURSE, RequestLane.DIRECTORY_PICKER, RequestLane.RENEWAL, RequestLane.WRITE,
-                RequestLane.DELETE_CHECK, RequestLane.DOWNLOAD -> Unit
+                RequestLane.DELETE_CHECK, RequestLane.DOWNLOAD, RequestLane.VIDEO -> Unit
             }
         }
         if (lane == RequestLane.LIST) status.text = statusHint ?: "正在读取…"
@@ -1525,8 +1524,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    internal fun openDownloads() {
-        startActivity(Intent(this, DownloadActivity::class.java))
+    internal fun openDownloads(showUploads: Boolean = false) {
+        startActivity(Intent(this, DownloadActivity::class.java).putExtra(DownloadActivity.EXTRA_SHOW_UPLOADS, showUploads))
     }
 
     internal fun chooseUploadFiles() {
@@ -1573,7 +1572,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun showUploadSnackbar(count: Int) {
         Snackbar.make(shell, "已加入上传队列（$count 个文件）", Snackbar.LENGTH_LONG)
-            .setAction("查看进度") { openDownloads() }
+            .setAction("查看进度") { openDownloads(showUploads = true) }
             .show()
         if (uploadObserver != null) return
         var seenRunning = false

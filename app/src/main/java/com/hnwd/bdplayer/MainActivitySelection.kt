@@ -36,6 +36,7 @@ internal fun MainActivity.rememberFolderPosition() {
 
 
 internal fun MainActivity.returnToFolder(depth: Int) {
+    clearSelectionIfActive()
     folders.subList(depth, folders.size).clear()
     val path = folders.map(::entryKey)
     val position = folderPositions.remove(path)
@@ -61,13 +62,13 @@ internal fun MainActivity.visibleSelectionEntries(): List<PanEntry> =
     lastRenderedEntries.filter { entryKey(it) in selectedKeys }
 
 
-internal fun MainActivity.enterSelection() {
+internal fun MainActivity.enterSelection(initial: PanEntry? = null) {
     if (selectionMode || lastRenderedEntries.isEmpty()) return
     selectionMode = true
     selectionScreen = screen
     selectedKeys.clear()
-    renderBatchBar()
-    redrawFilteredRows?.invoke()
+    initial?.let { selectedKeys.add(entryKey(it)) }
+    redrawFilteredRows?.invoke() ?: renderBatchBar()
 }
 
 
@@ -94,8 +95,7 @@ internal fun MainActivity.clearSelectionIfActive() {
 internal fun MainActivity.toggleSelection(entry: PanEntry) {
     val key = entryKey(entry)
     if (!selectedKeys.add(key)) selectedKeys.remove(key)
-    renderBatchBar()
-    redrawFilteredRows?.invoke()
+    redrawFilteredRows?.invoke() ?: renderBatchBar()
 }
 
 
@@ -104,8 +104,7 @@ internal fun MainActivity.selectAllVisible() {
     if (visible.isEmpty()) return
     if (selectedKeys.containsAll(visible)) selectedKeys.removeAll(visible.toSet())
     else selectedKeys.addAll(visible)
-    renderBatchBar()
-    redrawFilteredRows?.invoke()
+    redrawFilteredRows?.invoke() ?: renderBatchBar()
 }
 
 
@@ -156,6 +155,50 @@ internal fun MainActivity.showEntryDetail(entry: PanEntry) {
     AlertDialog.Builder(this).setTitle("详情").setMessage(message).setPositiveButton("关闭", null).show()
 }
 
+internal fun MainActivity.diskSelectionActions(entries: List<PanEntry>): List<ActionGridItem> = buildList {
+    if (entries.isEmpty()) return@buildList
+    val single = entries.singleOrNull()
+    val baidu = diskProvider == SourceProvider.BAIDU && entries.all { it.provider == SourceProvider.BAIDU }
+    if (single != null) {
+        val kind = PanApi.kindOf(single)
+        val playback = kind == MediaKind.AUDIO || kind == MediaKind.VIDEO
+        add(ActionGridItem(if (playback) "播放" else "打开", when {
+            playback -> R.drawable.ic_play
+            single.directory -> R.drawable.ic_folder
+            else -> R.drawable.ic_file
+        }) {
+            exitSelection()
+            openEntry(single, lastRenderedEntries, currentPlaybackListKey())
+        })
+    }
+    if (entries.any(DownloadLogic::canDownload)) {
+        add(ActionGridItem("下载", R.drawable.ic_download) {
+            exitSelection()
+            downloads.start(entries)
+        })
+    }
+    if (baidu) {
+        add(ActionGridItem("分享", R.drawable.ic_share) { diskWrites.promptShare(entries) })
+        add(ActionGridItem("移动", R.drawable.ic_folder) {
+            if (single == null) diskWrites.batchMoveSelected() else diskWrites.promptMoveCopy(single, copy = false)
+        })
+        add(ActionGridItem("复制", R.drawable.ic_layers) {
+            if (single == null) diskWrites.batchCopySelected() else diskWrites.promptMoveCopy(single, copy = true)
+        })
+        if (single != null) {
+            add(ActionGridItem("重命名", R.drawable.ic_rename) { diskWrites.promptRename(single) })
+        }
+    }
+    val allStarred = entries.all { favorites.has(it) }
+    add(ActionGridItem(if (allStarred) "取消收藏" else "收藏", if (allStarred) R.drawable.ic_star_filled else R.drawable.ic_star) {
+        batchFavoriteSelected()
+    })
+    if (single != null) add(ActionGridItem("详情", R.drawable.ic_info) { showEntryDetail(single) })
+    if (baidu) {
+        add(ActionGridItem("删除", R.drawable.ic_trash, destructive = true) { diskWrites.confirmDelete(entries) })
+    }
+}
+
 
 /** 长按条目的操作分发：写操作交给 diskWrites，播放/收藏仍是本页职责。 */
 internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEntry>) {
@@ -167,13 +210,7 @@ internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEnt
     } else {
         SheetChoice("打开", tag = "open")
     }
-    if (entry.isDisk && screen == Screen.DISK && !quark) {
-        choices += SheetChoice("重命名", tag = "rename")
-        choices += SheetChoice("移动", tag = "move")
-        choices += SheetChoice("复制", tag = "copy")
-        choices += SheetChoice("分享", meta = "生成分享链接", tag = "share")
-        choices += SheetChoice("删除", meta = "移入回收站", tag = "delete")
-    } else if (!entry.isDisk && !entry.directory && !quark) {
+    if (!entry.isDisk && !entry.directory && !quark) {
         choices += SheetChoice("转存到我的网盘", meta = "保存为网盘副本", tag = "transfer")
     }
     if (!entry.directory) {
@@ -189,11 +226,6 @@ internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEnt
         onSelect = { choice ->
             when (choice.tag) {
                 "play", "open" -> openEntry(entry, entries, currentPlaybackListKey())
-                "rename" -> diskWrites.promptRename(entry)
-                "move" -> diskWrites.promptMoveCopy(entry, copy = false)
-                "copy" -> diskWrites.promptMoveCopy(entry, copy = true)
-                "share" -> diskWrites.promptShare(listOf(entry))
-                "delete" -> diskWrites.confirmDelete(listOf(entry))
                 "transfer" -> diskWrites.promptTransfer(entry)
                 "download" -> downloads.start(entry)
                 "favorite" -> toggleFavorite(entry)

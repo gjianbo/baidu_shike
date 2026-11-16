@@ -196,7 +196,12 @@ internal object PanApi {
     const val CONTACTS = "https://pan.baidu.com/disk/main#/im/addrBook"
     private const val SEARCH_SIGN_SALT = "D3BA5E6D3B16D9202E10DE5D662CFC15"
 
-    /** §5.3 / §6.3：dlink 直链要带这个 UA 才 302 到 CDN；签名自带，不需要 Cookie。 */
+    /**
+     * 仅用于 HLS 分片（bdnest.pcs.baidu.com/nest/ts）播放链路：分片 UA-only 即可 206。
+     * /api/download 的 dlink CDN 直链不是这条链路 —— 它的签名绑定「生成 dlink 时的
+     * WebView UA」，用本常量会被大文件 CDN 判 403 sign error（见 PdfFileFetcher.download
+     * 与 startVideo 的原始 mp4 兜底）。两条链路的 UA 不能混用。
+     */
     const val DLINK_USER_AGENT = "pan.baidu.com"
 
     fun kindOf(entry: PanEntry): MediaKind = mediaKind(entry.name, entry.directory)

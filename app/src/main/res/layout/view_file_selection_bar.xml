@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/fileSelectionBar"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/bg"
+    android:minHeight="52dp"
+    android:paddingHorizontal="8dp"
+    android:visibility="gone">
+
+    <ImageView
+        android:id="@+id/fileSelectionClose"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="start|center_vertical"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="退出多选"
+        android:padding="10dp"
+        android:src="@drawable/ic_close" />
+
+    <TextView
+        android:id="@+id/fileSelectionCount"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:layout_marginHorizontal="92dp"
+        android:accessibilityLiveRegion="polite"
+        android:ellipsize="end"
+        android:gravity="center"
+        android:maxLines="1"
+        android:textColor="@color/ink"
+        android:textSize="17sp"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:id="@+id/fileSelectAll"
+        android:layout_width="wrap_content"
+        android:layout_height="48dp"
+        android:layout_gravity="end|center_vertical"
+        android:background="?attr/selectableItemBackground"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingHorizontal="8dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="全选"
+            android:textColor="@color/ink"
+            android:textSize="14sp" />
+
+        <ImageView
+            android:id="@+id/fileSelectAllMark"
+            android:layout_width="22dp"
+            android:layout_height="22dp"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_check_circle"
+            android:importantForAccessibility="no"
+            android:padding="4dp" />
+    </LinearLayout>
+</FrameLayout>

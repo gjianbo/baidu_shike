@@ -115,7 +115,7 @@ internal object DownloadFileOps {
     fun info(context: Context, task: DownloadTask): DownloadFileInfo {
         var name = task.name
         var size = if (task.bytesTotal > 0) task.bytesTotal else task.sizeBytes
-        var dir = "${Environment.DIRECTORY_DOWNLOADS}/${DownloadLogic.FOLDER}/"
+        var dir: String? = null
         var mime = task.mediaType
         val uri = DownloadShare.uriOf(context, task)
         if (uri != null) {
@@ -139,7 +139,8 @@ internal object DownloadFileOps {
                 }
             }
         }
-        return DownloadFileInfo(name, size, dir + name, mime)
+        val location = dir?.plus(name) ?: DownloadFileLogic.locationOf(name)
+        return DownloadFileInfo(name, size, location, mime)
     }
 
     /**

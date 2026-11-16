@@ -12,7 +12,52 @@ import org.json.JSONObject
 
 internal data class VideoStream(val uri: Uri, val playlist: ByteArray)
 
-internal class AudioTranscodingPending : IllegalStateException("音频转码准备中，请稍后重试。")
+/**
+ * 取址/转码尚未就绪的**可恢复**状态：调用方应重试，而不是直接报错。
+ *
+ * 两类触发：
+ * ① `errno` / `error_code` = 31341（HLS 转码任务排队中）；
+ * ② HTTP 200 但返回体不是可播放的 m3u8 —— 冷文件首次取址时百度可能先返回占位内容
+ *    或「尚未生成完」的清单（无 `#EXT-X-ENDLIST`），再请求一次才给完整清单；
+ *    以及非 200 但未给出明确错误码的空错误体。
+ *
+ * 真机实测：这类失败「再试一次就正常」，所以必须自动重试，不能弹「无法原生播放」。
+ */
+internal class TranscodingPending : IllegalStateException("网盘仍在转码，请稍后重试。")
+
+/** 纯逻辑：m3u8 是否是可播放的点播清单。顶层函数便于 JVM 单测直接调用（不用碰 Handler）。 */
+internal fun isPlaybackPlaylist(body: String): Boolean =
+    body.startsWith("#EXTM3U") && body.lineSequence().any {
+        it.startsWith("#EXT-X-STREAM-INF:") || it.trimEnd() == "#EXT-X-ENDLIST"
+    }
+
+/** 文档 §12：错误码速查，把取址失败翻成人话 / 可恢复状态。顶层纯函数，便于单测。 */
+internal fun playlistError(code: Int, body: String): IllegalStateException {
+    val json = runCatching { JSONObject(body) }.getOrNull()
+    val errno = json?.optInt("errno")
+    val errorCode = json?.optInt("error_code")
+    val reportedCode = errno?.takeUnless { it == 0 } ?: errorCode?.takeUnless { it == 0 }
+    return when {
+        errno == -6 -> IllegalStateException("请重新登录百度网盘后再试。")
+        errno == -20 || errorCode == -20 -> {
+            val message = json?.optString("show_msg").orEmpty().trim().take(60)
+            val detail = if (message.isEmpty()) "" else " · 网盘提示：$message"
+            // 音频/视频、DISK(/api/streaming)/GROUP(/mbox/msg/streaming) 共用本解析器，
+            // 文案不能写死媒体类型或接口路径，否则会在别的链路串台。
+            IllegalStateException("百度网盘拒绝了播放取址请求（错误码 -20，通常需验证码）$detail")
+        }
+        errorCode == 31304 -> IllegalStateException("该文件类型不支持此转码档位，请换档位或改用原始文件。")
+        errno == 31341 || errorCode == 31341 -> TranscodingPending()
+        errorCode == 31023 -> IllegalStateException("网盘取址参数有误，请重新打开。")
+        code == 401 || code == 403 -> IllegalStateException("播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）。")
+        // 非 200 但没给明确错误码：同样按「尚未就绪」处理，交给调用方重试。
+        code != 200 -> if (reportedCode == null) TranscodingPending()
+                       else IllegalStateException("播放清单请求失败（HTTP $code）。")
+        reportedCode != null -> IllegalStateException("百度网盘未返回可播放的点播清单（错误码 $reportedCode）。")
+        // 200 但清单未就绪：占位内容 / 未生成完的 m3u8 / 非标准 JSON。
+        else -> TranscodingPending()
+    }
+}
 
 internal class VideoStreamResolver {
     private val handler = Handler(Looper.getMainLooper())
@@ -84,34 +129,6 @@ internal class VideoStreamResolver {
         } finally {
             connection.disconnect()
         }
-    }
-
-    private fun isPlaybackPlaylist(body: String): Boolean =
-        body.startsWith("#EXTM3U") && body.lineSequence().any {
-            it.startsWith("#EXT-X-STREAM-INF:") || it.trimEnd() == "#EXT-X-ENDLIST"
-        }
-
-    /** 文档 §12：错误码速查，把取址失败翻成人话（只改提示，不改播放链）。 */
-    private fun playlistError(code: Int, body: String): IllegalStateException {
-        val json = runCatching { JSONObject(body) }.getOrNull()
-        val errno = json?.optInt("errno")
-        val errorCode = json?.optInt("error_code")
-        val reportedCode = errno?.takeUnless { it == 0 } ?: errorCode?.takeUnless { it == 0 }
-        return IllegalStateException(when {
-            errno == -6 -> "请重新登录百度网盘后再试。"
-            errno == -20 || errorCode == -20 -> {
-                val message = json.optString("show_msg").trim().take(60)
-                val detail = if (message.isEmpty()) "" else " · 网盘提示：$message"
-                "百度网盘拒绝了视频取址请求（错误码 -20 · 接口 /mbox/msg/streaming）$detail"
-            }
-            errorCode == 31304 -> "该文件类型不支持此转码档位，请换档位或改用原始文件。"
-            errno == 31341 || errorCode == 31341 -> return AudioTranscodingPending()
-            errorCode == 31023 -> "网盘取址参数有误，请重新打开。"
-            code == 401 || code == 403 -> "播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）。"
-            code != 200 -> "播放清单请求失败（HTTP $code）。"
-            reportedCode != null -> "百度网盘未返回可播放的点播清单（错误码 $reportedCode）。"
-            else -> "网盘未返回可播放的点播清单。"
-        })
     }
 
     private companion object {

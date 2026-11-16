@@ -1,6 +1,6 @@
 package com.hnwd.bdplayer
 
-/** 传输页「历史」内的二级状态筛选；一级 Tab 仍是「进行中 / 历史」。 */
+/** 下载和上传各自页签内的历史状态筛选。 */
 internal enum class HistoryFilter { ALL, SUCCESS, FAILED }
 
 /**
@@ -43,6 +43,12 @@ internal object TransferFilter {
         HistoryFilter.ALL -> "全部 ${counts.all}"
         HistoryFilter.SUCCESS -> "已完成 ${counts.success}"
         HistoryFilter.FAILED -> "失败 ${counts.failed}"
+    }
+
+    fun title(filter: HistoryFilter): String = when (filter) {
+        HistoryFilter.ALL -> "全部"
+        HistoryFilter.SUCCESS -> "已完成"
+        HistoryFilter.FAILED -> "失败"
     }
 
     fun emptyText(filter: HistoryFilter): String = when (filter) {

@@ -62,6 +62,11 @@
         <item name="android:windowExitAnimation">@anim/slide_out_down</item>
     </style>
 
+    <style name="TransferActionSheetTheme" parent="AppTheme">
+        <item name="android:windowIsFloating">true</item>
+        <item name="android:windowNoTitle">true</item>
+    </style>
+
     <!-- PdfViewerFragment 的 ToolBoxView 使用 Material3 属性 -->
     <!-- 目录弹窗跟随暗黑主题：DayNight 才会让 alertDialogTheme / colorSurface 走夜间变体；
          写死 Light 时目录 ListView 的浅色文字会落在白色弹窗上，完全看不清。 -->

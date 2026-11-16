@@ -5,6 +5,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupMenu
 import android.widget.TextView
+import androidx.core.view.ViewCompat
 import androidx.media3.common.Player
 
 /**
@@ -49,13 +50,14 @@ internal fun MainActivity.addFilteredCourseRows(
     } else {
         kinds.size >= 2 || transferredCount > 0
     }
-    filterBar.visibility = if (showFilters) View.VISIBLE else View.GONE
     showAvailableMediaFilters(kinds, includeSelected = preserveMediaFilter)
-    if (!preserveMediaFilter && mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
-        mediaFilter = MediaFilter.ALL
-    }
     val rows = column()
     fun renderRows() {
+        val diskSelection = screen == Screen.DISK && selectionMode
+        if (!diskSelection && !preserveMediaFilter && mediaFilter != MediaFilter.ALL && kinds.none(mediaFilter::includes)) {
+            mediaFilter = MediaFilter.ALL
+        }
+        filterBar.visibility = if (showFilters && !diskSelection) View.VISIBLE else View.GONE
         val matching = entries.filter {
             mediaFilter.includes(PanApi.kindOf(it)) &&
                 (!transferredOnly || matchesTransferred(it, transferred))
@@ -65,6 +67,7 @@ internal fun MainActivity.addFilteredCourseRows(
         val ordered = if (sortable) orderCourses(matching, order) else matching
         filterCount.text = "共 ${ordered.size} 项"
         lastRenderedEntries = ordered
+        if (selectionMode) renderBatchBar()
         sortButton.text = order.label
         sortButton.contentDescription = "排序，当前 ${order.label}"
         sortButton.visibility = if (sortable && entries.isNotEmpty() && !selectionMode) View.VISIBLE else View.GONE
@@ -406,6 +409,7 @@ private fun MainActivity.courseRow(
     row.findViewById<TextView>(R.id.itemMeta).text =
         listOf(source, transferredLabel, kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
     val side = row.findViewById<ImageView>(R.id.itemSide)
+    side.visibility = if (selectionMode && screen == Screen.DISK) View.GONE else View.VISIBLE
     side.tag = favoriteTag(entry)
     paintFavorite(side, entryKey(entry) in favoriteKeys)
     side.setOnClickListener { toggleFavorite(entry) }
@@ -421,10 +425,11 @@ private fun MainActivity.courseRow(
     }
     val check = row.findViewById<ImageView>(R.id.itemCheck)
     if (selectionMode) {
-        val key = entryKey(entry)
+        val checked = entryKey(entry) in selectedKeys
         check.visibility = View.VISIBLE
-        check.isSelected = key in selectedKeys
-        check.contentDescription = if (check.isSelected) "已选：${entry.name}" else "未选：${entry.name}"
+        check.paintSelectionCircle(checked)
+        row.isSelected = screen == Screen.DISK && checked
+        ViewCompat.setStateDescription(row, if (checked) "已选" else "未选")
         row.setOnClickListener { toggleSelection(entry) }
         row.setOnLongClickListener(null)
     } else {
@@ -432,7 +437,7 @@ private fun MainActivity.courseRow(
         val actionEntries = if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) playbackEntries else entries
         row.setOnClickListener { openEntry(entry, actionEntries, currentPlaybackListKey()) }
         row.setOnLongClickListener {
-            showEntryActions(entry, actionEntries)
+            if (screen == Screen.DISK && entry.isDisk) enterSelection(entry) else showEntryActions(entry, actionEntries)
             true
         }
     }

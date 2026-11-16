@@ -259,15 +259,6 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         }
     }
 
-    fun batchDeleteSelected() {
-        val entries = host.selection()
-        if (entries.isEmpty()) {
-            host.say("请先选择条目")
-            return
-        }
-        confirmDelete(entries)
-    }
-
     /** 二次确认后提交删除，并检查网盘是否实际移除了原文件。 */
     fun confirmDelete(entries: List<PanEntry>) {
         if (entries.isEmpty()) return
