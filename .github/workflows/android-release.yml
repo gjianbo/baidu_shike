@@ -1,4 +1,4 @@
-name: Build Android APKs
+name: Build Android Release APK
 
 on:
   workflow_dispatch:
@@ -60,7 +60,7 @@ jobs:
         run: |
           sdkmanager --channel=3 "platforms;android-37.0" "build-tools;35.0.0" "build-tools;37.0.0"
 
-      - name: Build Debug and signed Release
+      - name: Build signed Release
         env:
           KEYSTORE_BASE64: ${{ secrets.BDPLAYER_KEYSTORE_BASE64 }}
           BDPLAYER_STORE_PASSWORD: ${{ secrets.BDPLAYER_STORE_PASSWORD }}
@@ -78,16 +78,14 @@ jobs:
           trap 'rm -f -- "$BDPLAYER_KEYSTORE"' EXIT
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$BDPLAYER_KEYSTORE"
           unset KEYSTORE_BASE64
-          gradle --no-daemon :app:lintDebug :app:assembleDebug :app:assembleRelease
+          gradle --no-daemon :app:lintDebug :app:assembleRelease
 
-      - name: Verify and name APKs
+      - name: Verify and name APK
         run: |
           release_dir=app/build/outputs/apk/release
-          debug_dir=app/build/outputs/apk/debug
           version="$(jq -er '.elements[0].versionName' "$release_dir/output-metadata.json")"
-          debug_version="$(jq -er '.elements[0].versionName' "$debug_dir/output-metadata.json")"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || "$version" != "$debug_version" ]]; then
-            echo "::error::APK versions do not match or are invalid."
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::APK version is invalid."
             exit 1
           fi
           if [[ -n "$RELEASE_TAG" && "$RELEASE_TAG" != "v$version" ]]; then
@@ -97,14 +95,12 @@ jobs:
 
           apksigner="$ANDROID_HOME/build-tools/37.0.0/apksigner"
           "$apksigner" verify "$release_dir/app-release.apk"
-          "$apksigner" verify "$debug_dir/app-debug.apk"
           mkdir -p dist
           cp "$release_dir/app-release.apk" "dist/baidu-shike-$version-release.apk"
-          cp "$debug_dir/app-debug.apk" "dist/baidu-shike-$version-debug.apk"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: android-apks
+          name: android-release-apk
           path: dist/*.apk
           if-no-files-found: error
 
@@ -117,10 +113,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: android-apks
+          name: android-release-apk
           path: dist
 
-      - name: Publish APKs to GitHub Releases
+      - name: Publish APK to GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
