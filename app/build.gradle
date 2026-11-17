@@ -27,7 +27,7 @@ android {
         // 本地发版走 build-release.sh --version。发新版本时这里和 versionCode 要一起改：
         // .github/scripts/check-version-code.sh 在 CI 与本地发版前以已发布的 v* tag
         // 为基线做严格递增校验，会拦住「versionName 变了但 versionCode 没涨」。
-        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('1.2.4')
+        versionName providers.gradleProperty('bdplayerVersionName').getOrElse('1.2.5')
     }
 
     compileOptions {
