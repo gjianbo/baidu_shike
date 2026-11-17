@@ -172,7 +172,7 @@ internal data class PanSearchHit(
 )
 
 /** 文档《媒体取址技术方案》§2：按扩展名分流后的媒体类别。 */
-internal enum class MediaKind { VIDEO, AUDIO, IMAGE, PDF, DOCUMENT, DIRECTORY, OTHER }
+internal enum class MediaKind { VIDEO, AUDIO, IMAGE, PDF, TEXT, DOCUMENT, DIRECTORY, OTHER }
 
 internal fun mediaKind(name: String, directory: Boolean): MediaKind {
     if (directory) return MediaKind.DIRECTORY
@@ -181,6 +181,7 @@ internal fun mediaKind(name: String, directory: Boolean): MediaKind {
         in AUDIO_EXT -> MediaKind.AUDIO
         in ImageTypes.EXTENSIONS -> MediaKind.IMAGE
         "pdf" -> MediaKind.PDF
+        in TEXT_EXT -> MediaKind.TEXT
         in DOC_EXT -> MediaKind.DOCUMENT
         else -> MediaKind.OTHER
     }
@@ -188,7 +189,13 @@ internal fun mediaKind(name: String, directory: Boolean): MediaKind {
 
 private val VIDEO_EXT = setOf("mp4", "mkv", "mov", "avi", "flv", "wmv", "webm", "ts", "m4v")
 private val AUDIO_EXT = setOf("mp3", "m4a", "aac", "flac", "wav", "wma", "ogg", "m4b", "amr")
-private val DOC_EXT = setOf("doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "zip", "rar", "7z")
+/** 可应用内纯文本阅读的格式。txt 从 DOC_EXT 移过来，md/markdown 原先落 OTHER。 */
+private val TEXT_EXT = setOf("txt", "md", "markdown")
+/** Office 与压缩包：下载到本地后交给系统应用打开，不在 App 内渲染。 */
+private val OFFICE_EXT = setOf("doc", "docx", "ppt", "pptx", "xls", "xlsx")
+private val DOC_EXT = OFFICE_EXT + setOf("zip", "rar", "7z")
+
+internal fun isOfficeDocument(name: String): Boolean = name.substringAfterLast('.', "").lowercase() in OFFICE_EXT
 
 internal object PanApi {
     const val HOST = "pan.baidu.com"

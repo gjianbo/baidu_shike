@@ -13,7 +13,7 @@ internal enum class PreviewCacheLimit(val megabytes: Int, val label: String) {
     val bytes: Long get() = megabytes * 1024L * 1024L
 }
 
-/** 图片原图和 PDF 共用额度。文件位置沿用旧版本，FileProvider 路径也适用。 */
+/** 图片原图、PDF 与文本 / 通用文档共用额度。文件位置沿用旧版本，FileProvider 路径也适用。 */
 internal class PreviewCache(
     private val directory: File,
     private val settings: SharedPreferences? = null,
@@ -21,15 +21,17 @@ internal class PreviewCache(
     enum class Kind(val directoryName: String, val tempPrefix: String, val tempSuffix: String) {
         IMAGE("images", "image-", ".tmp"),
         PDF("pdf", "document-", ".pdf"),
+        DOCUMENT("documents", "document-", ".tmp"),
     }
 
     data class Usage(
         val imageBytes: Long,
         val pdfBytes: Long,
+        val documentBytes: Long = 0L,
         val inUseBytes: Long,
         val limit: PreviewCacheLimit,
     ) {
-        val totalBytes: Long get() = imageBytes + pdfBytes
+        val totalBytes: Long get() = imageBytes + pdfBytes + documentBytes
     }
 
     private val references = mutableMapOf<File, Int>()
@@ -123,10 +125,12 @@ internal class PreviewCache(
     fun usage(): Usage {
         val images = files(Kind.IMAGE)
         val pdfs = files(Kind.PDF)
+        val documents = files(Kind.DOCUMENT)
         return Usage(
             imageBytes = images.sumOf(File::length),
             pdfBytes = pdfs.sumOf(File::length),
-            inUseBytes = (images + pdfs).filter { it in references }.sumOf(File::length),
+            documentBytes = documents.sumOf(File::length),
+            inUseBytes = (images + pdfs + documents).filter { it in references }.sumOf(File::length),
             limit = limit,
         )
     }

@@ -140,6 +140,13 @@ class MainActivity : AppCompatActivity() {
         get() = pdfPreviewRef ?: PdfPreviewSection(PdfPreviewHostAdapter(), mediaLinks, mediaAddresses)
             .also { pdfPreviewRef = it }
 
+    /** 文本 / 通用文档预览：取址 -> 下载 -> 应用内阅读或交系统。 */
+    internal var documentPreviewRef: DocumentPreviewSection? = null
+    internal val documentPreview: DocumentPreviewSection
+        get() = documentPreviewRef
+            ?: DocumentPreviewSection(DocumentPreviewHostAdapter(), mediaLinks, mediaAddresses)
+                .also { documentPreviewRef = it }
+
     /** 媒体取址（群组 sharedownload / 我的网盘下载签名 / 验证码），三条预览链共用。 */
     internal val mediaLinks by lazy { MediaLinkSection(MediaLinkHostAdapter()) }
 
@@ -942,6 +949,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         activityVisible = false
         pdfPreviewRef?.close()
+        documentPreviewRef?.close()
         imagePreviewRef?.close()
         mediaLinks.dismissAnyCaptcha()
         nowPlaying.removeCallbacks(nowPlayingTicker)
@@ -971,6 +979,7 @@ class MainActivity : AppCompatActivity() {
         renewalResolver.close()
         videoPage?.close()
         pdfPreviewRef?.release()
+        documentPreviewRef?.release()
         imagePreviewRef?.release()
         launchedPreviewFile?.let(PreviewCache.get(this)::release)
         launchedPreviewFile = null
@@ -1343,6 +1352,31 @@ class MainActivity : AppCompatActivity() {
         override fun refresh() = this@MainActivity.refresh()
     }
 
+    /** 纯文本阅读页：与 PDF 阅读页一样让父页面持有缓存文件直至返回。 */
+    internal fun startTextReader(entry: PanEntry, file: File) {
+        launchPreview(Intent(this, TextReaderActivity::class.java).apply {
+            putExtra(TextReaderActivity.EXTRA_FILE, file.absolutePath)
+            putExtra(TextReaderActivity.EXTRA_TITLE, entry.name)
+        }, file)
+        status.text = ""
+    }
+
+    /** Office / 压缩包：用本地缓存文件调起系统应用，交出去后无需复制。 */
+    internal fun openDocumentWithSystem(entry: PanEntry, file: File) {
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file, entry.name)
+        val view = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, documentMime(entry.name))
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            clipData = android.content.ClipData.newUri(contentResolver, entry.name, uri)
+        }
+        status.text = ""
+        try {
+            launchPreview(view, file)
+        } catch (_: android.content.ActivityNotFoundException) {
+            toast("没有可用的应用打开此文件")
+        }
+    }
+
     /** 查看器启动是异步的，父页面保留文件直至预览返回。 */
     internal fun launchPreview(intent: Intent, file: File?) {
         val cache = PreviewCache.get(this)
@@ -1447,6 +1481,62 @@ class MainActivity : AppCompatActivity() {
         override fun userAgent() = web.settings.userAgentString
 
         override fun openPdfReader(entry: PanEntry, file: File) = startPdfReader(entry, file)
+
+        override fun fetchJson(
+            url: String,
+            post: Boolean,
+            form: String?,
+            statusHint: String?,
+            lane: RequestLane,
+            onFailure: () -> Unit,
+            onResult: (JSONObject) -> Unit,
+        ) = load(
+            url, post = post, form = form, statusHint = statusHint, lane = lane,
+            onFailure = onFailure, onResult = onResult,
+        )
+    }
+
+    // ===================== DocumentPreviewHost =====================
+    // 文本 / 通用文档预览需要的最小宿主能力；取址/验证码已下沉到 MediaLinkSection。
+
+    internal inner class DocumentPreviewHostAdapter : DocumentPreviewHost {
+        override val hostActivity: android.app.Activity get() = this@MainActivity
+
+        override fun setStatus(message: String) {
+            status.text = message
+        }
+
+        override fun say(message: String) {
+            hostActivity.toast(message)
+        }
+
+        override fun isVisible() = activityVisible
+        override fun isDestroyed() = this@MainActivity.isDestroyed
+        override fun isReady() = ready
+        override fun account() = verifiedAccount
+        override fun accountVerified() = hasVerifiedAccount()
+        override fun sessionReady(provider: SourceProvider) = hasActiveSession(provider)
+        override fun playbackAccount(entry: PanEntry) = this@MainActivity.playbackAccount(entry)
+
+        override fun bumpListRequest() {
+            requestId++
+        }
+
+        override fun verifyAccount() = verifyAndRefresh()
+
+        override fun withBdstoken(onReady: (String) -> Unit, onFailure: () -> Unit) =
+            ensureBdstoken(onReady = onReady, onFailure = onFailure)
+
+        override fun evaluateJavascript(script: String, onResult: (String?) -> Unit) {
+            web.evaluateJavascript(script, onResult)
+        }
+
+        override fun userAgent() = web.settings.userAgentString
+
+        override fun openTextReader(entry: PanEntry, file: File) = startTextReader(entry, file)
+
+        override fun openDocumentExternally(entry: PanEntry, file: File) =
+            openDocumentWithSystem(entry, file)
 
         override fun fetchJson(
             url: String,

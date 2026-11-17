@@ -245,7 +245,7 @@ internal fun MainActivity.sendSleepTimer(minutes: Int) {
 }
 
 
-/** 按扩展名选择音视频播放或 PDF 下载。 */
+/** 按扩展名选择音视频播放、文档预览或交给系统应用。 */
 internal fun MainActivity.openEntry(entry: PanEntry, entries: List<PanEntry>, listKey: String? = null) {
     if (screen == Screen.FAVORITES && entry.directory) {
         openSourceDirectory(entry)
@@ -253,7 +253,9 @@ internal fun MainActivity.openEntry(entry: PanEntry, entries: List<PanEntry>, li
     }
     val kind = PanApi.kindOf(entry)
     if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) selectPlayback(entry, entries, listKey)
-    else if (kind != MediaKind.PDF && kind != MediaKind.IMAGE && !entry.directory && entry.provider == SourceProvider.QUARK) {
+    else if (kind != MediaKind.PDF && kind != MediaKind.IMAGE && kind != MediaKind.TEXT &&
+        !entry.directory && entry.provider == SourceProvider.QUARK && !isOfficeDocument(entry.name)
+    ) {
         startActivity(QuarkDriveActivity.openFile(this, entry))
         return
     }
@@ -269,11 +271,7 @@ internal fun MainActivity.openEntry(entry: PanEntry, entries: List<PanEntry>, li
         MediaKind.AUDIO -> resolveAudio(entry)
         MediaKind.PDF -> pdfPreview.open(entry)
         MediaKind.IMAGE -> imagePreview.open(entry, entries)
-        MediaKind.DOCUMENT -> AlertDialog.Builder(this)
-            .setTitle(entry.name)
-        .setMessage("App 内目前支持阅读 PDF。请在百度网盘中打开或下载此文件。")
-            .setPositiveButton("关闭", null)
-            .show()
+        MediaKind.TEXT, MediaKind.DOCUMENT -> documentPreview.open(entry)
         MediaKind.OTHER -> AlertDialog.Builder(this)
             .setTitle(entry.name)
             .setMessage("此版本暂不支持该类型，只提供目录信息。")

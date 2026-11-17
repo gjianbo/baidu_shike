@@ -99,8 +99,16 @@ internal object DownloadLogic {
         "mp3", "m4a", "aac", "wav", "flac" -> "audio/*"
         "jpg", "jpeg", "png", "webp", "gif" -> "image/*"
         "pdf" -> "application/pdf"
-        "zip", "rar", "7z" -> "application/zip"
-        "txt", "md" -> "text/plain"
+        "doc" -> "application/msword"
+        "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        "xls" -> "application/vnd.ms-excel"
+        "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        "ppt" -> "application/vnd.ms-powerpoint"
+        "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        "zip" -> "application/zip"
+        "rar" -> "application/x-rar-compressed"
+        "7z" -> "application/x-7z-compressed"
+        "txt", "md", "markdown" -> "text/plain"
         else -> "application/octet-stream"
     }
 

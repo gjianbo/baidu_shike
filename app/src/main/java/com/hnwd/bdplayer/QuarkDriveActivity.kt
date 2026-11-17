@@ -292,8 +292,9 @@ class QuarkDriveActivity : AppCompatActivity() {
             loadPage(reset = true)
             return
         }
-        when (mediaKind(file.name, false)) {
-            MediaKind.IMAGE -> {
+        val kind = mediaKind(file.name, false)
+        when {
+            kind == MediaKind.IMAGE -> {
                 val images = items.filter { !it.directory && ImageTypes.isImageName(it.name) }
                 val index = images.indexOfFirst { it.id == file.id }
                 if (index >= 0) {
@@ -304,7 +305,8 @@ class QuarkDriveActivity : AppCompatActivity() {
                     startActivity(ImageViewerActivity.galleryIntent(this, previews, index, SourceProvider.QUARK))
                 }
             }
-            MediaKind.VIDEO, MediaKind.AUDIO, MediaKind.PDF -> {
+            kind == MediaKind.VIDEO || kind == MediaKind.AUDIO || kind == MediaKind.PDF ||
+                kind == MediaKind.TEXT || isOfficeDocument(file.name) -> {
                 setResult(RESULT_OK, Intent()
                     .putExtra("file_id", file.id)
                     .putExtra("file_name", file.name)

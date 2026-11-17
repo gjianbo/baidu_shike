@@ -95,7 +95,7 @@ internal fun mediaKindLabel(kind: MediaKind, directory: Boolean, format: String)
     MediaKind.AUDIO -> "音频"
     MediaKind.VIDEO -> "视频"
     MediaKind.IMAGE -> "图片"
-    MediaKind.PDF, MediaKind.DOCUMENT -> "文档"
+    MediaKind.PDF, MediaKind.DOCUMENT, MediaKind.TEXT -> "文档"
     else -> if (directory) "目录" else format.lowercase()
 }
 

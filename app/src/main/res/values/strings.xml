@@ -2,4 +2,6 @@
     <string name="app_name">拾课</string>
     <string name="transfer_history">传输历史</string>
     <string name="file_selection_count">已选 %1$d 项</string>
+    <string name="text_reader_loading">正在加载文档…</string>
+    <string name="text_reader_empty">（空文档）</string>
 </resources>

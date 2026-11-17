@@ -127,15 +127,15 @@ internal class SettingsPage(private val host: SettingsHost) {
                 AlertDialog.Builder(activity)
                     .setTitle("预览缓存")
                     .setMessage(
-                        "已用 ${cacheSize(usage.totalBytes)} / ${usage.limit.label}\n" +
-                            "图片 ${cacheSize(usage.imageBytes)} · 文档 ${cacheSize(usage.pdfBytes)}\n\n" +
+                            "已用 ${cacheSize(usage.totalBytes)} / ${usage.limit.label}\n" +
+                            "图片 ${cacheSize(usage.imageBytes)} · PDF ${cacheSize(usage.pdfBytes)} · 文档 ${cacheSize(usage.documentBytes)}\n\n" +
                             "超出上限时，自动清理最久未打开的预览文件。",
                     )
                     .setNegativeButton("关闭", null)
                     .setNeutralButton("清理缓存") { _, _ ->
                         AlertDialog.Builder(activity)
                             .setTitle("清理预览缓存")
-                            .setMessage("将清理本机的图片和 PDF 预览缓存。正在使用的文件会保留，其余文件再次打开时会重新加载。")
+                            .setMessage("将清理本机的图片和文档预览缓存。正在使用的文件会保留，其余文件再次打开时会重新加载。")
                             .setNegativeButton("取消", null)
                             .setPositiveButton("清理") { _, _ ->
                                 update(cache::clear) { remaining ->
@@ -152,7 +152,7 @@ internal class SettingsPage(private val host: SettingsHost) {
                     .setPositiveButton("调整上限") { _, _ ->
                         host.pickFromSheet(
                             title = "缓存上限",
-                            subtitle = "图片和 PDF 共用",
+                            subtitle = "图片和文档共用",
                             choices = PreviewCacheLimit.entries.map { limit ->
                                 SheetChoice(limit.label, checked = limit == usage.limit, tag = limit)
                             },

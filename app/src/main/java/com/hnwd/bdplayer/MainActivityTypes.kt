@@ -19,7 +19,7 @@ internal enum class MediaFilter(val label: String) {
     fun includes(kind: MediaKind): Boolean = when (this) {
         ALL -> true
         DIRECTORY -> kind == MediaKind.DIRECTORY
-        DOCUMENT -> kind == MediaKind.PDF || kind == MediaKind.DOCUMENT || kind == MediaKind.IMAGE
+        DOCUMENT -> kind == MediaKind.PDF || kind == MediaKind.DOCUMENT || kind == MediaKind.TEXT || kind == MediaKind.IMAGE
         AUDIO -> kind == MediaKind.AUDIO
         VIDEO -> kind == MediaKind.VIDEO
     }

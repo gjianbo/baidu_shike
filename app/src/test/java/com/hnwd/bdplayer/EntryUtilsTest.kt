@@ -164,5 +164,9 @@ class EntryUtilsTest {
         assertTrue(MediaFilter.AUDIO.includes(MediaKind.AUDIO))
         assertFalse(MediaFilter.AUDIO.includes(MediaKind.VIDEO))
         assertTrue(MediaFilter.DOCUMENT.includes(MediaKind.IMAGE))
+        // 文本要在「文档」筛选里可见，标签也归入「文档」。
+        assertEquals("文档", mediaKindLabel(MediaKind.TEXT, false, "TXT"))
+        assertTrue(MediaFilter.DOCUMENT.includes(MediaKind.TEXT))
+        assertFalse(MediaFilter.AUDIO.includes(MediaKind.TEXT))
     }
 }

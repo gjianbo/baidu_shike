@@ -98,7 +98,7 @@ internal fun Activity.paintMediaIcon(icon: ImageView, kind: MediaKind, directory
             icon.setBackgroundResource(R.drawable.bg_fmt_image)
             icon.setColorFilter(color(R.color.ok))
         }
-        MediaKind.PDF, MediaKind.DOCUMENT -> {
+        MediaKind.PDF, MediaKind.DOCUMENT, MediaKind.TEXT -> {
             icon.setImageResource(R.drawable.ic_file)
             icon.setBackgroundResource(R.drawable.bg_fmt_pdf)
             icon.setColorFilter(color(R.color.pdfInk))

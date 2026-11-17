@@ -703,6 +703,7 @@ internal fun MainActivity.renderRootMore(key: String) {
 internal fun MainActivity.invalidateAccount() {
     homeRefreshFeedback?.clear()
     pdfPreviewRef?.close()
+    documentPreviewRef?.close()
     imagePreviewRef?.close()
     accountProbeId++
     courseRequestId++
