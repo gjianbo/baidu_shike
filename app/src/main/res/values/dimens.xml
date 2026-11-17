@@ -9,4 +9,5 @@
     <dimen name="sheet_max_width">560dp</dimen>
     <dimen name="mini_player_width">300dp</dimen>
     <dimen name="navigation_rail_width">84dp</dimen>
+    <dimen name="navigation_sidebar_width">200dp</dimen>
 </resources>

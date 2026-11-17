@@ -11,6 +11,21 @@ import android.widget.FrameLayout
 internal const val WIDE_WINDOW_DP = 600
 internal const val EXPANDED_WINDOW_DP = 840
 
+internal enum class MainNavigationLayout {
+    BOTTOM, RAIL, SIDEBAR;
+
+    companion object {
+        // 为 200dp 侧栏、页边距和两列文件同时预留空间。
+        private const val SIDEBAR_MIN_WINDOW_DP = 960
+
+        fun forWidth(widthDp: Int): MainNavigationLayout = when {
+            widthDp >= SIDEBAR_MIN_WINDOW_DP -> SIDEBAR
+            widthDp >= WIDE_WINDOW_DP -> RAIL
+            else -> BOTTOM
+        }
+    }
+}
+
 internal val Context.hasWideWindow: Boolean
     get() = resources.configuration.screenWidthDp >= WIDE_WINDOW_DP
 
@@ -24,11 +39,16 @@ internal class AdaptiveContentFrame(context: Context) : FrameLayout(context) {
     }
 }
 
-internal fun Activity.centeredContent(content: View): FrameLayout = FrameLayout(this).apply {
+/** capWidth=false 用于紧贴侧栏的主工作区：限宽居中会在侧栏右侧留出一条空白带。 */
+internal fun Activity.centeredContent(content: View, capWidth: Boolean = true): FrameLayout = FrameLayout(this).apply {
     setBackgroundColor(getColor(R.color.bg))
-    val frame = AdaptiveContentFrame(context)
-    frame.addView(content, FrameLayout.LayoutParams(-1, -1))
-    addView(frame, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER_HORIZONTAL))
+    if (capWidth) {
+        val frame = AdaptiveContentFrame(context)
+        frame.addView(content, FrameLayout.LayoutParams(-1, -1))
+        addView(frame, FrameLayout.LayoutParams(-1, -1, Gravity.CENTER_HORIZONTAL))
+    } else {
+        addView(content, FrameLayout.LayoutParams(-1, -1))
+    }
 }
 
 internal fun Window.sizeBottomSheet(host: Activity, height: (Int) -> Int) {

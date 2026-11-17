@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Typeface
 import android.os.Bundle
 import android.os.Handler
@@ -19,10 +20,13 @@ import android.widget.PopupMenu
 import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.updateLayoutParams
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -94,13 +98,19 @@ class DownloadActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = color(R.color.bg)
-        window.navigationBarColor = color(R.color.bg)
+        enableEdgeToEdge()
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = !ThemeStore.isDark(this@DownloadActivity)
             isAppearanceLightNavigationBars = !ThemeStore.isDark(this@DownloadActivity)
         }
         setContentView(R.layout.activity_download)
+        val root = findViewById<View>(R.id.transferRoot)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            insets
+        }
+        ViewCompat.requestApplyInsets(root)
         activeList = findViewById(R.id.activeList)
         taskList = findViewById(R.id.taskList)
         storageHint = findViewById(R.id.storageHint)
@@ -114,6 +124,7 @@ class DownloadActivity : AppCompatActivity() {
         transferHeader = findViewById(R.id.transferHeader)
         transferTabs = findViewById(R.id.transferTabs)
         selectionBar = FileSelectionBar(findViewById(R.id.fileSelectionBar), ::exitSelection, ::toggleAllSelected)
+        updateTransferLayout()
         findViewById<View>(R.id.btnBack).setOnClickListener {
             if (selecting) exitSelection() else finish()
         }
@@ -141,6 +152,39 @@ class DownloadActivity : AppCompatActivity() {
         downloadFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_DOWNLOAD_FILTER) ?: 0]
         uploadFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_UPLOAD_FILTER) ?: 0]
         refreshNow()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateTransferLayout()
+    }
+
+    private fun updateTransferLayout() {
+        val wide = hasWideWindow
+        val pagePad = if (wide) resources.getDimensionPixelSize(R.dimen.page_pad) else dp(16)
+        transferHeader.setPaddingRelative(
+            if (wide) pagePad - dp(4) else dp(12), transferHeader.paddingTop, pagePad, transferHeader.paddingBottom,
+        )
+        transferTabs.updateLayoutParams<LinearLayout.LayoutParams> {
+            marginStart = pagePad
+            marginEnd = pagePad
+        }
+        selectBar.updateLayoutParams<LinearLayout.LayoutParams> {
+            marginStart = if (wide) pagePad else dp(14)
+            marginEnd = marginStart
+        }
+        val content = findViewById<View>(R.id.transferContent)
+        content.setPaddingRelative(pagePad, content.paddingTop, pagePad, content.paddingBottom)
+        val selectionHeader = findViewById<View>(R.id.fileSelectionBar)
+        val selectionPad = if (wide) pagePad - dp(8) else dp(8)
+        selectionHeader.setPaddingRelative(selectionPad, selectionHeader.paddingTop, selectionPad, selectionHeader.paddingBottom)
+        for (tab in listOf(tabDownloads, tabUploads)) {
+            tab.updateLayoutParams<LinearLayout.LayoutParams> {
+                width = if (wide) dp(112) else 0
+                weight = if (wide) 0f else 1f
+            }
+        }
+        findViewById<View>(R.id.transferTabsSpacer).visibility = if (wide) View.VISIBLE else View.GONE
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

@@ -65,6 +65,7 @@ internal fun MainActivity.showScreen(target: Screen) {
     courseEntries.clear()
     courseParentKey = ""
     contentScroll.scrollTo(0, 0)
+    updateNav()
     refresh()
     scrollAfterLayout(tabScroll[target] ?: 0)
 }
@@ -109,15 +110,19 @@ internal fun MainActivity.showAvailableMediaFilters(kinds: Set<MediaKind>, inclu
 }
 
 
+internal val navScreens = listOf(Screen.HOME, Screen.DISK, Screen.GROUPS, Screen.SETTINGS)
+
 internal fun MainActivity.updateNav() {
-    val screens = listOf(Screen.HOME, Screen.DISK, Screen.GROUPS, Screen.SETTINGS)
+    val screens = navScreens
     val active = if (screen == Screen.FAVORITES) screens.indexOf(favoritesOrigin) else screens.indexOf(screen)
     val titles = listOf("首页", "网盘", groupTabLabel(), "设置")
     val icons = listOf(R.drawable.ic_home, R.drawable.ic_cloud, R.drawable.ic_users, R.drawable.ic_settings)
     navRoots.forEachIndexed { index, root ->
         val on = index == active
+        root.isSelected = on
         root.findViewById<View>(R.id.navIndicator).setBackgroundResource(
-            if (on) R.drawable.bg_nav_pill_on else R.color.transparent,
+            if (on && navigationLayout != MainNavigationLayout.SIDEBAR) R.drawable.bg_nav_pill_on
+            else R.color.transparent,
         )
         root.findViewById<ImageView>(R.id.navIcon).apply {
             setImageResource(icons[index])
@@ -127,7 +132,6 @@ internal fun MainActivity.updateNav() {
         label.text = titles[index]
         label.setTextColor(color(if (on) R.color.ink else R.color.ink3))
         label.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-        root.setOnClickListener { showScreen(screens[index]) }
     }
     shell.findViewById<TextView>(R.id.btnQuarkDrive).apply {
         val browsing = screen == Screen.GROUPS
@@ -398,8 +402,12 @@ internal fun MainActivity.updateWindowLayout() {
     shell.findViewById<View>(R.id.brandRow).apply {
         setPaddingRelative(pagePad, paddingTop, paddingEnd, paddingBottom)
     }
-    listOf(shell.findViewById<View>(R.id.titleRow), appSub, historyPanel, sectionRow, filterBar, status, content)
-        .forEach { it.setPaddingRelative(pagePad, it.paddingTop, pagePad, it.paddingBottom) }
+    // 横向滚动条的内边距只留在滚动层一级：外层再垫一层会让筛选/面包屑比标题多缩进一个 page_pad
+    listOf(
+        shell.findViewById<View>(R.id.titleRow), appSub, historyPanel, sectionRow,
+        shell.findViewById<View>(R.id.filterScroll), crumbsScroll,
+        shell.findViewById<View>(R.id.batchBar), status, content,
+    ).forEach { it.setPaddingRelative(pagePad, it.paddingTop, pagePad, it.paddingBottom) }
     listOf(courseSwitch, shell.findViewById<View>(R.id.homeRefreshNotice)).forEach { view ->
         view.layoutParams = (view.layoutParams as LinearLayout.LayoutParams).apply {
             marginStart = pagePad
@@ -410,20 +418,73 @@ internal fun MainActivity.updateWindowLayout() {
         width = resources.getDimensionPixelSize(R.dimen.mini_player_width)
     }
     shell.requestLayout()
-    if (railVisible == hasWideWindow) return
+    val layout = MainNavigationLayout.forWidth(resources.configuration.screenWidthDp)
+    if (navigationLayout == layout) return
 
-    railVisible = hasWideWindow
-    val tabBar = (if (railVisible) shell else navigationRail).findViewById<LinearLayout>(R.id.tabBar)
+    val tabBar = (if (navigationLayout == MainNavigationLayout.BOTTOM) shell else navigationRail)
+        .findViewById<LinearLayout>(R.id.tabBar)
+    navigationLayout = layout
+    val railVisible = layout != MainNavigationLayout.BOTTOM
+    val expanded = layout == MainNavigationLayout.SIDEBAR
     (tabBar.parent as ViewGroup).removeView(tabBar)
     val tabItems = tabBar.findViewById<LinearLayout>(R.id.tabItems)
     tabItems.orientation = if (railVisible) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
     tabBar.findViewById<View>(R.id.tabDivider).visibility = if (railVisible) View.GONE else View.VISIBLE
+    val railSpacer = tabItems.findViewWithTag<View>("rail_spacer")
+    if (railVisible) {
+        // 主 tab 置顶、设置沉底：中间用弹性占位撑开整列高度
+        tabItems.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
+        tabItems.setPaddingRelative(dp(10), dp(8), dp(10), dp(10))
+        if (railSpacer == null) {
+            tabItems.addView(
+                View(this).apply { tag = "rail_spacer" },
+                tabItems.childCount - 1,
+                LinearLayout.LayoutParams(-1, 0, 1f),
+            )
+        }
+    } else {
+        railSpacer?.let { tabItems.removeView(it) }
+        tabItems.layoutParams = LinearLayout.LayoutParams(-1, -2)
+        tabItems.setPaddingRelative(dp(8), dp(6), dp(8), dp(8))
+    }
+    val borderless = android.util.TypedValue().let { tv ->
+        theme.resolveAttribute(android.R.attr.selectableItemBackgroundBorderless, tv, true)
+        tv.resourceId
+    }
     navRoots.forEach { tab ->
-        tab.layoutParams = if (railVisible) LinearLayout.LayoutParams(-1, dp(64))
-        else LinearLayout.LayoutParams(0, -2, 1f)
+        val row = tab as LinearLayout
+        val iconBox = row.getChildAt(0) as FrameLayout
+        val icon = row.findViewById<ImageView>(R.id.navIcon)
+        val label = row.findViewById<TextView>(R.id.navLabel)
+        if (expanded) {
+            tab.layoutParams = LinearLayout.LayoutParams(-1, dp(48))
+            row.orientation = LinearLayout.HORIZONTAL
+            row.gravity = Gravity.CENTER_VERTICAL
+            row.setPaddingRelative(dp(14), 0, dp(10), 0)
+            row.setBackgroundResource(R.drawable.bg_nav_row)
+            iconBox.layoutParams = LinearLayout.LayoutParams(dp(40), dp(40))
+            icon.layoutParams = FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER)
+            label.layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) }
+            label.textSize = 14f
+        } else {
+            tab.layoutParams = if (railVisible) LinearLayout.LayoutParams(-1, dp(64))
+            else LinearLayout.LayoutParams(0, -2, 1f)
+            row.orientation = LinearLayout.VERTICAL
+            row.gravity = Gravity.CENTER
+            row.setPaddingRelative(0, 0, 0, 0)
+            row.setBackgroundResource(borderless)
+            iconBox.layoutParams = LinearLayout.LayoutParams(dp(64), dp(32))
+            icon.layoutParams = FrameLayout.LayoutParams(dp(23), dp(23), Gravity.CENTER)
+            label.layoutParams = LinearLayout.LayoutParams(-2, -2).apply { topMargin = dp(4) }
+            label.textSize = 10.5f
+        }
     }
     if (railVisible) {
-        navigationRail.addView(tabBar, FrameLayout.LayoutParams(-1, -2))
+        val width = if (expanded) R.dimen.navigation_sidebar_width else R.dimen.navigation_rail_width
+        navigationRail.layoutParams = navigationRail.layoutParams.apply {
+            this.width = resources.getDimensionPixelSize(width)
+        }
+        navigationRail.addView(tabBar, FrameLayout.LayoutParams(-1, -1))
         navigationRail.visibility = View.VISIBLE
     } else {
         navigationRail.visibility = View.GONE

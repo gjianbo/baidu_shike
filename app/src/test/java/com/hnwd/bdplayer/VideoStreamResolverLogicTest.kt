@@ -74,6 +74,64 @@ class VideoStreamResolverLogicTest {
         assertTrue(error.message!!.contains("31999"))
     }
 
+    @Test
+    fun `未知错误码附带网盘 show_msg 便于定位`() {
+        val error = playlistError(200, """{"error_code":31999,"show_msg":"文件涉嫌违规"}""")
+        assertTrue(error.message!!.contains("文件涉嫌违规"))
+    }
+
+    // ---------- 广告门（133 + adToken）：用 token 重试，不是永久受限 ----------
+
+    @Test
+    fun `133 带 adToken 判定为广告门并解析 adTime`() {
+        val error = playlistError(200, """{"errno":133,"adTime":8,"adToken":"abc","ltime":5}""")
+        assertTrue(error is AdGate)
+        val gate = error as AdGate
+        assertEquals("abc", gate.adToken)
+        assertEquals(8, gate.adTimeSeconds)
+    }
+
+    @Test
+    fun `133 不带 adToken 才是永久受限`() {
+        assertTrue(playlistError(200, """{"errno":133}""") is StreamingRestricted)
+        assertTrue(playlistError(200, """{"error_code":133}""") is StreamingRestricted)
+        assertFalse(playlistError(200, """{"errno":133}""") is TranscodingPending)
+        assertFalse(playlistError(200, """{"errno":133}""") is AdGate)
+    }
+
+    @Test
+    fun `133 无 token 文案说明受限原因并附带网盘提示`() {
+        val error = playlistError(200, """{"errno":133,"show_msg":"开通会员后可播放"}""")
+        assertTrue(error.message!!.contains("133"))
+        assertTrue(error.message!!.contains("开通会员后可播放"))
+    }
+
+    @Test
+    fun `withAdToken 替换空 adToken 且对 base64 做 URL 编码`() {
+        val url = "https://pan.baidu.com/api/streaming?path=%2Fa&type=M3U8_AUTO_480&adToken=&src_id=1"
+        val out = withAdToken(url, "ab+/cd=")
+        assertTrue(out.contains("adToken=ab%2B%2Fcd%3D"))
+        assertFalse(out.contains("adToken=&"))
+        assertTrue(out.contains("type=M3U8_AUTO_480"))
+        assertTrue(out.contains("path=%2Fa"))
+        // 已有真实 token 时再替换，不重复追加
+        val out2 = withAdToken(out, "xy")
+        assertTrue(out2.contains("adToken=xy"))
+        assertFalse(out2.contains("ab%2B%2Fcd%3D"))
+    }
+
+    @Test
+    fun `deriveProbeUrl 改为 nom3u8 预检并去掉播放门参数`() {
+        val url = "https://pan.baidu.com/api/streaming?path=%2Fa&type=M3U8_AUTO_480&isplayer=1&check_blue=1&adToken=&src_id=1"
+        val probe = deriveProbeUrl(url)
+        assertTrue(probe.contains("type=M3U8_FLV_264_480"))
+        assertTrue(probe.contains("nom3u8=1"))
+        assertFalse(probe.contains("isplayer="))
+        assertFalse(probe.contains("check_blue="))
+        assertFalse(probe.contains("adToken="))
+        assertTrue(probe.contains("path=%2Fa"))
+    }
+
     // ---------- 播放清单判定 ----------
 
     @Test

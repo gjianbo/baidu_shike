@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/transferRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/bg"
-    android:fitsSystemWindows="true"
     android:orientation="vertical">
 
     <LinearLayout
@@ -99,6 +99,13 @@
             android:textSize="12.5sp"
             android:textStyle="bold" />
 
+        <Space
+            android:id="@+id/transferTabsSpacer"
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"
+            android:visibility="gone" />
+
         <TextView
             android:id="@+id/historyFilterButton"
             android:layout_width="wrap_content"
@@ -122,6 +129,7 @@
         android:fillViewport="true">
 
         <LinearLayout
+            android:id="@+id/transferContent"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"

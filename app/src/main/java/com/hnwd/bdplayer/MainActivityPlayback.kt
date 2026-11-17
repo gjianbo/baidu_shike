@@ -35,6 +35,7 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionResult
 import java.io.File
+import java.net.SocketTimeoutException
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -318,17 +319,18 @@ internal fun MainActivity.resolveDiskAudio(entry: PanEntry, openPlayer: Boolean)
                     }
                     result.onSuccess(::playStream).onFailure { error ->
                         when {
-                            error !is TranscodingPending -> failAudioRequest(
-                                (error as? IllegalStateException)?.message ?: "获取网盘音频失败，请重试。",
-                            )
-                            attempt < 4 -> web.postDelayed({ fetch() }, 2_000)
-                            else -> {
+                            error is TranscodingPending && attempt < 4 -> web.postDelayed({ fetch() }, 2_000)
+                            error is TranscodingPending || error is StreamingRestricted ||
+                                error is PlaylistRequestTimeout || error is SocketTimeoutException -> {
                                 updateAudioRequestMessage("正在打开原始音频…")
                                 mediaLinks.requestDiskLink(
                                     entry, bd, RequestLane.AUDIO, ::isCurrentPlayback,
                                     onFailure = { failAudioRequest("无法打开原始音频，请稍后重试。") },
                                 ) { link -> startBackgroundAudio(entry, link, openPlayer) }
                             }
+                            else -> failAudioRequest(
+                                (error as? IllegalStateException)?.message ?: "获取网盘音频失败，请重试。",
+                            )
                         }
                     }
                 }
@@ -1166,7 +1168,7 @@ internal fun MainActivity.startVideo(
     }
     videoLoading = loading
     if (activityVisible) loading.show()
-    fun openStream(result: Result<MediaSource>) {
+    fun openStream(result: Result<MediaSource>, onSourceError: (() -> Unit)? = null) {
         if (videoLoading !== loading) return
         videoLoading = null
         loadingVideo = null
@@ -1205,6 +1207,7 @@ internal fun MainActivity.startVideo(
                         )
                     }
                 },
+                onSourceError = onSourceError,
                 courses = PlaybackQueueState.entries,
                 currentCourse = PlaybackQueueState.entries.indexOfFirst { sameEntry(it, entry) },
                 courseSortLabel = playbackSortLabel(entry, courseListKey)
@@ -1279,12 +1282,17 @@ internal fun MainActivity.startVideo(
     fun mediaItem(uri: Uri) = MediaItem.Builder().setUri(uri)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(entry.name).setArtist("拾课").build())
         .build()
-    /** 原始 mp4 CDN 直链：dlink 签名绑定 WebView UA，不能用 DLINK_USER_AGENT（大文件 403 sign error）。 */
-    fun progressiveSource(link: Uri): MediaSource {
+    /** 原始视频 CDN 直链的签名绑定 WebView UA。 */
+    fun playOriginal(link: Uri) {
         val http = DefaultHttpDataSource.Factory()
             .setUserAgent(web.settings.userAgentString)
             .setDefaultRequestProperties(mapOf("Referer" to "https://pan.baidu.com/disk/main"))
-        return DefaultMediaSourceFactory(http).createMediaSource(mediaItem(link))
+        val invalidateLink: () -> Unit = {
+            if (mediaAddresses.link(key) == link) mediaAddresses.clearLink(key)
+        }
+        val source = runCatching { DefaultMediaSourceFactory(http).createMediaSource(mediaItem(link)) }
+            .onFailure { invalidateLink() }
+        openStream(source, onSourceError = invalidateLink)
     }
     if (quark) {
         resolveQuarkPlayback(entry) { result ->
@@ -1294,12 +1302,8 @@ internal fun MainActivity.startVideo(
     }
     val playlist = if (entry.isDisk) PanApi.diskVideoPlaylist(entry) else PanApi.videoPlaylist(entry)
     val cached = mediaAddresses.playlist(key, playlist)
-    val cachedLink = mediaAddresses.link(key)
     if (cached != null) {
         openStream(runCatching { cached.mediaSource(mediaItem(cached.uri)) })
-    } else if (cachedLink != null) {
-        // 上一次 31341 兜底拿到的原始 mp4 直链仍在缓存内：直接播，跳过转码等待。
-        openStream(runCatching { progressiveSource(cachedLink) })
     } else {
         // 31341「视频正在转码」是服务端异步转码排队：接口不等待，冷文件首次取址必然失败。
         // 音频链路早已有「重试 + 原始文件兜底」，这里给视频补齐同样的语义。
@@ -1316,14 +1320,24 @@ internal fun MainActivity.startVideo(
                     return@start
                 }
                 val error = result.exceptionOrNull()
-                if (error is TranscodingPending && attempt < VIDEO_TRANSCODING_ATTEMPTS) {
+                val cachedOriginal = if (entry.isDisk) mediaAddresses.link(key) else null
+                if (error is TranscodingPending && cachedOriginal == null && attempt < VIDEO_TRANSCODING_ATTEMPTS) {
                     loading.setMessage("视频正在转码，请稍候…")
                     web.postDelayed({ fetch() }, VIDEO_TRANSCODING_RETRY_MS)
                     return@start
                 }
-                if (error is TranscodingPending && entry.isDisk) {
-                    // 转码迟迟不就绪：退回 /api/download 的原始 mp4 CDN 直链。
-                    loading.setMessage("转码未完成，正在改用原始文件播放…")
+                val fallbackReason = when (error) {
+                    is TranscodingPending -> "转码未完成"
+                    is StreamingRestricted -> "在线播放受限"
+                    is PlaylistRequestTimeout, is SocketTimeoutException -> "获取播放清单超时"
+                    else -> null
+                }
+                if (entry.isDisk && fallbackReason != null) {
+                    loading.setMessage("$fallbackReason，正在改用原始文件播放…")
+                    cachedOriginal?.let { link ->
+                        playOriginal(link)
+                        return@start
+                    }
                     ensureBdstoken(
                         lane = RequestLane.VIDEO,
                         requestCurrent = { videoLoading === loading },
@@ -1338,7 +1352,7 @@ internal fun MainActivity.startVideo(
                             ) { link ->
                                 if (videoLoading !== loading) return@requestDiskLink
                                 mediaAddresses.saveLink(key, link)
-                                openStream(runCatching { progressiveSource(link) })
+                                playOriginal(link)
                             }
                         },
                         onFailure = {

@@ -68,6 +68,7 @@ internal class VideoPlaybackPage(
     val orientationBeforeFullscreen: Int,
     private val sleepTimer: SleepTimer,
     onRetry: (Snapshot, Boolean) -> Unit,
+    onSourceError: (() -> Unit)?,
     courses: List<PanEntry>,
     currentCourse: Int,
     courseSortLabel: String?,
@@ -981,6 +982,7 @@ internal class VideoPlaybackPage(
             }
 
             override fun onPlayerError(error: PlaybackException) {
+                onSourceError?.invoke()
                 val status = error.mediaHttpStatus()
                 message.text = "播放失败（${status?.let { "HTTP $it" } ?: error.errorCodeName}）。"
                 message.visibility = View.VISIBLE

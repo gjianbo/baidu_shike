@@ -5,6 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.CookieManager
 import java.net.URL
+import java.net.URLEncoder
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import javax.net.ssl.HttpsURLConnection
@@ -25,6 +26,25 @@ internal data class VideoStream(val uri: Uri, val playlist: ByteArray)
  */
 internal class TranscodingPending : IllegalStateException("网盘仍在转码，请稍后重试。")
 
+internal class PlaylistRequestTimeout : IllegalStateException("获取播放清单超时。")
+
+/**
+ * 在线转码播放被服务端永久拒绝（无 adToken 的 errno=133，或广告校验后仍 133）：
+ * 重试不会好转，调用方应改播原始文件，而不是死等或反复报错。
+ */
+internal class StreamingRestricted(message: String) : IllegalStateException(message)
+
+/**
+ * 非会员在线转码的「广告门」：`errno` / `error_code` = 133 **且响应体带 `adToken`**。
+ *
+ * 这不是永久限制。百度网页版拿到 `adToken`（`adTime` 为广告计时秒数）后，把它原样
+ * 带进下一次 `/api/streaming` 请求即可拿到可播放的 m3u8 —— 真机抓包证见
+ * `docs/百度网盘非会员视频播放-133广告token分析.md`。本解析器据此自带重试；
+ * 只有 token 缺失、或按 adTime 计时后仍被拦，才降级为 [StreamingRestricted]。
+ */
+internal class AdGate(val adToken: String, val adTimeSeconds: Int) :
+    IllegalStateException("非会员需观看广告后播放")
+
 /** 纯逻辑：m3u8 是否是可播放的点播清单。顶层函数便于 JVM 单测直接调用（不用碰 Handler）。 */
 internal fun isPlaybackPlaylist(body: String): Boolean =
     body.startsWith("#EXTM3U") && body.lineSequence().any {
@@ -37,14 +57,24 @@ internal fun playlistError(code: Int, body: String): IllegalStateException {
     val errno = json?.optInt("errno")
     val errorCode = json?.optInt("error_code")
     val reportedCode = errno?.takeUnless { it == 0 } ?: errorCode?.takeUnless { it == 0 }
+    val show = json?.optString("show_msg").orEmpty().trim().take(60)
+    val detail = if (show.isEmpty()) "" else " · 网盘提示：$show"
     return when {
         errno == -6 -> IllegalStateException("请重新登录百度网盘后再试。")
         errno == -20 || errorCode == -20 -> {
-            val message = json?.optString("show_msg").orEmpty().trim().take(60)
-            val detail = if (message.isEmpty()) "" else " · 网盘提示：$message"
             // 音频/视频、DISK(/api/streaming)/GROUP(/mbox/msg/streaming) 共用本解析器，
             // 文案不能写死媒体类型或接口路径，否则会在别的链路串台。
             IllegalStateException("百度网盘拒绝了播放取址请求（错误码 -20，通常需验证码）$detail")
+        }
+        errno == 133 || errorCode == 133 -> {
+            // 非会员广告门：带 adToken 时「可恢复」，交给 AdGate 用 token 重试；
+            // 不带 adToken 才是真·受限（降级到原始文件）。
+            val adToken = json?.optString("adToken").orEmpty()
+            val adTime = json?.optInt("adTime", 0) ?: 0
+            if (adToken.isNotEmpty()) AdGate(adToken, adTime)
+            else StreamingRestricted(
+                "百度网盘限制了该文件的在线转码播放（错误码 133，非会员且未取到广告 token）$detail",
+            )
         }
         errorCode == 31304 -> IllegalStateException("该文件类型不支持此转码档位，请换档位或改用原始文件。")
         errno == 31341 || errorCode == 31341 -> TranscodingPending()
@@ -53,10 +83,44 @@ internal fun playlistError(code: Int, body: String): IllegalStateException {
         // 非 200 但没给明确错误码：同样按「尚未就绪」处理，交给调用方重试。
         code != 200 -> if (reportedCode == null) TranscodingPending()
                        else IllegalStateException("播放清单请求失败（HTTP $code）。")
-        reportedCode != null -> IllegalStateException("百度网盘未返回可播放的点播清单（错误码 $reportedCode）。")
+        reportedCode != null -> IllegalStateException("百度网盘未返回可播放的点播清单（错误码 $reportedCode）$detail")
         // 200 但清单未就绪：占位内容 / 未生成完的 m3u8 / 非标准 JSON。
         else -> TranscodingPending()
     }
+}
+
+/**
+ * 把 `adToken` 写进 `/api/streaming` 的查询串：去掉已有的 `adToken=`，再追加编码后的 token。
+ *
+ * 纯字符串实现，便于 JVM 单测（不依赖 android.net.Uri）。token 是含 `+ / =` 的 base64，
+ * 必须 URL 编码后再拼进 query，否则 `+` 会被服务端当成空格导致广告校验失败。
+ */
+internal fun withAdToken(url: String, token: String): String {
+    val qIndex = url.indexOf('?')
+    val base = if (qIndex >= 0) url.substring(0, qIndex) else url
+    val query = if (qIndex >= 0) url.substring(qIndex + 1) else ""
+    val kept = query.split('&').filter { it.isNotEmpty() && !it.startsWith("adToken=") }
+    val tokenParam = "adToken=" + URLEncoder.encode(token, "UTF-8")
+    val rebuilt = (kept + tokenParam).joinToString("&")
+    return "$base?$rebuilt"
+}
+
+/**
+ * 由「播放」取址 URL 推导网页版那条 `&nom3u8=1` 的**预检** URL：
+ * 档位改 M3U8_FLV_264_480、加 nom3u8=1、去掉 isplayer/check_blue/adToken。
+ *
+ * 用途：个别情况下完整版取址只回 133 但不带 adToken，用预检请求补拿 adToken。
+ * 纯字符串实现，便于单测。
+ */
+internal fun deriveProbeUrl(url: String): String {
+    val qIndex = url.indexOf('?')
+    val base = if (qIndex >= 0) url.substring(0, qIndex) else url
+    val query = if (qIndex >= 0) url.substring(qIndex + 1) else ""
+    val drop = setOf("type", "nom3u8", "isplayer", "check_blue", "adToken")
+    val kept = query.split('&').filter { it.isNotEmpty() && it.substringBefore('=') !in drop }
+    val probeParams = listOf("type=M3U8_FLV_264_480", "nom3u8=1")
+    val rebuilt = (kept + probeParams).joinToString("&")
+    return "$base?$rebuilt"
 }
 
 internal class VideoStreamResolver {
@@ -79,11 +143,12 @@ internal class VideoStreamResolver {
                 onResult(result)
             }
         }
+        // 非会员广告门可能要多等一个 adTime（最长 MAX_AD_WAIT_SECONDS），总超时放宽到 30s。
         handler.postDelayed({
             if (id != requestId) return@postDelayed
             cancel()
-            onResult(Result.failure(IllegalStateException("获取播放清单超时。")))
-        }, 15_000)
+            onResult(Result.failure(PlaylistRequestTimeout()))
+        }, 30_000)
     }
 
     fun cancel() {
@@ -98,7 +163,8 @@ internal class VideoStreamResolver {
         executor.shutdownNow()
     }
 
-    private fun fetch(uri: Uri, userAgent: String, cookie: String?): VideoStream {
+    /** 读取一次响应，返回 (HTTP 状态码, 响应体)。200 读 input，其余读 errorStream。 */
+    private fun request(uri: Uri, userAgent: String, cookie: String?): Pair<Int, String> {
         val connection = URL(uri.toString()).openConnection() as HttpsURLConnection
         try {
             connection.instanceFollowRedirects = false
@@ -109,11 +175,8 @@ internal class VideoStreamResolver {
             if (!cookie.isNullOrEmpty()) connection.setRequestProperty("Cookie", cookie)
             connection.setRequestProperty("Referer", "https://pan.baidu.com/disk/main")
             val code = connection.responseCode
-            if (code != 200) {
-                val errorBody = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                throw playlistError(code, errorBody)
-            }
-            val body = connection.inputStream.bufferedReader().use { reader ->
+            val stream = if (code == 200) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader()?.use { reader ->
                 val buffer = CharArray(8192)
                 val output = StringBuilder()
                 while (true) {
@@ -123,15 +186,62 @@ internal class VideoStreamResolver {
                     output.append(buffer, 0, count)
                 }
                 output.toString()
-            }
-            if (!isPlaybackPlaylist(body)) throw playlistError(200, body)
-            return VideoStream(uri, body.toByteArray(Charsets.UTF_8))
+            }.orEmpty()
+            return code to body
         } finally {
             connection.disconnect()
         }
     }
 
+    private fun fetch(uri0: Uri, userAgent: String, cookie: String?): VideoStream {
+        var uri = uri0
+        var adAttempts = 0
+        var probed = false
+        repeat(MAX_ROUNDS) { round ->
+            val (code, body) = request(uri, userAgent, cookie)
+            if (code == 200 && isPlaybackPlaylist(body)) {
+                android.util.Log.i(LOG_TAG, "round=$round playlist received")
+                return VideoStream(uri, body.toByteArray(Charsets.UTF_8))
+            }
+            var error = playlistError(code, body)
+            android.util.Log.i(
+                LOG_TAG,
+                "round=$round code=$code err=${error.javaClass.simpleName} " +
+                    "adTime=${(error as? AdGate)?.adTimeSeconds ?: -1}",
+            )
+            // 完整版取址只回 133 但不带 adToken：补一次网页版那条 nom3u8 预检再取 token。
+            // 预检参数是 /api/streaming 的语义；群组 mbox 用 stream_type 且 type 是群/联系人标志，不能套用。
+            if (error is StreamingRestricted && !probed && uri0.path == "/api/streaming") {
+                probed = true
+                val probe = request(Uri.parse(deriveProbeUrl(uri0.toString())), userAgent, cookie)
+                val probeError = playlistError(probe.first, probe.second)
+                android.util.Log.i(LOG_TAG, "probe code=${probe.first} err=${probeError.javaClass.simpleName}")
+                if (probeError is AdGate) {
+                    uri = Uri.parse(withAdToken(uri0.toString(), probeError.adToken))
+                    return@repeat
+                }
+                error = probeError
+            }
+            if (error is AdGate) {
+                adAttempts++
+                // 第一次立即带 adToken 重试（多数可跳过广告片直接播）；仍被拦说明服务端
+                // 按 adTime 计时，第二次先等够 adTime 再重试。
+                if (adAttempts >= 2) Thread.sleep(error.adTimeSeconds.coerceIn(0, MAX_AD_WAIT_SECONDS) * 1000L)
+                uri = Uri.parse(withAdToken(uri0.toString(), error.adToken))
+                return@repeat
+            }
+            throw error
+        }
+        throw StreamingRestricted(restrictedMessage())
+    }
+
+    private fun restrictedMessage() =
+        "百度网盘限制了该文件的在线转码播放（错误码 133，非会员广告校验未通过）"
+
     private companion object {
+        const val LOG_TAG = "ShikeStream"
         const val MAX_PLAYLIST_CHARS = 1024 * 1024
+        const val MAX_ROUNDS = 5
+        const val MAX_AD_WAIT_SECONDS = 15
     }
 }

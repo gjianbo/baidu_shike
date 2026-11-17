@@ -305,7 +305,9 @@ class MainActivity : AppCompatActivity() {
     internal var recent = true
     internal lateinit var shell: LinearLayout
     internal lateinit var navigationRail: ScrollView
-    internal var railVisible = false
+    internal var navigationLayout = MainNavigationLayout.BOTTOM
+    internal var chromeReady = false
+    internal var pendingNavTarget: Screen? = null
     internal val sheetHeights = java.util.WeakHashMap<Dialog, (Int) -> Int>()
     internal var activityVisible = false
     internal var ready = false
@@ -489,12 +491,10 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(color(R.color.surface))
         }
         val shellRow = row().apply {
-            addView(navigationRail, LinearLayout.LayoutParams(
-                resources.getDimensionPixelSize(R.dimen.navigation_rail_width), -1,
-            ))
-            addView(shell, LinearLayout.LayoutParams(0, -1, 1f))
+            addView(navigationRail, LinearLayout.LayoutParams(0, -1))
+            addView(centeredContent(shell, capWidth = false), LinearLayout.LayoutParams(0, -1, 1f))
         }
-        native.addView(centeredContent(shellRow), LinearLayout.LayoutParams(-1, -1))
+        native.addView(shellRow, LinearLayout.LayoutParams(-1, -1))
         title = shell.findViewById(R.id.appTitle)
         appSub = shell.findViewById(R.id.appSub)
         sourceName = shell.findViewById(R.id.sourceName)
@@ -512,7 +512,7 @@ class MainActivity : AppCompatActivity() {
                 textSize = 12.5f
                 typeface = Typeface.DEFAULT_BOLD
                 gravity = Gravity.CENTER
-                minHeight = dp(36)
+                minHeight = dp(44)
                 setPadding(dp(14), 0, dp(14), 0)
                 setBackgroundResource(R.drawable.bg_chip)
                 setTextColor(color(R.color.ink2))
@@ -521,7 +521,7 @@ class MainActivity : AppCompatActivity() {
                     updateFilterChips()
                     redrawFilteredRows?.invoke()
                 }
-                mediaFilters.addView(this, LinearLayout.LayoutParams(-2, dp(36)).apply {
+                mediaFilters.addView(this, LinearLayout.LayoutParams(-2, dp(44)).apply {
                     if (filter != MediaFilter.ALL) marginStart = dp(8)
                 })
             }
@@ -530,7 +530,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 12.5f
             typeface = Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
-            minHeight = dp(36)
+            minHeight = dp(44)
             setPadding(dp(14), 0, dp(14), 0)
             setBackgroundResource(R.drawable.bg_chip)
             setTextColor(color(R.color.ink2))
@@ -540,7 +540,7 @@ class MainActivity : AppCompatActivity() {
                 updateFilterChips()
                 redrawFilteredRows?.invoke()
             }
-            mediaFilters.addView(this, LinearLayout.LayoutParams(-2, dp(36)).apply {
+            mediaFilters.addView(this, LinearLayout.LayoutParams(-2, dp(44)).apply {
                 marginStart = dp(8)
             })
         }
@@ -551,6 +551,13 @@ class MainActivity : AppCompatActivity() {
             shell.findViewById(R.id.navGroups),
             shell.findViewById(R.id.navSettings),
         )
+        // 启动期点击先排队：首帧 refresh 之前视图尚未就绪，直接 showScreen 会碰未初始化字段
+        navRoots.forEachIndexed { index, root ->
+            root.setOnClickListener {
+                val target = navScreens[index]
+                if (chromeReady) showScreen(target) else pendingNavTarget = target
+            }
+        }
         btnFavorites = shell.findViewById(R.id.btnFavorites)
         favBadge = shell.findViewById(R.id.favBadge)
         btnBack = shell.findViewById(R.id.btnBack)
@@ -646,6 +653,11 @@ class MainActivity : AppCompatActivity() {
         restoreNavigationState(savedInstanceState)
         updateWindowLayout()
         refresh()
+        chromeReady = true
+        pendingNavTarget?.let { target ->
+            pendingNavTarget = null
+            showScreen(target)
+        }
         web.loadUrl(API_PAGE)
         val token = SessionToken(this, ComponentName(this, AudioPlaybackService::class.java))
         controllerFuture = MediaController.Builder(this, token).buildAsync().also { future ->
@@ -789,6 +801,8 @@ class MainActivity : AppCompatActivity() {
         super.onConfigurationChanged(newConfig)
         if (!::shell.isInitialized) return
         updateWindowLayout()
+        // 侧栏/底栏互换后选中态载体不同（整行高亮 vs 图标胶囊），需按新形态重刷
+        updateNav()
         sheetHeights.entries.removeAll { !it.key.isShowing }
         sheetHeights.forEach { (dialog, height) -> dialog.window?.sizeBottomSheet(this, height) }
     }
