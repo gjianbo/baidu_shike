@@ -6,11 +6,16 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import androidx.core.graphics.drawable.toDrawable
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.Window
+import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
@@ -90,8 +95,17 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
         host.withBdstoken(onReady = { token -> block(token) }, onFailure = { host.say("网盘会话未就绪，请刷新重试") })
     }
 
-    /** 提交写请求；acceptAnyErrno 让我们拿到网盘具体错误码做友好提示。 */
-    private fun submitWrite(op: String, request: PanApi.WriteRequest, onSuccess: (JSONObject) -> Unit) {
+    /**
+     * 提交写请求；acceptAnyErrno 让我们拿到网盘具体错误码做友好提示。
+     * [pendingErrnos] 用于「服务端返回错误码但操作可能已生效」的场景（群转存 errno=4
+     * 是 QPS 上限，抓包记录文件实际已转存成功），命中时按待确认成功继续回调链。
+     */
+    private fun submitWrite(
+        op: String,
+        request: PanApi.WriteRequest,
+        pendingErrnos: Set<Int> = emptySet(),
+        onSuccess: (JSONObject) -> Unit,
+    ) {
         val lock = guards.beginWrite() ?: run {
             host.say("已有网盘操作正在处理，请稍候")
             return
@@ -121,9 +135,14 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
                     afterDiskMutation(partialWriteMessage(message))
                 }
                 WriteResponse.FAILED -> {
-                    val message = PanApi.writeError(op, errno, json)
-                    host.showStatus(message)
-                    host.say(message)
+                    if (errno in pendingErrnos) {
+                        host.showStatus("")
+                        onSuccess(json)
+                    } else {
+                        val message = PanApi.writeError(op, errno, json)
+                        host.showStatus(message)
+                        host.say(message)
+                    }
                 }
                 WriteResponse.SUCCESS -> {
                     host.showStatus("")
@@ -438,14 +457,374 @@ internal class DiskMutationSection(private val host: DiskMutationHost) {
             }.show()
     }
 
-    fun promptTransfer(entry: PanEntry) {
-        openFolderPicker("转存到") { dest ->
-            runDiskWrite { token ->
-                submitWrite("转存", PanApi.transferFromGroup(token, entry, dest)) {
-                    afterDiskMutation("转存请求已提交，请稍后在 $dest 查看")
+    fun promptTransfer(entries: List<PanEntry>) {
+        val batches = groupTransferBatches(entries)
+        if (batches.isEmpty()) {
+            host.say("所选条目无法转存")
+            return
+        }
+        val items = batches.sumOf { it.fsIds.size }
+        val session = host.probeId
+        fun openPicker() {
+            // 群转存走全屏「保存到我的网盘」页（可新建文件夹）；移动/复制仍用下面的小窗。
+            openTransferFolderPage("保存到我的网盘") { dest ->
+                if (session != host.probeId) {
+                    host.say("网盘会话已变更，请重试")
+                    return@openTransferFolderPage
+                }
+                runDiskWrite { token ->
+                    submitTransferBatches(token, batches, dest, 0, items, session)
                 }
             }
         }
+        if (groupTransferContainsDirectory(entries)) {
+            AlertDialog.Builder(activity)
+                .setTitle("转存文件夹")
+                .setMessage(GROUP_TRANSFER_DIRECTORY_NOTICE)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("继续") { _, _ -> openPicker() }
+                .show()
+        } else {
+            openPicker()
+        }
+    }
+
+    /** 分组逐笔提交：写锁互斥，必须在上一笔回调里发起下一笔，不能并行循环。 */
+    private fun submitTransferBatches(
+        token: String,
+        batches: List<GroupTransferBatch>,
+        dest: String,
+        index: Int,
+        items: Int,
+        session: Int,
+    ) {
+        if (index >= batches.size) {
+            if (session != host.probeId || host.activityDestroyed()) return
+            if (host.selecting()) host.leaveSelection()
+            val message = groupTransferResultText(items, batches.size, dest)
+            afterDiskMutation(message)
+            // 失败分支会写状态栏，成功也要对称地写一行；只靠 2 秒 Toast 用户会以为没反应，
+            // 且 refresh() 随后会把状态栏覆盖成缓存时间，所以再补一个不会自动消失的结果框。
+            host.showStatus(message)
+            AlertDialog.Builder(activity)
+                .setTitle("转存成功")
+                // 标题已写「转存成功」，正文去掉重复前缀；Toast/状态栏仍用带前缀的完整文案。
+                .setMessage(
+                    message.removePrefix("转存成功：") +
+                        "\n\n文件稍后出现在「我的网盘」，可下拉刷新查看。",
+                )
+                .setPositiveButton("知道了", null)
+                .show()
+            // async=1 异步落盘：延迟再刷一次，让「已转存」指纹有机会出现。
+            host.delay(3_000L) {
+                if (session == host.probeId && !host.activityDestroyed()) host.reloadPage()
+            }
+            return
+        }
+        submitWrite(
+            "转存",
+            PanApi.transferFromGroup(token, batches[index], dest),
+            pendingErrnos = setOf(GROUP_TRANSFER_LENIENT_ERRNO),
+        ) { submitTransferBatches(token, batches, dest, index + 1, items, session) }
+    }
+
+    /**
+     * 群转存专用入口：全屏「保存到我的网盘」页（可新建文件夹）。
+     * 与 [openFolderPicker] 平行保留 —— 移动/复制仍走小窗，避免把已验证的链路一起改掉。
+     */
+    private fun openTransferFolderPage(
+        title: String,
+        blocked: Set<String> = emptySet(),
+        onPick: (String) -> Unit,
+    ) {
+        // 群转存从 GROUPS 页发起，一律从网盘根目录起步（对齐百度手机版）。
+        val start = if (host.onDiskScreen()) host.diskDir() else "/"
+        host.withBdstoken(
+            onReady = { token -> showTransferFolderPage(title, token, start, blocked, onPick) },
+            onFailure = { host.say("网盘会话未就绪，请刷新重试") },
+        )
+    }
+
+    /**
+     * 全屏目录选择页（视觉对齐百度手机版「保存到我的网盘」）：
+     * 顶部标题 + 关闭、路径行、带图标/修改时间的目录列表、底部「新建文件夹 / 保存到此」。
+     *
+     * 能力全部复用宿主：bdstoken / fetchJson / [submitWrite] 写锁 / [DiskMutationHost.probeId]
+     * 会话代次。新建文件夹直接打 [PanApi.createFolder]，成功后只重读当前目录，不自动进入。
+     * [blocked] 与 [showFolderPickerDialog] 同义（被操作目录自身及子目录），群转存传空集。
+     */
+    private fun showTransferFolderPage(
+        title: String,
+        token: String,
+        startDir: String,
+        blocked: Set<String>,
+        onPick: (String) -> Unit,
+    ) {
+        val dialog = Dialog(activity).apply { requestWindowFeature(Window.FEATURE_NO_TITLE) }
+        val ink = activity.color(R.color.ink)
+        val ink3 = activity.color(R.color.ink3)
+        val accent = activity.color(R.color.accent)
+        val surface = activity.color(R.color.surface)
+
+        val root = activity.column().apply {
+            setBackgroundColor(activity.color(R.color.bg))
+            fitsSystemWindows = true
+        }
+
+        // ---- 顶部：标题居中 + 右上角关闭 ----
+        val header = activity.row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(surface)
+            setPadding(activity.dp(16), activity.dp(14), activity.dp(12), activity.dp(14))
+        }
+        val titleView = TextView(activity).apply {
+            text = title
+            textSize = 17f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ink)
+            gravity = Gravity.CENTER
+        }
+        val close = TextView(activity).apply {
+            text = "✕"
+            textSize = 19f
+            setTextColor(ink3)
+            gravity = Gravity.CENTER
+            setOnClickListener { dialog.dismiss() }
+        }
+        header.addView(View(activity), LinearLayout.LayoutParams(activity.dp(44), 1))
+        header.addView(titleView, LinearLayout.LayoutParams(0, -2, 1f))
+        header.addView(close, LinearLayout.LayoutParams(activity.dp(44), activity.dp(36)))
+
+        // ---- 路径行：固定「我的网盘」+ 当前路径 + 上一级 ----
+        val pathRow = activity.row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(surface)
+            setPadding(activity.dp(16), activity.dp(4), activity.dp(12), activity.dp(12))
+        }
+        val homeLabel = TextView(activity).apply {
+            text = "我的网盘"
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(accent)
+        }
+        val pathLabel = TextView(activity).apply {
+            text = startDir
+            textSize = 12f
+            setTextColor(ink3)
+        }
+        val up = TextView(activity).apply {
+            text = "↑ 上一级"
+            textSize = 12f
+            setTextColor(ink3)
+            setPadding(activity.dp(10), activity.dp(6), activity.dp(4), activity.dp(6))
+        }
+        pathRow.addView(homeLabel)
+        pathRow.addView(pathLabel, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = activity.dp(10) })
+        pathRow.addView(up)
+
+        // ---- 目录列表 ----
+        val list = ListView(activity).apply {
+            divider = null
+            isVerticalScrollBarEnabled = false
+        }
+        val more = TextView(activity).apply {
+            textSize = 12f
+            setTextColor(ink3)
+            gravity = Gravity.CENTER
+            setPadding(activity.dp(16), activity.dp(12), activity.dp(16), activity.dp(12))
+        }
+
+        // ---- 底部：新建文件夹 + 保存到此 ----
+        val footer = activity.row().apply {
+            gravity = Gravity.CENTER_VERTICAL
+            setBackgroundColor(surface)
+            setPadding(activity.dp(16), activity.dp(12), activity.dp(16), activity.dp(12))
+        }
+        val create = TextView(activity).apply {
+            text = "+ 新建文件夹"
+            textSize = 14f
+            setTextColor(accent)
+            setPadding(activity.dp(4), activity.dp(10), activity.dp(12), activity.dp(10))
+        }
+        val save = TextView(activity).apply {
+            text = "保存到此"
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(activity.color(R.color.onAccent))
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(accent)
+                cornerRadius = activity.dp(24).toFloat()
+            }
+        }
+        footer.addView(create)
+        footer.addView(View(activity), LinearLayout.LayoutParams(0, 1, 1f))
+        footer.addView(save, LinearLayout.LayoutParams(activity.dp(150), activity.dp(44)))
+
+        root.addView(header)
+        root.addView(pathRow)
+        root.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(more)
+        root.addView(footer)
+        dialog.setContentView(root)
+
+        var current = startDir
+        var page = 0
+        var hasMore = false
+        var loading = false
+        var items: List<PanEntry> = emptyList()
+        val session = host.probeId
+        val dirs = linkedMapOf<String, PanEntry>()
+
+        fun updateUi() {
+            val ui = transferFolderUi(loading, current, page, hasMore, items.isEmpty())
+            up.isEnabled = ui.upEnabled
+            up.alpha = if (ui.upEnabled) 1f else 0.4f
+            save.isEnabled = ui.saveEnabled
+            save.alpha = if (ui.saveEnabled) 1f else 0.5f
+            create.isEnabled = ui.createEnabled
+            create.alpha = if (ui.createEnabled) 1f else 0.5f
+            more.visibility = if (ui.moreVisible) View.VISIBLE else View.GONE
+            more.text = ui.moreText
+            more.isEnabled = ui.moreEnabled
+            list.isEnabled = ui.listEnabled
+        }
+
+        /** 目录行：文件夹图标 + 名称 + 修改时间。 */
+        fun directoryAdapter(rows: List<PanEntry>) =
+            object : ArrayAdapter<PanEntry>(activity, android.R.layout.simple_list_item_1, rows) {
+                override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                    val item = getItem(position) ?: return View(activity)
+                    val line = activity.row().apply {
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(activity.dp(20), activity.dp(12), activity.dp(20), activity.dp(12))
+                    }
+                    line.addView(ImageView(activity).apply {
+                        setImageResource(R.drawable.ic_folder)
+                        setColorFilter(accent)
+                    }, LinearLayout.LayoutParams(activity.dp(28), activity.dp(28)))
+                    val texts = activity.column()
+                    texts.addView(TextView(activity).apply {
+                        text = item.name
+                        textSize = 15f
+                        setTextColor(ink)
+                    })
+                    val time = folderPickerTime(item.modifiedAt)
+                    if (time.isNotEmpty()) texts.addView(TextView(activity).apply {
+                        text = time
+                        textSize = 11.5f
+                        setTextColor(ink3)
+                        setPadding(0, activity.dp(3), 0, 0)
+                    })
+                    line.addView(texts, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = activity.dp(14) })
+                    return line
+                }
+            }
+
+        fun loadDir(dir: String, nextPage: Int = 1) {
+            if (loading || session != host.probeId || !dialog.isShowing || host.activityDestroyed()) return
+            if (nextPage == 1) {
+                current = dir
+                page = 0
+                hasMore = false
+                dirs.clear()
+                items = emptyList()
+                list.adapter = null
+                pathLabel.text = dir
+            }
+            loading = true
+            updateUi()
+            fun failed() {
+                loading = false
+                if (dialog.isShowing && !host.activityDestroyed()) {
+                    updateUi()
+                    host.say("读取目录失败")
+                }
+            }
+            val request = BaiduPersonalDrive(token).list(dir, nextPage, 100)
+            host.fetchJson(
+                request.url, lane = RequestLane.COURSE,
+                onCancelled = ::failed, onFailure = ::failed,
+            ) { json ->
+                if (!dialog.isShowing || session != host.probeId || host.activityDestroyed()) return@fetchJson
+                val result = request.decode(json)
+                result.items.filter { it.directory && !isBlockedFolder(it.path, blocked) }
+                    .forEach { dirs[it.path] = it }
+                items = dirs.values.toList()
+                page = nextPage
+                hasMore = result.hasMore
+                loading = false
+                val firstVisible = list.firstVisiblePosition
+                list.adapter = directoryAdapter(items)
+                if (nextPage > 1) list.setSelection(firstVisible)
+                list.setOnItemClickListener { _, _, position, _ ->
+                    items.getOrNull(position)?.let { loadDir(it.path) }
+                }
+                updateUi()
+            }
+        }
+
+        up.setOnClickListener { loadDir(PanApi.parentPath(current)) }
+        more.setOnClickListener { loadDir(current, page + 1) }
+
+        create.setOnClickListener {
+            if (loading) {
+                host.say("正在读取目录，请稍候")
+                return@setOnClickListener
+            }
+            promptDiskName("新建文件夹", "创建", "") { name ->
+                // 输入期间目录可能重新开始加载，用纯逻辑再做一次门禁。
+                val error = transferFolderCreateError(name, loading)
+                if (error != null) {
+                    host.say(error)
+                    return@promptDiskName
+                }
+                if (session != host.probeId || !dialog.isShowing || host.activityDestroyed()) {
+                    return@promptDiskName
+                }
+                // 快照目录：withBdstoken 与 submitWrite 的网络回调都可能异步，期间用户下钻
+                // 会改 current，不能让它决定「创建到哪」或「成功后刷新哪」。
+                val targetDir = current
+                runDiskWrite { writeToken ->
+                    submitWrite(
+                        "新建文件夹",
+                        PanApi.createFolder(writeToken, PanApi.diskPath(targetDir, name)),
+                    ) {
+                        if (session != host.probeId || !dialog.isShowing || host.activityDestroyed()) {
+                            return@submitWrite
+                        }
+                        host.invalidateDiskCaches()
+                        host.say("已创建文件夹")
+                        // 仍停留在创建时所在目录才刷新；用户已下钻就别把他拉回去。
+                        if (current == targetDir) loadDir(targetDir)
+                    }
+                }
+            }
+        }
+
+        save.setOnClickListener {
+            if (loading) return@setOnClickListener
+            val dest = current
+            if (session != host.probeId || host.activityDestroyed()) {
+                dialog.dismiss()
+                host.say("网盘会话已变更，请重试")
+                return@setOnClickListener
+            }
+            if (isBlockedFolder(dest, blocked)) {
+                host.say("不能选择被操作文件夹自身或其子目录")
+                return@setOnClickListener
+            }
+            dialog.dismiss()
+            onPick(dest)
+        }
+
+        dialog.show()
+        dialog.window?.apply {
+            setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            setBackgroundDrawable(activity.color(R.color.bg).toDrawable())
+            clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        }
+        loadDir(startDir)
     }
 
     private fun openFolderPicker(

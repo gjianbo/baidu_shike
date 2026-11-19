@@ -409,7 +409,7 @@ private fun MainActivity.courseRow(
     row.findViewById<TextView>(R.id.itemMeta).text =
         listOf(source, transferredLabel, kindName, folder, size).filter { it.isNotEmpty() }.joinToString(" · ")
     val side = row.findViewById<ImageView>(R.id.itemSide)
-    side.visibility = if (selectionMode && screen == Screen.DISK) View.GONE else View.VISIBLE
+    side.visibility = if (selectionMode && (screen == Screen.DISK || screen == Screen.GROUPS)) View.GONE else View.VISIBLE
     side.tag = favoriteTag(entry)
     paintFavorite(side, entryKey(entry) in favoriteKeys)
     side.setOnClickListener { toggleFavorite(entry) }
@@ -428,7 +428,7 @@ private fun MainActivity.courseRow(
         val checked = entryKey(entry) in selectedKeys
         check.visibility = View.VISIBLE
         check.paintSelectionCircle(checked)
-        row.isSelected = screen == Screen.DISK && checked
+        row.isSelected = (screen == Screen.DISK || screen == Screen.GROUPS) && checked
         ViewCompat.setStateDescription(row, if (checked) "已选" else "未选")
         row.setOnClickListener { toggleSelection(entry) }
         row.setOnLongClickListener(null)
@@ -437,7 +437,13 @@ private fun MainActivity.courseRow(
         val actionEntries = if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) playbackEntries else entries
         row.setOnClickListener { openEntry(entry, actionEntries, currentPlaybackListKey()) }
         row.setOnLongClickListener {
-            if (screen == Screen.DISK && entry.isDisk) enterSelection(entry) else showEntryActions(entry, actionEntries)
+            // 网盘页与群组页长按都直接进入多选并选中该项，交互口径统一；
+            // 首页 / 收藏页长按仍弹单条操作菜单。
+            if ((screen == Screen.DISK && entry.isDisk) || screen == Screen.GROUPS) {
+                enterSelection(entry)
+            } else {
+                showEntryActions(entry, actionEntries)
+            }
             true
         }
     }

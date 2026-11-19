@@ -194,16 +194,63 @@ internal class QuarkPersonalDrive private constructor(
         post("file/rename", JSONObject().put("fid", file.id).put("file_name", name))
     }
 
-    fun move(file: QuarkFile, parent: String) {
-        complete(post("file/move", mutation(file).put("to_pdir_fid", parent)))
+    fun move(file: QuarkFile, parent: String) = moveFiles(listOf(file.id), parent)
+
+    fun delete(file: QuarkFile) = deleteFiles(listOf(file.id))
+
+    /** 批量移动：`file/move` 的 filelist 本就是数组，多个 fid 一次提交（接口分析 §2.6）。 */
+    fun moveFiles(fids: List<String>, parent: String) {
+        complete(post("file/move", mutationFiles(fids).put("to_pdir_fid", parent)))
     }
 
-    fun delete(file: QuarkFile) {
-        complete(post("file/delete", mutation(file)))
+    /** 批量删除：沿用同步 action_type=1 + finish 校验，避免异步任务下 UI 停在旧列表。 */
+    fun deleteFiles(fids: List<String>) {
+        complete(post("file/delete", mutationFiles(fids)))
     }
 
-    private fun mutation(file: QuarkFile) = JSONObject().put("action_type", 1)
-        .put("filelist", JSONArray().put(file.id)).put("exclude_fids", JSONArray())
+    /**
+     * 创建分享：`POST /1/clouddrive/share`。
+     * 请求体按已验证的第三方 SDK 契约取最简集合：fid_list / title / url_type / expired_type。
+     * `url_type=1` 是公开链接，提取码由服务端决定（私密链接时由服务端生成并通过 data.passcode 返回），
+     * 客户端不传 passcode；expired_type 见 [QUARK_SHARE_PERIODS]。
+     * 返回原始响应，链接 / 提取码由 [parseQuarkShare] 容错解析。
+     */
+    fun shareRaw(fids: List<String>, title: String, expiredType: Int): JSONObject =
+        request(url("share"), JSONObject()
+            .put("fid_list", JSONArray().apply { fids.forEach { put(it) } })
+            .put("title", title)
+            .put("url_type", 1)
+            .put("expired_type", expiredType))
+
+    /**
+     * 创建分享的完整链路（真机实测）：
+     * ① POST /share 只返回 data.task_id + task_sync:false，不给链接；
+     * ② GET /task?task_id=...&retry_index=0 轮询到 data.share_id；
+     * ③ POST /share/password {share_id} 换到 data.share_url（私密链接另有 data.passcode）。
+     * 若哪天 /share 直接同步返回 share_url，则跳过 ②③ 兼容处理。
+     */
+    fun createShare(fids: List<String>, title: String, expiredType: Int): JSONObject {
+        val created = shareRaw(fids, title, expiredType)
+        val taskId = quarkShareTaskId(created)
+        if (taskId.isEmpty()) return created
+        val shareId = pollShareId(taskId)
+        val final = request(url("share/password"), JSONObject().put("share_id", shareId))
+        return final
+    }
+
+    private fun pollShareId(taskId: String): String {
+        repeat(QUARK_SHARE_TASK_ATTEMPTS) {
+            val json = request(url("task", "task_id" to taskId, "retry_index" to "0"))
+            val shareId = quarkShareId(json)
+            if (shareId.isNotEmpty()) return shareId
+            Thread.sleep(QUARK_SHARE_TASK_POLL_MS)
+        }
+        error("分享任务处理超时，请稍后在「我分享的」中查看")
+    }
+
+    private fun mutationFiles(fids: List<String>) = JSONObject().put("action_type", 1)
+        .put("filelist", JSONArray().apply { fids.forEach { put(it) } })
+        .put("exclude_fids", JSONArray())
 
     private fun complete(data: JSONObject) {
         if (!data.optBoolean("finish", false)) throw QuarkMutationPending()
@@ -302,8 +349,12 @@ internal class QuarkPersonalDrive private constructor(
             if (code == 21001) throw QuarkLoginRequired()
             if (code == 21002) error("视频正在转码，请稍后重试")
             val details = if (code == -1) "" else "，错误码 $code"
+            val serverMessage = json?.optString("message").orEmpty()
             check(status in 200..299 && code == 0 && json != null) {
-                "夸克请求失败（HTTP $status$details）"
+                buildString {
+                    append("夸克请求失败（HTTP $status$details）")
+                    if (serverMessage.isNotBlank()) append("：$serverMessage")
+                }
             }
             return json
         } finally {

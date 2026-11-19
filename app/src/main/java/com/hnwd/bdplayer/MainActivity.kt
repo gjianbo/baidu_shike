@@ -125,6 +125,11 @@ class MainActivity : AppCompatActivity() {
     internal val diskWrites: DiskMutationSection
         get() = diskWritesRef ?: DiskMutationSection(MutationHost()).also { diskWritesRef = it }
 
+    /** 夸克侧批量删除 / 移动 / 分享，独立于百度写操作层；同样按需创建以便重置写锁。 */
+    internal var quarkWritesRef: QuarkDiskWrites? = null
+    internal val quarkWrites: QuarkDiskWrites
+        get() = quarkWritesRef ?: QuarkDiskWrites(MutationHost()).also { quarkWritesRef = it }
+
     /** 设置页（账号行 / 主题 / 清记录 / 备份 / 关于）。 */
     internal val settingsPage by lazy { SettingsPage(SettingsHostAdapter()) }
 
@@ -924,7 +929,7 @@ class MainActivity : AppCompatActivity() {
         when {
             audioPage != null -> closeAudioPage()
             native.isGone -> showApp()
-            screen == Screen.DISK && selectionMode -> exitSelection()
+            (screen == Screen.DISK || screen == Screen.GROUPS) && selectionMode -> exitSelection()
             screen == Screen.FAVORITES -> closeFavorites()
             folders.isNotEmpty() -> returnToFolder(folders.lastIndex)
             screen != Screen.HOME -> showScreen(Screen.HOME)
@@ -1018,6 +1023,7 @@ class MainActivity : AppCompatActivity() {
     internal fun resetSectionGuards() {
         // 只碰已存在的实例：账号失效时可能还没发生过任何写操作
         diskWritesRef?.resetGuards()
+        quarkWritesRef?.resetGuards()
     }
 
     // lateinit 的 ::prop.isInitialized 需要访问 backing field，扩展文件无法直接使用；

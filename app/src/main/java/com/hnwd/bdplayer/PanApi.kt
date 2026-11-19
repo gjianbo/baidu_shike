@@ -614,16 +614,16 @@ internal object PanApi {
     }
 
     /**
-     * 群文件转存到我的网盘（best-effort）。
-     * 群文件不是公开分享链接，这里按 messageId/owner 走 /api/transfer，属于待设备回归的接口。
+     * 群文件转存到我的网盘：`POST /mbox/msg/transfer`（BaiduPCS-Py issue #73 抓包契约）。
+     *
+     * 群文件不是公开分享链接，不能走 `/share/transfer`；也不是文件管理操作，
+     * 不能走 `/api/filemanager` / `/api/transfer`。请求体是消息级的
+     * `from_uk` / `msg_id` / `gid` / `type=2` + `fs_ids` 数组，见 [groupTransferForm]；
+     * `bdstoken` 放 query，由 `withBdstoken` 提供。
      */
-    fun transferFromGroup(token: String, entry: PanEntry, destDir: String): WriteRequest = WriteRequest(
-        api("/api/transfer", "channel" to "chunlei", "bdstoken" to token),
-        form(
-            "shareid" to entry.messageId, "from" to entry.owner,
-            "ondup" to "newcopy", "async" to "2", "path" to destDir,
-            "fsidlist" to fsidArray(listOf(entry.fileId)).toString(),
-        ),
+    fun transferFromGroup(token: String, batch: GroupTransferBatch, destDir: String): WriteRequest = WriteRequest(
+        api("/mbox/msg/transfer", "channel" to "chunlei", "bdstoken" to token),
+        groupTransferForm(batch, destDir),
     )
 
     /** 写操作错误码 -> 中文提示（op 用于补充上下文）。 */
@@ -635,6 +635,7 @@ internal object PanApi {
             -6 -> "登录态已失效，请重新登录百度网盘"
             -7, -8 -> "同名文件或文件夹已存在"
             -9 -> "文件不存在或已被移动"
+            -10 -> "网盘空间不足或转存额度已用尽"
             3, 31066 -> "文件名不合法（不能包含 / \\ : * ? \" < > | 等字符）"
             4 -> "网盘空间不足"
             12 -> "已有转存任务在进行，请稍后再试"

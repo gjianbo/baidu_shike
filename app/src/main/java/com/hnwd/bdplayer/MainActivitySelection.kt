@@ -159,6 +159,9 @@ internal fun MainActivity.diskSelectionActions(entries: List<PanEntry>): List<Ac
     if (entries.isEmpty()) return@buildList
     val single = entries.singleOrNull()
     val baidu = diskProvider == SourceProvider.BAIDU && entries.all { it.provider == SourceProvider.BAIDU }
+    // 夸克走独立的 QuarkDiskWrites：fid 模型 + 纯 Cookie，没有复制端点（官方未实现），
+    // 只补删除 / 移动 / 分享三项；混合 provider 时两个分支都不进，保持只读操作。
+    val quark = diskProvider == SourceProvider.QUARK && entries.all { it.provider == SourceProvider.QUARK }
     if (single != null) {
         val kind = PanApi.kindOf(single)
         val playback = kind == MediaKind.AUDIO || kind == MediaKind.VIDEO
@@ -189,6 +192,10 @@ internal fun MainActivity.diskSelectionActions(entries: List<PanEntry>): List<Ac
             add(ActionGridItem("重命名", R.drawable.ic_rename) { diskWrites.promptRename(single) })
         }
     }
+    if (quark) {
+        add(ActionGridItem("分享", R.drawable.ic_share) { quarkWrites.promptShare(entries) })
+        add(ActionGridItem("移动", R.drawable.ic_folder) { quarkWrites.promptMove(entries) })
+    }
     val allStarred = entries.all { favorites.has(it) }
     add(ActionGridItem(if (allStarred) "取消收藏" else "收藏", if (allStarred) R.drawable.ic_star_filled else R.drawable.ic_star) {
         batchFavoriteSelected()
@@ -196,22 +203,69 @@ internal fun MainActivity.diskSelectionActions(entries: List<PanEntry>): List<Ac
     if (single != null) add(ActionGridItem("详情", R.drawable.ic_info) { showEntryDetail(single) })
     if (baidu) {
         add(ActionGridItem("删除", R.drawable.ic_trash, destructive = true) { diskWrites.confirmDelete(entries) })
+    } else if (quark) {
+        add(ActionGridItem("删除", R.drawable.ic_trash, destructive = true) { quarkWrites.confirmDelete(entries) })
     }
+}
+
+/**
+ * 群组页多选的操作格子：形态与网盘页 [diskSelectionActions] 一致（图标 + 文字）。
+ *
+ * 群文件是「引用」而非自己的网盘文件，所以不给 分享/移动/复制/重命名/删除；
+ * 单选时补「打开/播放」「详情」，让长按菜单取消后单条操作仍然有入口。
+ * 转存沿用 [groupTransferEligible] 判据：夸克监控目录 / 联系人 / 关注目录都不显示。
+ */
+internal fun MainActivity.groupSelectionActions(entries: List<PanEntry>): List<ActionGridItem> = buildList {
+    if (entries.isEmpty()) return@buildList
+    val single = entries.singleOrNull()
+    if (single != null) {
+        val kind = PanApi.kindOf(single)
+        val playback = kind == MediaKind.AUDIO || kind == MediaKind.VIDEO
+        add(ActionGridItem(if (playback) "播放" else "打开", when {
+            playback -> R.drawable.ic_play
+            single.directory -> R.drawable.ic_folder
+            else -> R.drawable.ic_file
+        }) {
+            exitSelection()
+            openEntry(single, lastRenderedEntries, currentPlaybackListKey())
+        })
+    }
+    if (entries.any(DownloadLogic::canDownload)) {
+        add(ActionGridItem("下载", R.drawable.ic_download) {
+            exitSelection()
+            downloads.start(entries)
+        })
+    }
+    if (groupTransferBatches(entries).isNotEmpty()) {
+        add(ActionGridItem("转存", R.drawable.ic_cloud) { diskWrites.promptTransfer(entries) })
+    }
+    val allStarred = entries.all { favorites.has(it) }
+    add(ActionGridItem(
+        if (allStarred) "取消收藏" else "收藏",
+        if (allStarred) R.drawable.ic_star_filled else R.drawable.ic_star,
+    ) { batchFavoriteSelected() })
+    if (single != null) add(ActionGridItem("详情", R.drawable.ic_info) { showEntryDetail(single) })
 }
 
 
 /** 长按条目的操作分发：写操作交给 diskWrites，播放/收藏仍是本页职责。 */
 internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEntry>) {
     val kind = PanApi.kindOf(entry)
-    val quark = entry.provider == SourceProvider.QUARK
     val choices = mutableListOf<SheetChoice>()
     choices += if (kind == MediaKind.AUDIO || kind == MediaKind.VIDEO) {
         SheetChoice("播放", meta = if (kind == MediaKind.AUDIO) "仅播放此音频" else "播放此视频", tag = "play")
     } else {
         SheetChoice("打开", tag = "open")
     }
-    if (!entry.isDisk && !entry.directory && !quark) {
-        choices += SheetChoice("转存到我的网盘", meta = "保存为网盘副本", tag = "transfer")
+    // 显示判据与提交判据共用 groupTransferEligible（唯一真相源），避免两套条件漂移：
+    // 上一轮「文件夹长按没有转存入口」就是 UI 手写 !entry.directory 造成的。
+    // 目录会由 promptTransfer 二次确认提示，联系人 / 关注目录 / 夸克条目统一在此排除。
+    if (groupTransferEligible(entry)) {
+        choices += SheetChoice(
+            "转存到我的网盘",
+            meta = if (entry.directory) "连同文件夹内容一起保存" else "保存为网盘副本",
+            tag = "transfer",
+        )
     }
     if (!entry.directory) {
         choices += SheetChoice("下载", meta = "保存到本机「下载 / 拾课」", tag = "download")
@@ -226,7 +280,7 @@ internal fun MainActivity.showEntryActions(entry: PanEntry, entries: List<PanEnt
         onSelect = { choice ->
             when (choice.tag) {
                 "play", "open" -> openEntry(entry, entries, currentPlaybackListKey())
-                "transfer" -> diskWrites.promptTransfer(entry)
+                "transfer" -> diskWrites.promptTransfer(listOf(entry))
                 "download" -> downloads.start(entry)
                 "favorite" -> toggleFavorite(entry)
                 "detail" -> showEntryDetail(entry)
