@@ -278,4 +278,60 @@ class DownloadLogicTest {
         assertEquals(saving, DownloadLogic.decodeTasks(DownloadLogic.encodeTasks(listOf(saving))).single())
         assertFalse(DownloadLogic.acceptsResolution(saving, 7))
     }
+
+    @Test
+    fun playlistFileName_matchesTheContainer() {
+        assertEquals("第08课.ts", DownloadLogic.playlistFileName("第08课.mp4"))
+        assertEquals("第08课.ts", DownloadLogic.playlistFileName("第08课.MP4"))
+        assertEquals("片段.ts", DownloadLogic.playlistFileName("片段.ts"))
+        assertEquals("无扩展名.ts", DownloadLogic.playlistFileName("无扩展名"))
+        // #EXT-X-MAP 初始化段代表 fMP4 分片，拼接产物不能叫 .ts。
+        assertEquals("第08课.mp4", DownloadLogic.playlistFileName("第08课.mp4", fragmentedMp4 = true))
+        assertEquals("片段.mp4", DownloadLogic.playlistFileName("片段.ts", fragmentedMp4 = true))
+    }
+
+    @Test
+    fun isPlaylistTask_onlyMarksHlsCopiesNotUnknownLengthDownloads() {
+        // 普通下载在 DownloadManager 未报 Content-Length 时同样 bytesTotal=-1：
+        // 这就是「图片/文档被误标转码流」的回归场景。
+        val plain = DownloadTask(
+            id = 1, name = "手册.pdf", state = DownloadState.RUNNING, downloadId = 88,
+            bytesDone = 10, bytesTotal = -1, mediaType = "application/pdf",
+        )
+        assertFalse(DownloadLogic.isPlaylistTask(plain))
+        val copy = DownloadTask(
+            id = 2, name = "第08课.ts", state = DownloadState.RUNNING,
+            bytesDone = 10, bytesTotal = -1, mediaType = "video/mp2t",
+            stagingName = "2-abc.part", playlistCopy = true,
+        )
+        assertTrue(DownloadLogic.isPlaylistTask(copy))
+        assertFalse(DownloadLogic.isPlaylistTask(copy.copy(state = DownloadState.SUCCESS)))
+    }
+
+    @Test
+    fun requeue_restoresSourceNameAndMimeForPlaylistCopy() {
+        val entry = baiduGroup()
+        val copy = DownloadTask(
+            id = 3, name = "第08课.ts", state = DownloadState.FAILED, mediaType = "video/mp2t",
+            entry = entry, viewer = "uk", stagingName = "3-abc.part",
+            playlistCopy = true, error = "已取消下载",
+        )
+        val stored = DownloadLogic.decodeTasks(DownloadLogic.encodeTasks(listOf(copy))).single()
+        assertTrue(stored.playlistCopy)
+        val retry = DownloadLogic.requeue(stored)
+        assertEquals("第08课.mp4", retry.name)
+        assertEquals("video/*", retry.mediaType)
+        assertFalse(retry.playlistCopy)
+        assertEquals("", retry.stagingName)
+        assertTrue(DownloadLogic.acceptsResolution(retry, 3))
+    }
+
+    @Test
+    fun decodeTasks_legacyRecordWithoutPlaylistFlagStillLoads() {
+        val legacy = JSONObject().put("id", 9).put("name", "旧记录.pdf")
+            .put("state", "SUCCESS").put("mime", "application/pdf")
+        val decoded = DownloadLogic.decodeTasks(JSONArray().put(legacy).toString()).single()
+        assertFalse(decoded.playlistCopy)
+        assertEquals("旧记录.pdf", decoded.name)
+    }
 }

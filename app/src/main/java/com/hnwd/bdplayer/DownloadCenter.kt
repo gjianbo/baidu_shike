@@ -11,6 +11,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /** Persists the queue. DownloadManager transfers bytes and wakes the queue on completion. */
@@ -18,9 +19,18 @@ internal object DownloadCenter {
     private const val PREF = "downloads"
     private const val KEY = "tasks"
     private const val MAX_LINK_RETRIES = 1
+
+    /** 分片进度落盘节流：太少 UI 不动，太频整表重编码会卡。 */
+    private const val PROGRESS_INTERVAL_MS = 700L
     private val lock = Any()
     private val seq = AtomicLong()
     private val resolving = mutableMapOf<Long, Any>()
+
+    /**
+     * 正在跑 HLS 分片下载的任务（群组视频原文件直链拿不到时的通路）。
+     * value 是取消标志：分片循环每片检查一次，取消后立刻停手。
+     */
+    private val playlistJobs = mutableMapOf<Long, AtomicBoolean>()
     private val publishing = mutableSetOf<Long>()
     private val waiters = mutableListOf<() -> Unit>()
 
@@ -66,19 +76,35 @@ internal object DownloadCenter {
         var recovered = false
         for (index in list.indices) {
             val task = list[index]
-            if (DownloadLogic.isActive(task) && !task.publishing && task.downloadId < 0 && task.stagingName.isNotBlank()) {
+            if (DownloadLogic.isActive(task) && !task.publishing && task.downloadId < 0 &&
+                task.stagingName.isNotBlank() && task.id !in playlistJobs
+            ) {
                 val id = findStagedDownload(context, task)
-                list[index] = if (id == null) task.copy(stagingName = "") else task.copy(downloadId = id)
+                list[index] = if (id == null) {
+                    // 系统队列里找不到这条暂存下载（进程在入队前后被杀、或分片任务中断）：
+                    // 只清 stagingName 会留下一个「RUNNING 但永不推进」的僵尸任务，
+                    // 必须整条退回 QUEUED 重新取址。
+                    runCatching { DownloadedFileStore.stagedFile(context, task.stagingName).delete() }
+                    DownloadLogic.requeue(task)
+                } else {
+                    task.copy(downloadId = id)
+                }
                 recovered = true
             }
         }
         if (recovered) write(context, list, durable = true)
         pump(context, refreshLocked(context, retryOnQueryFailure = true))
-        if (resolving.isEmpty() && publishing.isEmpty()) onIdle() else waiters.add(onIdle)
+        // 分片任务不在 resolving/publishing 里，却同样占着槽位下载几百 MB：
+        // 这里漏判会让 JobService 立刻收工、进程失去保活，后台下载容易被系统回收。
+        if (resolving.isEmpty() && publishing.isEmpty() && playlistJobs.isEmpty()) {
+            onIdle()
+        } else waiters.add(onIdle)
     }
 
     private fun completeDrainIfIdle() {
-        if (resolving.isNotEmpty() || publishing.isNotEmpty()) return
+        // 分片下载任务不计入 resolving/publishing，但同样在占槽干活：
+        // 提前让 JobService 收工会让进程失去保活，几百 MB 的任务很容易被系统回收。
+        if (resolving.isNotEmpty() || publishing.isNotEmpty() || playlistJobs.isNotEmpty()) return
         val completed = waiters.toList()
         waiters.clear()
         completed.forEach { it() }
@@ -147,6 +173,17 @@ internal object DownloadCenter {
         val index = list.indexOfFirst { it.id == id && DownloadLogic.isActive(it) }
         if (index < 0) return false
         val task = list[index]
+        val playlist = playlistJobs[task.id]
+        if (playlist != null) {
+            // 分片循环每片读一次标志；这里只置位并改记录，暂存文件的清理交给下载线程收尾。
+            playlist.set(true)
+            playlistJobs.remove(task.id)
+            list[index] = DownloadLogic.cancelledTask(task, System.currentTimeMillis())
+            write(context, list, durable = true)
+            DownloadQueueJob.enqueue(context)
+            completeDrainIfIdle()
+            return true
+        }
         // Legacy system requests target the public file directly. Let those finish safely.
         if (task.publishing || task.downloadId >= 0 && task.stagingName.isBlank()) return false
         val systemId = if (task.downloadId >= 0) task.downloadId else {
@@ -196,7 +233,9 @@ internal object DownloadCenter {
         false
     }
 
-    fun submitVerified(context: Context, id: Long, link: DownloadLinkResolver.Link): Boolean = synchronized(lock) {
+    fun submitVerified(
+        context: Context, id: Long, resolution: DownloadLinkResolver.Resolution,
+    ): Boolean = synchronized(lock) {
         val list = read(context)
         val index = list.indexOfFirst {
             it.id == id && it.state == DownloadState.FAILED && it.needsVerification &&
@@ -206,7 +245,7 @@ internal object DownloadCenter {
         if (usedSlots(list) >= DownloadLogic.MAX_PARALLEL) return false
         val task = list[index]
         if (task.downloadId >= 0 && !removeUnsuccessful(context, task.downloadId)) return false
-        submit(context, list, index, DownloadLogic.requeue(task).copy(linkAttempts = 0), link)
+        submit(context, list, index, DownloadLogic.requeue(task).copy(linkAttempts = 0), resolution)
         DownloadQueueJob.enqueue(context)
         true
     }
@@ -311,7 +350,7 @@ internal object DownloadCenter {
     )
 
     private fun usedSlots(list: List<DownloadTask>): Int = list.count {
-        DownloadLogic.isActive(it) && (it.downloadId >= 0 || it.id in resolving)
+        DownloadLogic.isActive(it) && (it.downloadId >= 0 || it.id in resolving || it.id in playlistJobs)
     }
 
     private fun pump(context: Context, tasks: List<DownloadTask>) {
@@ -379,16 +418,124 @@ internal object DownloadCenter {
 
     private fun submit(
         context: Context, list: MutableList<DownloadTask>, index: Int,
-        task: DownloadTask, link: DownloadLinkResolver.Link,
+        task: DownloadTask, resolution: DownloadLinkResolver.Resolution,
     ) {
-        val staged = task.copy(stagingName = "${task.id}-${UUID.randomUUID()}.part")
+        when (resolution) {
+            is DownloadLinkResolver.Resolution.Single -> {
+                val staged = task.copy(stagingName = "${task.id}-${UUID.randomUUID()}.part")
+                list[index] = staged
+                write(context, list, durable = true)
+                val id = runCatching { enqueue(context, staged, resolution.link) }.getOrDefault(-1)
+                list[index] = if (id >= 0) staged.copy(downloadId = id, url = "") else {
+                    task.failed("无法加入系统下载队列，请检查存储空间后重试", System.currentTimeMillis())
+                }
+                write(context, list, durable = true)
+            }
+            is DownloadLinkResolver.Resolution.Playlist -> startPlaylist(context, list, index, task, resolution.plan)
+        }
+    }
+
+    /**
+     * 起一条 HLS 分片下载。
+     *
+     * 刻意不塞进 DownloadManager：系统下载器只认单条 URL，没法把 200 个分片拼成一个文件。
+     * 状态机复用现有那条 —— 先以 RUNNING + stagingName 占位，下完把 publishing 置真，
+     * 之后 `pump → publish` 走的是同一条 MediaStore 发布路径（含长度校验）。
+     */
+    private fun startPlaylist(
+        context: Context, list: MutableList<DownloadTask>, index: Int,
+        task: DownloadTask, plan: HlsPlan,
+    ) {
+        // 有 #EXT-X-MAP 初始化段说明分片是 fragmented MP4，拼接产物不能再叫 .ts。
+        val fragmentedMp4 = plan.initSegment != null
+        val staged = task.copy(
+            name = DownloadLogic.playlistFileName(task.name, fragmentedMp4),
+            mediaType = if (fragmentedMp4) "video/mp4" else "video/mp2t",
+            playlistCopy = true,
+            state = DownloadState.RUNNING,
+            stagingName = "${task.id}-${UUID.randomUUID()}.part",
+            bytesDone = 0,
+            bytesTotal = -1,
+            finishedAt = 0,
+            error = "",
+            url = "",
+            publishing = false,
+            outputUri = "",
+        )
+        val cancel = AtomicBoolean(false)
+        playlistJobs[task.id] = cancel
         list[index] = staged
         write(context, list, durable = true)
-        val id = runCatching { enqueue(context, staged, link) }.getOrDefault(-1)
-        list[index] = if (id >= 0) staged.copy(downloadId = id, url = "") else {
-            task.failed("无法加入系统下载队列，请检查存储空间后重试", System.currentTimeMillis())
+        AppIo.execute { runPlaylistDownload(context.applicationContext, staged, plan, cancel) }
+    }
+
+    private fun runPlaylistDownload(
+        app: Context, task: DownloadTask, plan: HlsPlan, cancel: AtomicBoolean,
+    ) {
+        var lastProgressWrite = 0L
+        val result = runCatching {
+            GroupVideoDownload.download(
+                app, task.stagingName, plan,
+                onProgress = { done ->
+                    val now = System.currentTimeMillis()
+                    if (now - lastProgressWrite >= PROGRESS_INTERVAL_MS) {
+                        lastProgressWrite = now
+                        synchronized(lock) {
+                            val list = read(app)
+                            val index = list.indexOfFirst {
+                                it.id == task.id && it.stagingName == task.stagingName
+                            }
+                            if (index >= 0 && DownloadLogic.isActive(list[index])) {
+                                list[index] = list[index].copy(
+                                    state = DownloadState.RUNNING, bytesDone = done, bytesTotal = -1,
+                                )
+                                write(app, list)
+                            }
+                        }
+                    }
+                },
+                isCancelled = { cancel.get() },
+            )
         }
-        write(context, list, durable = true)
+        synchronized(lock) {
+            playlistJobs.remove(task.id)
+            val list = read(app)
+            val index = list.indexOfFirst { it.id == task.id && it.stagingName == task.stagingName }
+            if (index >= 0) {
+                val current = list[index]
+                list[index] = result.fold(
+                    onSuccess = { length ->
+                        current.copy(
+                            state = DownloadState.RUNNING,
+                            bytesDone = length,
+                            bytesTotal = length,
+                            publishing = true,
+                            error = "",
+                        )
+                    },
+                    onFailure = { error ->
+                        val message = if (error is GroupVideoDownload.Cancelled) {
+                            DownloadLogic.CANCELLED_ERROR
+                        } else {
+                            "转码视频下载失败：" + (error.message ?: "分片拉取中断")
+                        }
+                        current.copy(
+                            state = DownloadState.FAILED,
+                            finishedAt = System.currentTimeMillis(),
+                            bytesDone = 0,
+                            bytesTotal = -1,
+                            error = message,
+                        )
+                    },
+                )
+                write(app, list, durable = true)
+                if (result.isFailure) {
+                    runCatching { DownloadedFileStore.stagedFile(app, task.stagingName).delete() }
+                }
+            }
+            pump(app, read(app))
+            completeDrainIfIdle()
+        }
     }
 
     private fun findStagedDownload(context: Context, task: DownloadTask): Long? {

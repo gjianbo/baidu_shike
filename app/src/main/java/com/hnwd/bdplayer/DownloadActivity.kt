@@ -481,6 +481,13 @@ class DownloadActivity : AppCompatActivity() {
             append("$running 个下载中")
             if (queuedDownloads > 0) append(" · $queuedDownloads 个排队")
         }
+        // 群组视频走 HLS 分片下载，分片不给总长：这类任务的分母不能用源文件大小冒充，
+        // 否则「已下载 40 MB / 共 211 MB」会让人以为才走了 19%，进度条也会画错。
+        // 判据必须认「分片任务」而不是 bytesTotal：普通下载在 DownloadManager 还没
+        // 拿到 Content-Length 时同样是 -1，否则图片/文档会被误标「转码流总长未知」。
+        val unknownLength = active.any {
+            it.state == DownloadState.RUNNING && DownloadLogic.isPlaylistTask(it)
+        }
         val total = active.sumOf { if (it.bytesTotal > 0) it.bytesTotal else it.sizeBytes }
         val done = active.sumOf { it.bytesDone }
         val speed = active.sumOf { speeds[it.id] ?: 0.0 }
@@ -497,10 +504,19 @@ class DownloadActivity : AppCompatActivity() {
             addView(summaryText(headline, true))
             addView(summaryText(DownloadLogic.speedText(speed), false, R.color.accentInk))
         })
-        val display = DownloadLogic.summaryProgress(active.size, running, done, total)
+        val display = if (unknownLength) {
+            DownloadLogic.ProgressDisplay(visible = true, indeterminate = running > 0, percent = 0)
+        } else {
+            DownloadLogic.summaryProgress(active.size, running, done, total)
+        }
         if (display.visible) card.addView(progressBar(display.percent, display.indeterminate))
+        val summaryDone = if (unknownLength) {
+            "已下载 ${DownloadLogic.formatBytes(done)}（转码流总长未知）"
+        } else {
+            "已下载 ${DownloadLogic.formatBytes(done)} / 共 ${DownloadLogic.formatBytes(total)}"
+        }
         card.addView(horizontal().apply {
-            addView(summaryText("已下载 ${DownloadLogic.formatBytes(done)} / 共 ${DownloadLogic.formatBytes(total)}", false, R.color.ink3))
+            addView(summaryText(summaryDone, false, R.color.ink3))
             addView(summaryText("最多同时 ${DownloadLogic.MAX_PARALLEL} 个", false, R.color.ink3))
         })
         activeList.addView(card)
@@ -515,9 +531,12 @@ class DownloadActivity : AppCompatActivity() {
         }
         main.addView(title(task.name))
         val speed = speeds[task.id] ?: 0.0
+        val sizeText = if (DownloadLogic.isPlaylistTask(task) && task.bytesTotal <= 0) {
+            "转码流"
+        } else DownloadLogic.formatBytes(if (task.bytesTotal > 0) task.bytesTotal else task.sizeBytes)
         val meta = listOfNotNull(
             task.sourceLabel,
-            DownloadLogic.formatBytes(if (task.bytesTotal > 0) task.bytesTotal else task.sizeBytes),
+            sizeText,
             DownloadLogic.speedText(speed).takeIf { it.isNotEmpty() },
         ).joinToString(" · ")
         main.addView(meta(meta))
@@ -528,6 +547,10 @@ class DownloadActivity : AppCompatActivity() {
             task.publishing -> "正在保存到下载目录…"
             task.state == DownloadState.QUEUED && task.downloadId >= 0 -> "等待系统下载"
             task.state == DownloadState.QUEUED -> "等待中 · 前面还有 ${queuedAhead(task)} 个"
+            // 分片下载已在写盘但总长未知：说清楚在干什么，别写「正在连接…」。
+            // 只认分片任务；普通下载偶尔 total=-1 时仍走下面的「正在连接…」。
+            DownloadLogic.isPlaylistTask(task) && task.state == DownloadState.RUNNING && task.bytesDone > 0 ->
+                "已下载 ${DownloadLogic.formatBytes(task.bytesDone)} · 分片下载中"
             percent < 0 -> "正在连接…"
             else -> "$percent% · ${DownloadLogic.etaText(
                 ((if (task.bytesTotal > 0) task.bytesTotal else task.sizeBytes) - task.bytesDone).coerceAtLeast(0),

@@ -132,11 +132,9 @@ internal class VideoStreamResolver {
     fun start(uri: Uri, userAgent: String, onResult: (Result<VideoStream>) -> Unit) {
         cancel()
         val id = requestId
-        val cookie = CookieManager.getInstance().getCookie(uri.toString())
-            ?.takeIf { it.isNotBlank() }
-            ?: CookieManager.getInstance().getCookie("https://${PanApi.HOST}")
+        val cookie = playlistCookie(uri)
         worker = executor.submit {
-            val result = runCatching { fetch(uri, userAgent, cookie) }
+            val result = runCatching { PlaylistFetcher.fetch(uri, userAgent, cookie) }
             handler.post {
                 if (id != requestId) return@post
                 cancel()
@@ -161,6 +159,76 @@ internal class VideoStreamResolver {
     fun close() {
         cancel()
         executor.shutdownNow()
+    }
+}
+
+/** 取 m3u8 主清单用的 Cookie：优先当前 URL 域，退化到网盘域（播放页与接口同源）。 */
+internal fun playlistCookie(uri: Uri): String? =
+    CookieManager.getInstance().getCookie(uri.toString())?.takeIf { it.isNotBlank() }
+        ?: CookieManager.getInstance().getCookie("https://${PanApi.HOST}")
+
+/**
+ * 同步版取址核心：播放（[VideoStreamResolver]）与下载（[GroupVideoDownload]）共用同一套
+ * 重试语义 —— 31341 排队、133 广告门、占位清单都要「再试一次」，不能各自实现一份。
+ *
+ * 调用方负责放到后台线程；本函数最多阻塞 MAX_ROUNDS 次请求 + 一次广告等待。
+ */
+internal object PlaylistFetcher {
+    fun fetch(uri0: Uri, userAgent: String, cookie: String?): VideoStream {
+        var uri = uri0
+        var adAttempts = 0
+        var pendingAttempts = 0
+        var probed = false
+        var lastError: IllegalStateException? = null
+        repeat(MAX_ROUNDS) { round ->
+            val (code, body) = request(uri, userAgent, cookie)
+            if (code == 200 && isPlaybackPlaylist(body)) {
+                android.util.Log.i(LOG_TAG, "round=$round playlist received")
+                return VideoStream(uri, body.toByteArray(Charsets.UTF_8))
+            }
+            var error = playlistError(code, body)
+            android.util.Log.i(
+                LOG_TAG,
+                "round=$round code=$code err=${error.javaClass.simpleName} " +
+                    "adTime=${(error as? AdGate)?.adTimeSeconds ?: -1}",
+            )
+            // 完整版取址只回 133 但不带 adToken：补一次网页版那条 nom3u8 预检再取 token。
+            // 预检参数是 /api/streaming 的语义；群组 mbox 用 stream_type 且 type 是群/联系人标志，不能套用。
+            if (error is StreamingRestricted && !probed && uri0.path == "/api/streaming") {
+                probed = true
+                val probe = request(Uri.parse(deriveProbeUrl(uri0.toString())), userAgent, cookie)
+                val probeError = playlistError(probe.first, probe.second)
+                android.util.Log.i(LOG_TAG, "probe code=${probe.first} err=${probeError.javaClass.simpleName}")
+                if (probeError is AdGate) {
+                    uri = Uri.parse(withAdToken(uri0.toString(), probeError.adToken))
+                    return@repeat
+                }
+                error = probeError
+            }
+            lastError = error
+            if (error is AdGate) {
+                adAttempts++
+                // 第一次立即带 adToken 重试（多数可跳过广告片直接播）；仍被拦说明服务端
+                // 按 adTime 计时，第二次先等够 adTime 再重试。
+                if (adAttempts >= 2) Thread.sleep(error.adTimeSeconds.coerceIn(0, MAX_AD_WAIT_SECONDS) * 1000L)
+                uri = Uri.parse(withAdToken(uri0.toString(), error.adToken))
+                return@repeat
+            }
+            // 31341「转码任务排队中」是可恢复的：批量下载时同时向 streaming 取址，
+            // 冷文件常常还没生成完，隔一会儿再要就有了。真机实测过「再试一次就正常」，
+            // 早期实现直接抛错，把一个 3 秒就能自愈的状态变成了失败记录。
+            if (error is TranscodingPending && pendingAttempts < MAX_PENDING_ATTEMPTS) {
+                val wait = PENDING_BACKOFF_MS * (pendingAttempts + 1)
+                pendingAttempts++
+                android.util.Log.i(LOG_TAG, "pending retry #$pendingAttempts after ${wait}ms")
+                Thread.sleep(wait)
+                return@repeat
+            }
+            throw error
+        }
+        // 轮次用完时真实原因可能是 31341 排队 / 133 广告门 / 占位清单，
+        // 一律说成「非会员广告校验未通过」会误导；把最后一次错误原样抛出。
+        throw lastError ?: StreamingRestricted(RESTRICTED_MESSAGE)
     }
 
     /** 读取一次响应，返回 (HTTP 状态码, 响应体)。200 读 input，其余读 errorStream。 */
@@ -193,55 +261,14 @@ internal class VideoStreamResolver {
         }
     }
 
-    private fun fetch(uri0: Uri, userAgent: String, cookie: String?): VideoStream {
-        var uri = uri0
-        var adAttempts = 0
-        var probed = false
-        repeat(MAX_ROUNDS) { round ->
-            val (code, body) = request(uri, userAgent, cookie)
-            if (code == 200 && isPlaybackPlaylist(body)) {
-                android.util.Log.i(LOG_TAG, "round=$round playlist received")
-                return VideoStream(uri, body.toByteArray(Charsets.UTF_8))
-            }
-            var error = playlistError(code, body)
-            android.util.Log.i(
-                LOG_TAG,
-                "round=$round code=$code err=${error.javaClass.simpleName} " +
-                    "adTime=${(error as? AdGate)?.adTimeSeconds ?: -1}",
-            )
-            // 完整版取址只回 133 但不带 adToken：补一次网页版那条 nom3u8 预检再取 token。
-            // 预检参数是 /api/streaming 的语义；群组 mbox 用 stream_type 且 type 是群/联系人标志，不能套用。
-            if (error is StreamingRestricted && !probed && uri0.path == "/api/streaming") {
-                probed = true
-                val probe = request(Uri.parse(deriveProbeUrl(uri0.toString())), userAgent, cookie)
-                val probeError = playlistError(probe.first, probe.second)
-                android.util.Log.i(LOG_TAG, "probe code=${probe.first} err=${probeError.javaClass.simpleName}")
-                if (probeError is AdGate) {
-                    uri = Uri.parse(withAdToken(uri0.toString(), probeError.adToken))
-                    return@repeat
-                }
-                error = probeError
-            }
-            if (error is AdGate) {
-                adAttempts++
-                // 第一次立即带 adToken 重试（多数可跳过广告片直接播）；仍被拦说明服务端
-                // 按 adTime 计时，第二次先等够 adTime 再重试。
-                if (adAttempts >= 2) Thread.sleep(error.adTimeSeconds.coerceIn(0, MAX_AD_WAIT_SECONDS) * 1000L)
-                uri = Uri.parse(withAdToken(uri0.toString(), error.adToken))
-                return@repeat
-            }
-            throw error
-        }
-        throw StreamingRestricted(restrictedMessage())
-    }
+    private const val LOG_TAG = "ShikeStream"
+    private const val MAX_PLAYLIST_CHARS = 1024 * 1024
+    private const val MAX_ROUNDS = 5
 
-    private fun restrictedMessage() =
+    /** 转码排队（31341）最多再等 3 次，退避 0.8s / 1.6s / 2.4s，合计不到 5s。 */
+    private const val MAX_PENDING_ATTEMPTS = 3
+    private const val PENDING_BACKOFF_MS = 800L
+    private const val MAX_AD_WAIT_SECONDS = 15
+    private const val RESTRICTED_MESSAGE =
         "百度网盘限制了该文件的在线转码播放（错误码 133，非会员广告校验未通过）"
-
-    private companion object {
-        const val LOG_TAG = "ShikeStream"
-        const val MAX_PLAYLIST_CHARS = 1024 * 1024
-        const val MAX_ROUNDS = 5
-        const val MAX_AD_WAIT_SECONDS = 15
-    }
 }

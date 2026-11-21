@@ -33,6 +33,8 @@ internal data class DownloadTask(
     val stagingName: String = "",
     val outputUri: String = "",
     val publishing: Boolean = false,
+    /** HLS 分片下载的转码副本：名字与 MIME 已被改写，重试前必须按源文件还原。 */
+    val playlistCopy: Boolean = false,
 )
 
 /**
@@ -85,6 +87,18 @@ internal object DownloadLogic {
 
     fun relativePath(name: String, stamp: String): String = "$FOLDER/${stamp}_${safeName(name)}"
 
+    /**
+     * HLS 分片拼接产物的文件名：没有 `#EXT-X-MAP` 初始化段时是 MPEG-TS（`.ts`），
+     * 有初始化段时是 fragmented MP4（`.mp4`）。沿用源文件的 `.mp4` 名却写入 TS 字节，
+     * 播放器会直接判为损坏；反过来 fMP4 也不该叫 `.ts`。
+     */
+    fun playlistFileName(sourceName: String, fragmentedMp4: Boolean = false): String {
+        val extension = if (fragmentedMp4) "mp4" else "ts"
+        if (sourceName.substringAfterLast('.', "").equals(extension, ignoreCase = true)) return sourceName
+        val dot = sourceName.lastIndexOf('.')
+        return if (dot > 0) sourceName.substring(0, dot) + ".$extension" else "$sourceName.$extension"
+    }
+
     /** 百度 dlink 的签名绑定生成它的 WebView UA；夸克直链同样带 UA 与 Referer。 */
     fun headers(route: DownloadRoute, userAgent: String): List<Pair<String, String>> {
         val referer = if (route == DownloadRoute.QUARK) QUARK_REFERER else BAIDU_REFERER
@@ -96,6 +110,7 @@ internal object DownloadLogic {
 
     fun mimeType(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
         "mp4", "m4v", "mov", "mkv", "avi" -> "video/*"
+        "ts" -> "video/mp2t"
         "mp3", "m4a", "aac", "wav", "flac" -> "audio/*"
         "jpg", "jpeg", "png", "webp", "gif" -> "image/*"
         "pdf" -> "application/pdf"
@@ -156,16 +171,32 @@ internal object DownloadLogic {
     fun isActive(task: DownloadTask): Boolean =
         task.state == DownloadState.QUEUED || task.state == DownloadState.RUNNING
 
+    /**
+     * 「总长未知」只对 HLS 分片任务成立。普通下载在 DownloadManager 尚未拿到
+     * Content-Length 时 `bytesTotal` 同样是 -1，用 `bytesTotal <= 0` 当判据会把图片 /
+     * 文档 / 我的网盘视频的进度文案误写成「转码流总长未知」「分片下载中」。
+     */
+    fun isPlaylistTask(task: DownloadTask): Boolean = task.playlistCopy && isActive(task)
+
     fun canRefreshLink(reason: Int): Boolean = when (reason) {
         401, 403, 404, 410, 412, 1008 -> true // 1008: DownloadManager.ERROR_CANNOT_RESUME
         else -> false
     }
 
-    fun requeue(task: DownloadTask): DownloadTask = task.copy(
-        state = DownloadState.QUEUED, downloadId = -1, url = "", bytesDone = 0,
-        bytesTotal = -1, finishedAt = 0, error = "", needsVerification = false,
-        stagingName = "", outputUri = "", publishing = false,
-    )
+    fun requeue(task: DownloadTask): DownloadTask {
+        // 分片副本的 .ts 名字只属于这一次下载。留到重试会让「这次恰好拿到直链」的
+        // 视频也存成 .ts（容器与扩展名不符），因此按 entry 里的源文件名还原。
+        val sourceName = task.entry?.name?.takeIf { it.isNotBlank() }
+        val restored = if (task.playlistCopy && sourceName != null) {
+            task.copy(name = sourceName, mediaType = mimeType(sourceName))
+        } else task
+        return restored.copy(
+            playlistCopy = false,
+            state = DownloadState.QUEUED, downloadId = -1, url = "", bytesDone = 0,
+            bytesTotal = -1, finishedAt = 0, error = "", needsVerification = false,
+            stagingName = "", outputUri = "", publishing = false,
+        )
+    }
 
     fun acceptsResolution(task: DownloadTask, id: Long): Boolean =
         task.id == id && task.state == DownloadState.QUEUED && task.downloadId < 0 &&
@@ -278,6 +309,7 @@ internal object DownloadLogic {
         .put("staging", task.stagingName)
         .put("output", task.outputUri)
         .put("publishing", task.publishing)
+        .put("playlistCopy", task.playlistCopy)
 
     private fun fromJson(item: JSONObject) = DownloadTask(
         id = item.getLong("id"),
@@ -305,5 +337,7 @@ internal object DownloadLogic {
         stagingName = item.optString("staging"),
         outputUri = item.optString("output"),
         publishing = item.optBoolean("publishing"),
+        // 旧记录没有这个字段：按普通下载处理，保证升级后历史记录可直接解码。
+        playlistCopy = item.optBoolean("playlistCopy"),
     )
 }

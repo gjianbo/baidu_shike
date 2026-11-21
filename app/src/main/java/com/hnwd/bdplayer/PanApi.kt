@@ -327,6 +327,12 @@ internal object PanApi {
 
     fun groupListSession() = api("/api/gettemplatevariable", "fields" to "[\"uk\",\"bdstoken\"]")
 
+    /**
+     * 网盘容量：`/api/quota` 实测返回 total / used / free（字节）。
+     * 转存前用它判断是否有空间，避免转存到一半因额度不足失败。
+     */
+    fun quota() = api("/api/quota", "checkexpire" to "1", "checkfree" to "1", "channel" to "chunlei")
+
     fun groups(token: String, start: Int, limit: Int) = api(
         "/mbox/group/list", "channel" to "chunlei", "bdstoken" to token,
         "start" to start.toString(), "limit" to limit.toString(),
