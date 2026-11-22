@@ -18,9 +18,12 @@ import okhttp3.Request
  * - 主清单（m3u8）需要登录 Cookie，走 [PlaylistFetcher] 的完整重试语义；
  * - 分片自带签名（`expires=8h`）、**不需要 Cookie**，只需 `User-Agent: pan.baidu.com`。
  *
- * 所以下载 = 取清单 → 逐片拉取 → 顺序写进暂存文件 → 交给 [DownloadedFileStore] 发布。
- * 产物是转码副本：无 `#EXT-X-MAP` 初始化段时是 MPEG-TS（分片直接拼接），有初始化段时
+ * 所以下载 = 取清单 → 逐片拉取 → TS 分片归一化 → 顺序写进暂存文件 →
+ * 交给 [DownloadedFileStore] 发布。
+ * 产物是转码副本：无 `#EXT-X-MAP` 初始化段时是 MPEG-TS（分片拼接），有初始化段时
  * 是 fragmented MP4；文件名与 MIME 由 `DownloadLogic.playlistFileName` 按容器决定。
+ * TS 分片必须先过 [HlsTsNormalizer] 把 continuity_counter 接成一条连续流，
+ * 否则播放器会在每个分片边界重同步音视频时钟（画面和声音不同步）。
  * `M3U8_AUTO_480` 是自适应档，同一文件多次取址可能拿到不同码率（时长一致、体积不同）。
  * 原始 mp4 只能靠「转存到我的网盘」后走 `/api/download`。
  */
@@ -63,6 +66,9 @@ internal object GroupVideoDownload {
      *
      * 单片失败重试 2 次后整条失败：HLS 分片是幂等 GET，重试安全；
      * 但不再无限重试，否则一个大分片挂住会让整个任务一直占着并发槽。
+     *
+     * 只有 MPEG-TS 分片（无 `#EXT-X-MAP`）才做 CC 归一化；fMP4 分片是 moof 盒，
+     * 按 188 字节 TS 包改字节会直接把文件改坏。
      */
     fun download(
         context: Context,
@@ -75,9 +81,12 @@ internal object GroupVideoDownload {
         file.parentFile?.mkdirs()
         file.delete()
         var written = 0L
+        // 一个任务一个实例：CC 要跨全部分片累计，不能每片各起一个。
+        val normalizer = if (plan.initSegment == null) HlsTsNormalizer() else null
         BufferedOutputStream(file.outputStream(), 128 * 1024).use { output ->
             plan.initSegment?.let { init ->
                 if (isCancelled()) throw Cancelled()
+                // fMP4 初始化段是 box 结构，不做 TS 归一化。
                 val bytes = fetchSegment(init, 0, isCancelled)
                 output.write(bytes)
                 written += bytes.size
@@ -86,6 +95,7 @@ internal object GroupVideoDownload {
             plan.segments.forEachIndexed { index, url ->
                 if (isCancelled()) throw Cancelled()
                 val bytes = fetchSegment(url, index, isCancelled)
+                normalizer?.normalize(bytes)
                 output.write(bytes)
                 written += bytes.size
                 onProgress(written)
