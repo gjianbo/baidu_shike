@@ -329,9 +329,12 @@ internal object DownloadCenter {
         val uri = task.outputUri.takeIf(String::isNotBlank)?.toUri()
             ?: runCatching { manager(context)?.getUriForDownloadedFile(task.downloadId) }.getOrNull()
             ?: return false
-        val intent = Intent(Intent.ACTION_VIEW)
-            .setDataAndType(uri, task.mediaType)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        // TS 转码副本交给应用内播放器（A/V 同步可控）；其它文件仍按原样调起外部应用。
+        val intent = if (DownloadLogic.shouldOpenInApp(task)) {
+            LocalVideoActivity.intent(context, uri, task.name, task.mediaType)
+        } else {
+            Intent(Intent.ACTION_VIEW).setDataAndType(uri, task.mediaType)
+        }.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         return runCatching {
             context.startActivity(intent)
             true

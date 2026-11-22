@@ -334,4 +334,22 @@ class DownloadLogicTest {
         assertFalse(decoded.playlistCopy)
         assertEquals("旧记录.pdf", decoded.name)
     }
+
+    @Test
+    fun shouldOpenInApp_onlyForMpegTsPlaylistCopy() {
+        fun task(mime: String) = DownloadTask(id = 1, name = "测试.ts", mediaType = mime)
+        // TS 转码副本才走应用内播放器；mp4 / 音频 / 文档一律保持 ACTION_VIEW。
+        assertTrue(DownloadLogic.shouldOpenInApp(task("video/mp2t")))
+        assertTrue(DownloadLogic.shouldOpenInApp(task("VIDEO/MP2T")))
+        assertFalse(DownloadLogic.shouldOpenInApp(task("video/*")))
+        assertFalse(DownloadLogic.shouldOpenInApp(task("audio/*")))
+        assertFalse(DownloadLogic.shouldOpenInApp(task("")))
+
+        // 端到端：命名 → MIME → 路由必须一致，别出现 .ts 文件被当成 mp4 甩给外部播放器。
+        val name = DownloadLogic.playlistFileName("第08课.mp4")
+        val built = DownloadTask(id = 2, name = name, mediaType = DownloadLogic.mimeType(name))
+        assertEquals("第08课.ts", name)
+        assertEquals("video/mp2t", built.mediaType)
+        assertTrue(DownloadLogic.shouldOpenInApp(built))
+    }
 }

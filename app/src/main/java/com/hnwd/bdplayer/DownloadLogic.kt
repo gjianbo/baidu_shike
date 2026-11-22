@@ -127,6 +127,18 @@ internal object DownloadLogic {
         else -> "application/octet-stream"
     }
 
+    /**
+     * HLS 转码副本（MPEG-TS 拼接产物）点开时走应用内 [LocalVideoActivity]，不再甩给外部播放器。
+     *
+     * 这些文件的 PTS / PCR 全程连续、CC 已归一化（ffmpeg 0 corrupt），但外部播放器
+     * 要自己靠 PCR 重建时钟、处理周期性 PAT/PMT 与 ADTS 串联音频，部分实现会
+     * 「画面先出、声音慢 2~3 秒」（见 `docs/百度群组视频下载失败-分析与修复.md` §5.5）。
+     * 应用内播放复用 ExoPlayer 的音频时钟同步，与在线播放同一套机制。
+     * 其它容器（mp4 / 音频 / 文档）行为不变，仍走 `ACTION_VIEW`。
+     */
+    fun shouldOpenInApp(task: DownloadTask): Boolean =
+        task.mediaType.equals("video/mp2t", ignoreCase = true)
+
     /** 总长未知返回 -1，交给 UI 走不确定进度。 */
     fun progress(bytesDone: Long, bytesTotal: Long): Int = when {
         bytesTotal <= 0 -> -1
