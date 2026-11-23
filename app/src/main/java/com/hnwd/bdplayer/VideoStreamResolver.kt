@@ -26,6 +26,15 @@ internal data class VideoStream(val uri: Uri, val playlist: ByteArray)
  */
 internal class TranscodingPending : IllegalStateException("网盘仍在转码，请稍后重试。")
 
+/**
+ * 该转码档位对这个文件不成立（31023 档名不存在 / 31304 文件类型不支持该档）。
+ *
+ * 这是**档位问题**，不是状态问题：重试没用，换下一档才有意义。
+ * [PlaylistFetcher.fetchFirst] 据此自动降档；其它错误（133/31341/网络）必须原样上抛，
+ * 否则会把一个可自愈的状态错误重复几遍，白白拖长等待。
+ */
+internal class StreamTierUnsupported(message: String) : IllegalStateException(message)
+
 internal class PlaylistRequestTimeout : IllegalStateException("获取播放清单超时。")
 
 /**
@@ -76,9 +85,10 @@ internal fun playlistError(code: Int, body: String): IllegalStateException {
                 "百度网盘限制了该文件的在线转码播放（错误码 133，非会员且未取到广告 token）$detail",
             )
         }
-        errorCode == 31304 -> IllegalStateException("该文件类型不支持此转码档位，请换档位或改用原始文件。")
-        errno == 31341 || errorCode == 31341 -> TranscodingPending()
-        errorCode == 31023 -> IllegalStateException("网盘取址参数有误，请重新打开。")
+        // 档位类错误：两个字段名（errno / error_code）百度会混用，统一比较 reportedCode。
+        reportedCode == 31304 -> StreamTierUnsupported("该文件类型不支持此转码档位，请换档位或改用原始文件。")
+        reportedCode == 31341 -> TranscodingPending()
+        reportedCode == 31023 -> StreamTierUnsupported("网盘不支持此转码档位，已自动改用其它档位。")
         code == 401 || code == 403 -> IllegalStateException("播放地址已过期或无权访问，请重新打开（地址约 8 小时有效）。")
         // 非 200 但没给明确错误码：同样按「尚未就绪」处理，交给调用方重试。
         code != 200 -> if (reportedCode == null) TranscodingPending()
@@ -129,12 +139,22 @@ internal class VideoStreamResolver {
     private var worker: Future<*>? = null
     private var requestId = 0
 
-    fun start(uri: Uri, userAgent: String, onResult: (Result<VideoStream>) -> Unit) {
+    fun start(uri: Uri, userAgent: String, onResult: (Result<VideoStream>) -> Unit) =
+        start(listOf(uri), userAgent, onResult)
+
+    /**
+     * 按优先级逐档取址（见 [PlaylistFetcher.fetchAny]）：清单里的第一档不被该文件支持时
+     * 自动降到下一档，只有全部档位都判为「不适用」才失败。
+     *
+     * 超时是按「整条候选链」算的 30s，不是每档 30s —— 冷文件降档时最坏情况要请求
+     * 2~3 次，若每档都独立计时，用户会等 90s 才看到弹窗。
+     */
+    fun start(uris: List<Uri>, userAgent: String, onResult: (Result<VideoStream>) -> Unit) {
         cancel()
         val id = requestId
-        val cookie = playlistCookie(uri)
+        val cookie = playlistCookie(uris.first())
         worker = executor.submit {
-            val result = runCatching { PlaylistFetcher.fetch(uri, userAgent, cookie) }
+            val result = runCatching { PlaylistFetcher.fetchAny(uris, userAgent, cookie) }
             handler.post {
                 if (id != requestId) return@post
                 cancel()
@@ -174,6 +194,50 @@ internal fun playlistCookie(uri: Uri): String? =
  * 调用方负责放到后台线程；本函数最多阻塞 MAX_ROUNDS 次请求 + 一次广告等待。
  */
 internal object PlaylistFetcher {
+    /**
+     * 按 [candidates]（`stream_type` 优先级列表）逐档取址，返回第一个成功的。
+     *
+     * 存在的理由：高清档并非对所有文件都成立 —— 冷文件先出 480、老文件没有 1080 转码、
+     * 音频档更是直接 31304。若不像这样逐档降级，选「1080p」的用户会遇到一批文件
+     * 报「不支持此档位」，而其实 480 是好的。
+     *
+     * [buildUri] 把档位翻成该链路的取址 URL（群组与网盘两条路径的拼法不同）。
+     * 降级只在 [StreamTierUnsupported]（31023/31304）时发生；其它错误原样上抛，
+     * 免得把一个 3 秒就能自愈的 31341 排队错误变成「所有档位都失败」。
+     */
+    /** 按 [candidates] 逐档取址，返回第一个成功的 `stream_type` 对应的清单。 */
+    fun fetchFirst(
+        candidates: List<String>,
+        buildUri: (String) -> Uri,
+        userAgent: String,
+        cookie: String?,
+    ): VideoStream = fetchAny(candidates.map(buildUri), userAgent, cookie)
+
+    /**
+     * 按给定顺序逐档取址，返回第一个成功的清单。
+     *
+     * 降级只在 [StreamTierUnsupported]（31023/31304）时发生；其它错误原样上抛，
+     * 免得把一个 3 秒就能自愈的 31341 排队错误变成「所有档位都失败」。
+     */
+    fun fetchAny(uris: List<Uri>, userAgent: String, cookie: String?): VideoStream {
+        var last: StreamTierUnsupported? = null
+        for ((index, uri) in uris.withIndex()) {
+            try {
+                val stream = fetch(uri, userAgent, cookie)
+                android.util.Log.i(LOG_TAG, "tier #$index ok (${tierOf(uri)})")
+                return stream
+            } catch (error: StreamTierUnsupported) {
+                last = error
+                android.util.Log.i(LOG_TAG, "tier #$index unsupported, trying next")
+            }
+        }
+        throw last ?: TranscodingPending()
+    }
+
+    /** 取址 URL 里的档位（`stream_type` 或 `type`），只用于日志定位，取不到给空串。 */
+    private fun tierOf(uri: Uri): String =
+        uri.getQueryParameter("stream_type") ?: uri.getQueryParameter("type").orEmpty()
+
     fun fetch(uri0: Uri, userAgent: String, cookie: String?): VideoStream {
         var uri = uri0
         var adAttempts = 0

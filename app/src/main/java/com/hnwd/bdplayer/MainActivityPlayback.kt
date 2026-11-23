@@ -1137,6 +1137,10 @@ internal fun MainActivity.startVideo(
     val account = playbackAccount(entry)
     val recording = historyRecording ?: videoHistory.scoped(account).begin(entry)
     val key = mediaCacheKey(account, entry)
+    // 清晰度档位决定实际取址的 stream_type，清单缓存也按档位分开存 —— 否则切到 1080p
+    // 还会命中上一档的清单，用户看到「选了高清画面却没变」。
+    val quality = VideoQualityStore.get(this)
+    val playlistKey = playlistCacheKey(account, entry, quality)
     // 取址期间旧播放器可能已经到点暂停，换页也要遵守本次切换开始时的截止时间。
     val sleepDeadline = videoSleepTimer.deadlineElapsedMs
     dismissVideoOpenError()
@@ -1197,7 +1201,7 @@ internal fun MainActivity.startVideo(
                 onRetry = { snapshot, automatic ->
                     if (videoLoading == null && account == playbackAccount(entry)) {
                         if (!quark) {
-                            mediaAddresses.clearPlaylist(key)
+                            mediaAddresses.clearPlaylists(key)
                             mediaAddresses.clearLink(key)
                         }
                         startVideo(
@@ -1300,8 +1304,13 @@ internal fun MainActivity.startVideo(
         }
         return
     }
-    val playlist = if (entry.isDisk) PanApi.diskVideoPlaylist(entry) else PanApi.videoPlaylist(entry)
-    val cached = mediaAddresses.playlist(key, playlist)
+    // 同一档内仍可能有多条候选（用户选 1080p 而该文件没有 1080 转码时自动降到 480），
+    // 逐档降级由取址层负责。
+    val tiers = qualityCandidates(entry.origin, quality)
+    val playlistUris = tiers.map { tier ->
+        if (entry.isDisk) PanApi.diskVideoPlaylist(entry, tier) else PanApi.videoPlaylist(entry, tier)
+    }
+    val cached = mediaAddresses.playlist(playlistKey, playlistUris.first())
     if (cached != null) {
         openStream(runCatching { cached.mediaSource(mediaItem(cached.uri)) })
     } else {
@@ -1311,11 +1320,11 @@ internal fun MainActivity.startVideo(
         fun fetch() {
             if (videoLoading !== loading || isDestroyed || isFinishing) return
             attempt++
-            videoResolver.start(playlist, web.settings.userAgentString) { result ->
+            videoResolver.start(playlistUris, web.settings.userAgentString) { result ->
                 if (videoLoading !== loading || isDestroyed || isFinishing) return@start
                 val stream = result.getOrNull()
                 if (stream != null) {
-                    mediaAddresses.savePlaylist(key, stream)
+                    mediaAddresses.savePlaylist(playlistKey, stream)
                     openStream(result.mapCatching { it.mediaSource(mediaItem(it.uri)) })
                     return@start
                 }

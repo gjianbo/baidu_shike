@@ -454,7 +454,12 @@ internal object PanApi {
     fun diskHasMore(json: JSONObject, num: Int): Boolean =
         json.getJSONArray("list").length() >= num || hasMore(json)
 
-    fun diskVideoPlaylist(entry: PanEntry): Uri = diskStreaming(entry, "M3U8_AUTO_480", "")
+    /**
+     * 视频取址 URL。[streamType] 默认 480 是为兼容既有调用与单测；真实播放/下载
+     * 由 [qualityCandidates] 逐档尝试（见 `docs/百度网盘视频清晰度档位-实测结论.md`）。
+     */
+    fun diskVideoPlaylist(entry: PanEntry, streamType: String = StreamType.H264_480): Uri =
+        diskStreaming(entry, streamType, "")
 
     fun diskAudioPlaylist(entry: PanEntry, token: String): Uri =
         diskStreaming(entry, "M3U8_MP3_128", token)
@@ -707,7 +712,8 @@ internal object PanApi {
     fun readablePath(raw: String): String =
         if (raw.startsWith("%2F", ignoreCase = true)) Uri.decode(raw) else raw
 
-    fun videoPlaylist(entry: PanEntry): Uri = playlist(entry, "M3U8_AUTO_480")
+    fun videoPlaylist(entry: PanEntry, streamType: String = StreamType.H264_480): Uri =
+        playlist(entry, streamType)
 
     fun audioPlaylist(entry: PanEntry): Uri = playlist(entry, "M3U8_MP3_128")
 

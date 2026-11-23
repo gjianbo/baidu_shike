@@ -39,9 +39,25 @@ internal object GroupVideoDownload {
         .retryOnConnectionFailure(true)
         .build()
 
-    /** 取到可下载的分片清单；失败一律抛 [Unsupported] 并带可读原因。 */
-    fun plan(entry: PanEntry, userAgent: String, cookie: String?): HlsPlan {
-        val stream = PlaylistFetcher.fetch(PanApi.videoPlaylist(entry), userAgent, cookie)
+    /**
+     * 取到可下载的分片清单；失败一律抛 [Unsupported] 并带可读原因。
+     *
+     * [quality] 决定 `stream_type` 候选链：用户选 1080p 时就下 1080p 的转码流
+     * （体积通常比 480 小且清晰度更高，因为百度对高清档用了 HEVC）。
+     * 候选链由 [PlaylistFetcher.fetchFirst] 逐档降级，保证至少能落到 480。
+     */
+    fun plan(
+        entry: PanEntry,
+        userAgent: String,
+        cookie: String?,
+        quality: VideoQuality = VideoQuality.AUTO,
+    ): HlsPlan {
+        val stream = PlaylistFetcher.fetchFirst(
+            qualityCandidates(entry.origin, quality),
+            { PanApi.videoPlaylist(entry, it) },
+            userAgent,
+            cookie,
+        )
         var body = String(stream.playlist, Charsets.UTF_8)
         var base = stream.uri.toString()
         // master 清单要先选一路再拉子清单；百度多数情况直接给 media 列表。

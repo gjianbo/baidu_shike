@@ -27,6 +27,9 @@ internal interface SettingsHost {
     fun historyCount(): Int
     fun themeLabel(): String
     fun showThemeDialog()
+    /** 在线播放清晰度的当前档位名（「自动」/「1080p」…），由宿主读设置项。 */
+    fun qualityLabel(): String
+    fun showQualityDialog()
     fun launchBackup()
     fun openDownloads()
     fun downloadSummary(): String
@@ -81,6 +84,8 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setClearRow).setOnClickListener { host.confirmClearHistory() }
         page.findViewById<TextView>(R.id.setThemeValue).text = host.themeLabel()
         page.findViewById<View>(R.id.setThemeRow).setOnClickListener { host.showThemeDialog() }
+        page.findViewById<TextView>(R.id.setQualityValue).text = host.qualityLabel()
+        page.findViewById<View>(R.id.setQualityRow).setOnClickListener { host.showQualityDialog() }
         page.findViewById<View>(R.id.setBackupRow).setOnClickListener { host.launchBackup() }
         page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()

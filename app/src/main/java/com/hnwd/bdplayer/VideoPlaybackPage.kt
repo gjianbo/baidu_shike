@@ -327,6 +327,45 @@ internal class VideoPlaybackPage(
             menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
             menu.show()
         }
+        // 清晰度：与倍速同款文字胶囊。切换档位等于「按新档位重新取址」，
+        // 所以直接复用重试链路 —— 它会清掉所有档位的清单缓存、记住当前进度再起播。
+        val qualityChip = TextView(activity).apply {
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundResource(R.drawable.bg_video_chip)
+            setPadding(dp(9), dp(5), dp(9), dp(5))
+            gravity = Gravity.CENTER
+            minWidth = dp(52)
+            isClickable = true
+        }
+        fun paintQuality() {
+            val current = VideoQualityStore.get(activity)
+            qualityChip.text = current.label
+            qualityChip.contentDescription = "清晰度，当前 ${current.label}"
+        }
+        paintQuality()
+        qualityChip.setOnClickListener {
+            val current = VideoQualityStore.get(activity)
+            val menu = PopupMenu(dialog.context, qualityChip, Gravity.END)
+            VideoQuality.entries.forEachIndexed { index, quality ->
+                menu.menu.add(0, index, index, "${quality.label} · ${quality.hint}")
+                    .setChecked(quality == current)
+            }
+            menu.menu.setGroupCheckable(0, true, true)
+            menu.setOnMenuItemClickListener { item ->
+                val picked = VideoQuality.entries[item.itemId]
+                if (picked == current) return@setOnMenuItemClickListener true
+                VideoQualityStore.set(activity, picked)
+                paintQuality()
+                // 同一个文件换档必然要重新取址：旧清单还指着上一档的分片。
+                Toast.makeText(activity, "正在切换到 ${picked.label}…", Toast.LENGTH_SHORT).show()
+                retryPlayback(false)
+                true
+            }
+            video.controllerShowTimeoutMs = 0
+            menu.setOnDismissListener { video.controllerShowTimeoutMs = 3_000 }
+            menu.show()
+        }
         val playPause = iconButton(R.drawable.ic_play, "播放", padding = 16) {
             if (player.playWhenReady && player.playbackState != Player.STATE_ENDED) player.pause()
             else {
@@ -671,6 +710,7 @@ internal class VideoPlaybackPage(
         styleTransport(true)
         progressRow.addView(transport, 0, LinearLayout.LayoutParams(-2, dp(36)))
         progressRow.addView(speed, LinearLayout.LayoutParams(-2, dp(30)).apply { marginStart = dp(6) })
+        progressRow.addView(qualityChip, LinearLayout.LayoutParams(-2, dp(30)).apply { marginStart = dp(6) })
         progressRow.addView(courseChip, LinearLayout.LayoutParams(-2, dp(30)).apply { marginStart = dp(6) })
         progressRow.addView(fullscreen, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginStart = dp(4) })
         fun arrangePlayer() {
@@ -714,6 +754,8 @@ internal class VideoPlaybackPage(
             if (showEmbeddedCourses && courseDialog?.isShowing == true) courseDialog?.dismiss()
             embeddedCourses.visibility = if (showEmbeddedCourses) View.VISIBLE else View.GONE
             courseChip.visibility = if (landscape && hasCourses && !sideCourses) View.VISIBLE else View.GONE
+            // 音频模式下画面轨道被禁用，清晰度无意义，留在控制行只会占宽度。
+            qualityChip.visibility = if (listening) View.GONE else View.VISIBLE
             // 横屏顶栏不放转音频（动作在 D 槽/菜单）；竖屏的显隐统一交给
             // controller visibility listener，避免布局回调把它强行改回 VISIBLE。
             if (immersive) audioOnly.visibility = View.GONE

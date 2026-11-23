@@ -13,6 +13,15 @@ internal fun mediaCacheKey(account: String, entry: PanEntry): String =
             .joinToString("\u0000").toByteArray())
         .joinToString("") { "%02x".format(it) }
 
+/**
+ * 清单缓存键：在 [mediaCacheKey] 上再带上清晰度档位。
+ *
+ * 为什么必须带：切档后如果还命中上一档的清单，用户会「选了 1080p 却还是 480 的画面」，
+ * 而且看起来像功能没生效。原始文件直链（`link`）仍用 [mediaCacheKey]，它与档位无关。
+ */
+internal fun playlistCacheKey(account: String, entry: PanEntry, quality: VideoQuality): String =
+    mediaCacheKey(account, entry) + ":q" + quality.name
+
 internal class MediaAddressCache(context: Context) {
     private val directory = File(context.cacheDir, "media-addresses")
 
@@ -22,6 +31,18 @@ internal class MediaAddressCache(context: Context) {
     fun savePlaylist(key: String, stream: VideoStream) = write(key, "m3u8", stream.playlist)
 
     fun clearPlaylist(key: String) = file(key, "m3u8").delete()
+
+    /**
+     * 清掉该视频**所有档位**的清单缓存。
+     *
+     * 重试/切清晰度时用：不知道用户上一档存的是哪一档（也可能几档都存过），
+     * 只清当前档会留下会命中的旧清单。
+     */
+    fun clearPlaylists(key: String) {
+        directory.listFiles().orEmpty().forEach { cached ->
+            if (cached.name.startsWith("$key:q") && cached.name.endsWith(".m3u8")) cached.delete()
+        }
+    }
 
     fun link(key: String): Uri? =
         read(key, "url")?.let { it.decodeToString().toUri().takeIf(PanApi::isCachedFileLink) }

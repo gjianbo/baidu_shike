@@ -1304,6 +1304,10 @@ class MainActivity : AppCompatActivity() {
 
         override fun showThemeDialog() = this@MainActivity.showThemeDialog()
 
+        override fun qualityLabel() = VideoQualityStore.label(this@MainActivity)
+
+        override fun showQualityDialog() = this@MainActivity.showQualityDialog()
+
         override fun launchBackup() {
             backupLauncher.launch(Intent(this@MainActivity, BackupActivity::class.java))
         }

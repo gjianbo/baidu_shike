@@ -97,7 +97,9 @@ internal object DownloadLinkResolver {
                     // 文档/图片/音频没有转码流，仍按服务端限制如实报错（准入条件在纯逻辑层）。
                     if (DownloadLinkLogic.shouldTryPlaylist(isVideo, issue)) {
                         val plan = try {
-                            GroupVideoDownload.plan(entry, ua, session.cookie)
+                            GroupVideoDownload.plan(
+                                entry, ua, session.cookie, VideoQualityStore.get(context),
+                            )
                         } catch (error: Exception) {
                             throw Failure(
                                 DownloadLinkLogic.failureText(issue) + "（转码流也不可用：" +

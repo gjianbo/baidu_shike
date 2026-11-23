@@ -61,6 +61,22 @@ class VideoStreamResolverLogicTest {
     }
 
     @Test
+    fun `31304 与 31023 属于可换档错误`() {
+        // 取址层据此逐档降级：这两类换个 stream_type 就有救，不是文件本身不可播。
+        assertTrue(playlistError(200, """{"error_code":31304}""") is StreamTierUnsupported)
+        assertTrue(playlistError(200, """{"error_code":31023}""") is StreamTierUnsupported)
+        assertTrue(playlistError(400, """{"errno":31023}""") is StreamTierUnsupported)
+    }
+
+    @Test
+    fun `133 与 31341 不是可换档错误`() {
+        // 状态问题：换档只会把同一个错误重复几遍，必须原样上抛。
+        assertFalse(playlistError(200, """{"errno":31341}""") is StreamTierUnsupported)
+        assertFalse(playlistError(200, """{"errno":133,"adToken":"x"}""") is StreamTierUnsupported)
+        assertFalse(playlistError(200, """{"errno":133}""") is StreamTierUnsupported)
+    }
+
+    @Test
     fun `401 403 是地址过期立即失败`() {
         assertFalse(playlistError(403, "") is TranscodingPending)
         assertFalse(playlistError(401, "") is TranscodingPending)

@@ -385,6 +385,23 @@ internal fun MainActivity.showThemeDialog() {
 }
 
 
+internal fun MainActivity.showQualityDialog() {
+    val current = VideoQualityStore.get(this)
+    showChoiceSheet(
+        title = "在线播放清晰度",
+        subtitle = "取不到所选档位时自动降档",
+        choices = VideoQuality.entries.map { quality ->
+            SheetChoice(quality.label, checked = quality == current, tag = quality)
+        },
+        onSelect = { choice ->
+            val quality = choice.tag as VideoQuality
+            VideoQualityStore.set(this, quality)
+            findViewById<TextView>(R.id.setQualityValue)?.text = quality.label
+        },
+    )
+}
+
+
 internal fun MainActivity.hasFilterOptions(entries: List<PanEntry>): Boolean =
     entries.map(PanApi::kindOf).distinct().size >= 2
 
