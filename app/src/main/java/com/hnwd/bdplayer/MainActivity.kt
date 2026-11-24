@@ -288,7 +288,13 @@ class MainActivity : AppCompatActivity() {
     internal var audioRequestId = 0
     internal var audioPlayToken: Long? = null
     internal var dispatchedAudioEntry: PanEntry? = null
-    internal var pendingAudioEntry: PanEntry? = null
+    internal var pendingAudioRequest: PendingAudioRequest? = null
+        set(value) {
+            val previous = field
+            field = value
+            previous?.entry?.let { content.findViewWithTag<View>(entryKey(it))?.paintAudioLoading(false) }
+            value?.entry?.let { content.findViewWithTag<View>(entryKey(it))?.paintAudioLoading(true) }
+        }
     internal var stoppedVideo: VideoPlaybackPage.Snapshot? = null
     internal var videoToRestore: VideoPlaybackPage.Snapshot? = null
     internal var loadingVideo: VideoPlaybackPage.Snapshot? = null
@@ -447,7 +453,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
                     if (pickingSource && url.toUri().host == "wappass.baidu.com") loginPending = true
                     ready = false
-                    invalidateAccount()
+                    invalidateAccount(preserveCachedHomeAudio = url == API_PAGE)
                     if (native.visibility == View.VISIBLE) refresh()
                 }
 
@@ -708,6 +714,7 @@ class MainActivity : AppCompatActivity() {
                     retryOpenPlayerIfPending()
                     // 连接失败时不留悬挂标志，避免后续 onStart 反复空转或延迟弹页。
                     if (controller == null) pendingOpenPlayer = false
+                    continueCachedHomeAudio()
                 }
             }, uiExecutor)
         }
@@ -954,6 +961,7 @@ class MainActivity : AppCompatActivity() {
         if (videoToRestore == null && videoPage == null && videoLoading == null) videoToRestore = loadingVideo
         nowPlaying.post(nowPlayingTicker)
         restoreVideoIfReady()
+        continueCachedHomeAudio()
         videoLoading?.show()
         videoOpenError?.show()
         // controller 与账号校验可能都还没就绪；openCurrentPlayback 只在守卫成立时

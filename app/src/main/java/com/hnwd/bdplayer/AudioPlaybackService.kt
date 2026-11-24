@@ -301,7 +301,7 @@ class AudioPlaybackService : MediaSessionService() {
         }
         else playlist.isNotEmpty() && (
             if (entry.isDisk) PanApi.isDiskStreaming(uri, entry)
-            else uri == PanApi.audioPlaylist(entry)
+            else matchesGroupAudioPlaylistUrl(uri.toString(), PanApi.audioPlaylist(entry).toString())
         )
 
     private fun setAudioSource(item: MediaItem, uri: Uri, playlist: ByteArray?, position: Long) {

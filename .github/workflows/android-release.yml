@@ -1,10 +1,10 @@
-name: Build Android Release APK
+name: Android checks and release
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Publish an existing tag (optional, e.g. v0.1.20)'
+        description: 'Rebuild an existing tag and publish its APK if missing (optional)'
         type: string
         required: false
   push:
@@ -12,9 +12,16 @@ on:
       - main
     tags:
       - 'v*'
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
+
+concurrency:
+  group: android-${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || github.ref }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -22,8 +29,12 @@ defaults:
 
 jobs:
   build:
+    name: Android checks and build
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      source_sha: ${{ steps.release_source.outputs.source_sha }}
+      tag_object_sha: ${{ steps.release_source.outputs.tag_object_sha }}
     env:
       RELEASE_TAG: ${{ inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
     steps:
@@ -35,13 +46,52 @@ jobs:
           fetch-depth: 0
 
       - name: Check versionCode monotonicity
+        id: release_source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          # 发新 tag 必须严格递增 versionCode；workflow_dispatch 重发已有 tag 只校验一致性。
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "$RELEASE_TAG" ]]; then
-            bash .github/scripts/check-version-code.sh --rebuild
-          else
-            bash .github/scripts/check-version-code.sh
+          workflow_source="$RUNNER_TEMP/android-workflow"
+          mkdir -p "$workflow_source"
+          app_source="app/src/main/java/com/hnwd/bdplayer"
+          git archive "$GITHUB_WORKFLOW_SHA" .github/scripts \
+            "$app_source/QuarkDriveActivity.kt" "$app_source/QuarkLoginLogic.kt" | tar -x -C "$workflow_source"
+          scripts="$workflow_source/.github/scripts"
+          source "$scripts/github-release-api.sh"
+          args=(--repo "$GITHUB_WORKSPACE")
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -n "$RELEASE_TAG" ]]; then
+            if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo '::error::Invalid release tag. Expected vX.Y.Z.'
+              exit 1
+            fi
+            if lookup_github_release >/dev/null; then
+              args+=(--rebuild)
+            elif [[ "$?" != 4 ]]; then
+              exit 1
+            fi
           fi
+          bash "$scripts/check-version-code.sh" "${args[@]}"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            source_sha="$(git rev-parse --verify HEAD)"
+            tag_object_sha="$(git rev-parse --verify "refs/tags/$RELEASE_TAG")"
+            if [[ "$(git rev-parse --verify "${tag_object_sha}^{commit}")" != "$source_sha" ]]; then
+              echo "::error::Release tag $RELEASE_TAG does not point to the build commit $source_sha."
+              exit 1
+            fi
+            printf 'source_sha=%s\ntag_object_sha=%s\n' "$source_sha" "$tag_object_sha" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Test release and login regressions
+        run: |
+          scripts="$RUNNER_TEMP/android-workflow/.github/scripts"
+          bash "$scripts/test-check-version-code.sh"
+          bash "$scripts/test-publish-android-release.sh"
+          node --test "$scripts/test-quark-login-hook.mjs"
 
       - uses: actions/setup-java@v5
         with:
@@ -54,13 +104,22 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: '9.3.0'
+          gradle-version: '8.14.3'
 
       - name: Install Android SDK
         run: |
-          sdkmanager --channel=3 "platforms;android-37.0" "build-tools;35.0.0" "build-tools;37.0.0"
+          platform="platforms;android-36.1"
+          # 旧 tag 的构建文件仍声明 API 37，按其原始配置重建。
+          if grep -Eq '^[[:space:]]*compileSdk[[:space:]]+37[[:space:]]*$' app/build.gradle; then
+            platform="platforms;android-37.0"
+          fi
+          sdkmanager --channel=3 "$platform" "build-tools;35.0.0"
+
+      - name: Run unit tests and lint
+        run: gradle --no-daemon :app:testDebugUnitTest :app:lintDebug
 
       - name: Build signed Release
+        if: env.RELEASE_TAG != ''
         env:
           KEYSTORE_BASE64: ${{ secrets.BDPLAYER_KEYSTORE_BASE64 }}
           BDPLAYER_STORE_PASSWORD: ${{ secrets.BDPLAYER_STORE_PASSWORD }}
@@ -78,9 +137,10 @@ jobs:
           trap 'rm -f -- "$BDPLAYER_KEYSTORE"' EXIT
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$BDPLAYER_KEYSTORE"
           unset KEYSTORE_BASE64
-          gradle --no-daemon :app:lintDebug :app:assembleRelease
+          gradle --no-daemon :app:assembleRelease
 
       - name: Verify and name APK
+        if: env.RELEASE_TAG != ''
         run: |
           release_dir=app/build/outputs/apk/release
           version="$(jq -er '.elements[0].versionName' "$release_dir/output-metadata.json")"
@@ -93,12 +153,13 @@ jobs:
             exit 1
           fi
 
-          apksigner="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          apksigner="$ANDROID_HOME/build-tools/35.0.0/apksigner"
           "$apksigner" verify "$release_dir/app-release.apk"
           mkdir -p dist
           cp "$release_dir/app-release.apk" "dist/baidu-shike-$version-release.apk"
 
       - uses: actions/upload-artifact@v7
+        if: env.RELEASE_TAG != ''
         with:
           name: android-release-apk
           path: dist/*.apk
@@ -111,6 +172,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
       - uses: actions/download-artifact@v7
         with:
           name: android-release-apk
@@ -121,5 +187,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-        run: |
-          gh release create --verify-tag --title "拾课 $RELEASE_TAG" --generate-notes -- "$RELEASE_TAG" dist/*.apk
+          BUILD_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          BUILD_TAG_OBJECT_SHA: ${{ needs.build.outputs.tag_object_sha }}
+        run: bash .github/scripts/publish-android-release.sh

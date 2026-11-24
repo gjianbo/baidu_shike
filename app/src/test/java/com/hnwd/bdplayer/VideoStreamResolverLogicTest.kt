@@ -137,6 +137,19 @@ class VideoStreamResolverLogicTest {
     }
 
     @Test
+    fun `群组音频清单允许广告 token 且校验原始文件地址`() {
+        val url = "https://pan.baidu.com/mbox/msg/streaming?fs_id=123&stream_type=M3U8_MP3_128"
+        val withToken = withAdToken(url, "ab+/cd=")
+        assertTrue(matchesGroupAudioPlaylistUrl(url, url))
+        assertTrue(matchesGroupAudioPlaylistUrl(withToken, url))
+        assertFalse(matchesGroupAudioPlaylistUrl("$url&adToken=", url))
+        assertFalse(matchesGroupAudioPlaylistUrl("$withToken&fs_id=456", url))
+        assertFalse(matchesGroupAudioPlaylistUrl("$withToken#fragment", url))
+        assertFalse(matchesGroupAudioPlaylistUrl(withToken.replace("fs_id=123", "fs_id=456"), url))
+        assertFalse(matchesGroupAudioPlaylistUrl(withToken.replace("pan.baidu.com", "example.com"), url))
+    }
+
+    @Test
     fun `deriveProbeUrl 改为 nom3u8 预检并去掉播放门参数`() {
         val url = "https://pan.baidu.com/api/streaming?path=%2Fa&type=M3U8_AUTO_480&isplayer=1&check_blue=1&adToken=&src_id=1"
         val probe = deriveProbeUrl(url)

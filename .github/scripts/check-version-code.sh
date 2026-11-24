@@ -6,7 +6,7 @@
 #   1. versionCode 必须是正整数；
 #   2. 不允许小于历史 tag 的最大 versionCode（版本回退）；
 #   3. versionName 变了、或要发布一个新 tag，versionCode 必须严格大于历史最大值；
-#   4. --rebuild 用于 workflow_dispatch 重发已有 tag：只校验 code 与该 tag 一致。
+#   4. 正式包必须从对应 tag 的干净检出构建。--rebuild 允许按原版本号重建。
 #
 # 用法：
 #   check-version-code.sh [--repo DIR] [--version-name NAME]
@@ -18,10 +18,9 @@ usage() {
     cat <<'EOF'
 用法：check-version-code.sh [选项]
   --repo DIR            仓库根目录，默认取脚本所在仓库
-  --version-name NAME   实际发版的 versionName（本地 build-release.sh --version）
-                        默认：RELEASE_TAG 去掉 v，或 build.gradle 里的默认值
+  --version-name NAME   模拟日常构建的 versionName，默认取 build.gradle
   --release-tag TAG     本次发布的 tag，默认取环境变量 RELEASE_TAG
-  --rebuild             重发已有 tag（workflow_dispatch），跳过递增要求
+  --rebuild             重建已有 tag，跳过递增要求
   -h, --help            显示帮助
 EOF
 }
@@ -89,12 +88,22 @@ extract_name() {
 tag_code() {
     local tag="$1" content
     # 浅克隆里 tag 名还在、提交对象却取不到，绝不能当成「没有历史」静默放行。
-    if ! git -C "$repo" cat-file -e "${tag}^{commit}" 2>/dev/null; then
+    if ! git -C "$repo" cat-file -e "refs/tags/${tag}^{commit}" 2>/dev/null; then
         fail "读不到 tag $tag 的提交对象；CI 的 actions/checkout 需要 fetch-depth: 0"
     fi
-    content="$(git -C "$repo" cat-file -p "${tag}:app/build.gradle" 2>/dev/null || true)"
+    content="$(git -C "$repo" cat-file -p "refs/tags/${tag}:app/build.gradle" 2>/dev/null || true)"
     [[ -n "$content" ]] || return 0
     printf '%s\n' "$content" | extract_code
+}
+
+verify_tag_source() {
+    local tag_commit head_commit changes
+    tag_commit="$(git -C "$repo" rev-parse --verify "refs/tags/${release_tag}^{commit}" 2>/dev/null)" \
+        || fail "找不到发布 tag $release_tag"
+    head_commit="$(git -C "$repo" rev-parse --verify HEAD)" || fail "找不到 HEAD"
+    [[ "$head_commit" == "$tag_commit" ]] || fail "HEAD 与发布 tag $release_tag 的提交不同"
+    changes="$(git -C "$repo" status --porcelain --untracked-files=all)" || fail "无法检查发版工作区"
+    [[ -z "$changes" ]] || fail "正式包必须从干净的 tag $release_tag 检出构建"
 }
 
 current_code="$(extract_code < "$gradle_file")"
@@ -103,16 +112,14 @@ if (( current_code <= 0 )); then
     fail "versionCode 必须是正整数，当前是 $current_code"
 fi
 
-if [[ -z "$version_name" ]]; then
-    if [[ -n "$release_tag" ]]; then
-        version_name="${release_tag#v}"
-    else
-        version_name="$(extract_name < "$gradle_file")"
-    fi
+if [[ -n "$release_tag" ]]; then
+    [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "无效的发布 tag：$release_tag（应为 vX.Y.Z）"
+    [[ -z "$version_name" ]] || fail "按 tag 构建时必须使用 build.gradle 中的 versionName"
 fi
+version_name="${version_name:-$(extract_name < "$gradle_file")}"
 [[ -n "$version_name" ]] || fail "无法确定本次构建的 versionName"
 
-# 重发已有 tag：不允许用另一份 versionCode 的代码重发，但也不要求递增。
+# 重建已有 tag 保留该 tag 的版本号。
 if (( rebuild )); then
     [[ -n "$release_tag" ]] || fail "--rebuild 必须同时指定 --release-tag"
     published_code="$(tag_code "$release_tag")"
@@ -120,7 +127,9 @@ if (( rebuild )); then
     if [[ "$current_code" != "$published_code" ]]; then
         fail "重发 ${release_tag} 时 versionCode 必须保持 ${published_code}，当前是 ${current_code}"
     fi
-    printf '版本门禁通过：重发 %s（versionCode=%s）\n' "$release_tag" "$current_code"
+    [[ "$release_tag" == "v$version_name" ]] || fail "发布 tag $release_tag 与 versionName $version_name 不一致"
+    verify_tag_source
+    printf '版本门禁通过：重建 %s（versionCode=%s）\n' "$release_tag" "$current_code"
     exit 0
 fi
 
@@ -155,6 +164,10 @@ fi
 if [[ -n "$baseline_name" && "$version_name" != "$baseline_name" ]] \
     && (( current_code <= max_code )); then
     fail "versionName 从 ${baseline_name} 变成了 ${version_name}，但 versionCode 仍是 ${current_code}。请同步把 versionCode 加到 $((max_code + 1)) 以上"
+fi
+if [[ -n "$release_tag" ]]; then
+    [[ "$release_tag" == "v$version_name" ]] || fail "发布 tag $release_tag 与 versionName $version_name 不一致"
+    verify_tag_source
 fi
 
 printf '版本门禁通过：versionName=%s versionCode=%s 基线=%s(code=%s)%s\n' \

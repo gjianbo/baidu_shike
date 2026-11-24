@@ -66,6 +66,19 @@ internal data class FolderPosition(
 
 internal data class QueueSelection(val entry: PanEntry, val sourceEntries: List<PanEntry>, val listKey: String?)
 
+internal data class CachedHomeAudio(val account: String, val sourceId: String) {
+    fun isCurrent(account: String, sourceId: String, token: Long?): Boolean =
+        this.account == account && this.sourceId == sourceId &&
+            token?.let(AudioPlayRequestGate::isCurrent) == true
+}
+
+internal class PendingAudioRequest(
+    val entry: PanEntry,
+    val route: PlaybackRoute,
+    var openPlayer: Boolean,
+    val cachedHome: CachedHomeAudio? = null,
+)
+
 internal data class RetainedPlayback(
     val video: VideoPlaybackPage.Snapshot?,
     val selection: QueueSelection?,

@@ -13,7 +13,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -30,41 +29,46 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.WebMessageCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import java.util.concurrent.Executors
-import androidx.core.net.toUri
 
 /**
  * H5 短信登录页（client_id=503，触屏验证码）。该页提交验证码后只把 32 位
  * service_ticket postMessage 给父窗口（transmission_mode=pm），顶层窗口时
  * parent===self，注入监听即可捕获，再用官方 doAuth 同款接口兑换会话。
  */
+private const val QUARK_H5_LOGIN_ORIGIN = "https://$QUARK_H5_LOGIN_HOST"
 private const val QUARK_H5_LOGIN_URL =
-    "https://uop.quark.cn/cas/custom/login?custom_login_type=mobile&client_id=503&display=mobile"
+    "$QUARK_H5_LOGIN_ORIGIN/cas/custom/login?custom_login_type=mobile&client_id=503&display=mobile"
 
 /** 官方 web 的 doAuth 兑换：GET /account/info?st= 由 pan 后端校验票据并写 .quark.cn 会话 Cookie。 */
 private const val QUARK_ST_EXCHANGE_PREFIX = "https://pan.quark.cn/account/info?st="
 
-/** H5 登录桥的名字（页面侧通过 window.__bd_android 访问）。 */
 private const val BRIDGE_NAME = "__bd_android"
+private val SERVICE_TICKET = Regex("^[0-9a-zA-Z]{32}$")
 
 /** 捕获 H5 登录页 pm 模式的 postMessage；service_ticket 是 32 位原始字符串，与官方父窗口同判据。 */
 private val H5_ST_HOOK = """
     (() => {
-        if (window.__bd_st_hook) return 'already';
+        if (location.origin !== '$QUARK_H5_LOGIN_ORIGIN' ||
+            window !== window.top || window.__bd_st_hook) return;
         window.__bd_st_hook = true;
         window.addEventListener('message', function (e) {
-            try {
-                if (typeof e.data === 'string' && e.data.length === 32 &&
-                    window.__bd_android && window.__bd_android.onServiceTicket) {
-                    window.__bd_android.onServiceTicket(e.data);
-                }
-            } catch (_) {}
+            if (e.origin === '$QUARK_H5_LOGIN_ORIGIN' && e.source === window &&
+                typeof e.data === 'string' && /^[0-9a-zA-Z]{32}$/.test(e.data)) {
+                window.$BRIDGE_NAME?.postMessage(e.data);
+            }
         });
-        return 'installed';
     })()
 """.trimIndent()
+
+private fun isQuarkH5LoginOrigin(uri: Uri?): Boolean =
+    isQuarkH5LoginOrigin(uri?.scheme, uri?.encodedAuthority)
 
 class QuarkDriveActivity : AppCompatActivity() {
     companion object {
@@ -461,34 +465,33 @@ class QuarkDriveActivity : AppCompatActivity() {
         web.settings.userAgentString = desktopUa
         var h5Mode = false
         var exchanged = false
-        val bridge = object : Any() {
-            /** H5 登录页 pm 模式 postMessage 的 service_ticket（32 位字符串）。 */
-            @JavascriptInterface
-            fun onServiceTicket(ticket: String) {
-                val st = ticket.trim()
-                if (!Regex("^[0-9a-zA-Z]{32}$").matches(st)) return
-                handler.post {
-                    if (!h5Mode || exchanged || loginDialog == null) return@post
-                    // 桥只挂在登录页上，登录链路还会经过微信 / 阿里验证码等域名。
-                    // 再校验一次当前页面域名，避免第三方页面伪造 ticket 把账号换成别人的。
-                    val host = web.url.orEmpty().toUri().host.orEmpty().lowercase()
-                    if (host != "quark.cn" && !host.endsWith(".quark.cn")) return@post
-                    exchanged = true
-                    message.text = "验证通过，正在换取登录会话…"
-                    message.visibility = View.VISIBLE
-                    // st 一次性短时效：立刻走官方 doAuth 同款兑换，Set-Cookie 落 .quark.cn。
-                    web.loadUrl(QUARK_ST_EXCHANGE_PREFIX + st)
-                }
+        val supportsH5 = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+        val bridge = WebViewCompat.WebMessageListener { view, webMessage, sourceOrigin, isMainFrame, _ ->
+            if (!isMainFrame || !isQuarkH5LoginOrigin(sourceOrigin) ||
+                !h5Mode || exchanged || loginDialog?.isShowing != true || !isQuarkH5LoginOrigin(view.url?.toUri())
+            ) return@WebMessageListener
+            if (webMessage.type != WebMessageCompat.TYPE_STRING) return@WebMessageListener
+            val ticket = webMessage.data ?: return@WebMessageListener
+            if (!SERVICE_TICKET.matches(ticket)) return@WebMessageListener
+            exchanged = true
+            message.text = "验证通过，正在换取登录会话…"
+            message.visibility = View.VISIBLE
+            view.loadUrl(QUARK_ST_EXCHANGE_PREFIX + ticket)
+        }
+        var bridgeAttached = false
+        fun attachBridge() {
+            if (bridgeAttached) return
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                WebViewCompat.addWebMessageListener(web, BRIDGE_NAME, setOf(QUARK_H5_LOGIN_ORIGIN), bridge)
+                bridgeAttached = true
             }
         }
-        // 桥只在 H5 登录期间挂载。登录链路会跨到微信 / UC / 阿里验证码等域名，
-        // 全局挂载等于把「用任意 ticket 换会话」的能力交给这些页面（登录 CSRF）。
-        fun attachBridge() {
-            web.removeJavascriptInterface(BRIDGE_NAME)
-            web.addJavascriptInterface(bridge, BRIDGE_NAME)
-        }
         fun detachBridge() {
-            web.removeJavascriptInterface(BRIDGE_NAME)
+            if (!bridgeAttached) return
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                WebViewCompat.removeWebMessageListener(web, BRIDGE_NAME)
+            }
+            bridgeAttached = false
         }
         var attempt = 0
         var loading = false
@@ -531,9 +534,6 @@ class QuarkDriveActivity : AppCompatActivity() {
             h5Mode = true
             exchanged = false
             web.settings.userAgentString = mobileUa
-            // 现在默认页就是 H5，桥的挂载窗口比原先（用户主动点按钮才挂）更长。
-            // 但 onServiceTicket 的 h5Mode + exchanged + 弹窗存活 + 当前域名 quark.cn 系
-            // 四重校验仍有效；切「完整网页」走 openHome() 会 detachBridge()。
             attachBridge()
             startLoading()
             message.text = if (loginOnly) "输入手机号并填写短信验证码，成功后自动返回。"
@@ -611,8 +611,9 @@ class QuarkDriveActivity : AppCompatActivity() {
                         pollLoginState(attempt, 24)
                         return
                     }
-                    // 每次页面加载完都补挂监听（pm 模式顶层窗口消息发给自己）。
-                    view.evaluateJavascript(H5_ST_HOOK, null)
+                    if (url == view.url && isQuarkH5LoginOrigin(url.toUri())) {
+                        view.evaluateJavascript(H5_ST_HOOK, null)
+                    }
                 }
                 if (!loading || url != view.url) return
                 val current = attempt
@@ -646,10 +647,9 @@ class QuarkDriveActivity : AppCompatActivity() {
             val height = (resources.configuration.screenHeightDp * 0.65f).toInt().coerceIn(160, 520)
             addView(message)
             addView(retry)
-            // 默认已进 H5；这个按钮用于从「完整网页」切回，或 H5 页卡住时重载登录页。
-            addView(button("返回短信登录") { startH5Login() }.apply {
-                textSize = 12f
-            })
+            if (supportsH5) {
+                addView(button("返回短信登录") { startH5Login() }.apply { textSize = 12f })
+            }
             addView(web, LinearLayout.LayoutParams(-1, dp(height)))
         }
         val dialog = AlertDialog.Builder(this).setTitle("夸克网盘账号")
@@ -661,6 +661,8 @@ class QuarkDriveActivity : AppCompatActivity() {
         dialog.setOnDismissListener {
             loading = false
             handler.removeCallbacksAndMessages(null)
+            detachBridge()
+            CookieManager.getInstance().setAcceptThirdPartyCookies(web, false)
             container.removeView(web)
             web.destroy()
             loginDialog = null
@@ -711,9 +713,7 @@ class QuarkDriveActivity : AppCompatActivity() {
             toggleView.text = if (focusLogin) "完整网页" else "只看登录"
             openHome()
         }
-        // 进弹窗直接落在 H5 短信登录页，省掉一次点击。「完整网页」/「重试」仍走 openHome()
-        // 并 detachBridge()；想从 PC 页切回 H5，点上面的「返回短信登录」。
-        startH5Login()
+        if (supportsH5) startH5Login() else openHome()
     }
 
     /** 风控滑块 / 短信验证码在 WebView 里不稳定时，可直接粘贴桌面浏览器的登录 Cookie。 */

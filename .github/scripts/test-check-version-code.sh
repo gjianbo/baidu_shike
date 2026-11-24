@@ -95,6 +95,10 @@ expect_pass "本地重打同版本" --version-name 1.0.1
 # 核心风险：换了版本名却没涨 code（本地 -P 覆盖 / CI 打新 tag）。
 expect_fail "本地 --version 换名但 code 未涨" --match "versionName 从" --version-name 1.0.2
 expect_fail "CI 发布新 tag 但 code 未涨" --match "严格递增" --release-tag v1.0.2
+write_gradle 24 1.0.2; commit_tag "tagged without bump" v1.0.2
+expect_fail "已有 tag 的首次发布也要求递增" --match "严格递增" --release-tag v1.0.2
+git tag -d v1.0.2 >/dev/null
+git checkout --quiet --detach refs/tags/v1.0.1
 
 write_gradle 23 1.0.1
 expect_fail "versionCode 回退到 23" --match "回退"
@@ -103,12 +107,26 @@ expect_fail "versionCode 不是数字" --match "合法的 versionCode"
 write_gradle 24 1.0.1
 
 expect_pass "重发已有 tag" --release-tag v1.0.1 --rebuild
+expect_fail "拒绝覆盖 tag 自带的版本名" --match "必须使用 build.gradle" --release-tag v1.0.1 --rebuild --version-name 1.0.1
+printf '工作区新增源码\n' > app/untracked.kt
+expect_fail "拒绝含未跟踪源码的 tag 检出" --match "干净的 tag" --release-tag v1.0.1 --rebuild
+rm app/untracked.kt
+printf '// dirty\n' >> app/build.gradle
+expect_fail "拒绝未提交的源码变更" --match "干净的 tag" --release-tag v1.0.1 --rebuild
+git restore app/build.gradle
+git commit --allow-empty -qm "different commit with same version"
+expect_fail "拒绝版本号相同但提交不同的源码" --match "提交不同" --release-tag v1.0.1 --rebuild
+git tag v1.0.9
+expect_fail "拒绝版本名和 tag 不一致的重建" --match "不一致" --release-tag v1.0.9 --rebuild
+git tag -d v1.0.9 >/dev/null
 write_gradle 25 1.0.1
 expect_fail "重发已有 tag 却改了 code" --match "必须保持" --release-tag v1.0.1 --rebuild
 
 # 正常递增：打完 tag 后基线会推进到 25。
 write_gradle 25 1.0.2; commit_tag "release 1.0.2" v1.0.2
 expect_pass "新 tag 且 code 递增" --release-tag v1.0.2
+git commit --allow-empty -qm "different commit for first publish"
+expect_fail "首次发版也必须从 tag 对应提交构建" --match "提交不同" --release-tag v1.0.2
 expect_pass "递增后的日常构建"
 expect_fail "再发 v1.0.3 但 code 仍是 25" --match "严格递增" --release-tag v1.0.3
 

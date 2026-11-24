@@ -57,7 +57,7 @@ internal fun MainActivity.advanceAudioIfEnded(player: Player) {
     advanceAfterEnd(
         ended,
         isCurrent = {
-            pendingAudioEntry == null && videoLoading == null && videoPage == null &&
+            pendingAudioRequest == null && videoLoading == null && videoPage == null &&
                 player.playbackState == Player.STATE_ENDED && player.playWhenReady &&
                 player.currentMediaItem == mediaItem && ownsAudio(player)
         },
@@ -89,7 +89,7 @@ internal fun MainActivity.refreshHistoryIfPending() {
 
 internal fun MainActivity.syncAudioAnchor(player: Player) {
     val active = currentAudioEntry(player) ?: return
-    if (pendingAudioEntry?.let { !sameEntry(it, active) } == true) return
+    if (pendingAudioRequest?.entry?.let { !sameEntry(it, active) } == true) return
     if (pendingQueue?.let { sameEntry(it.entry, active) } == true ||
         PlaybackQueueState.entries.any { sameEntry(it, active) }
     ) confirmPlayback(active)
@@ -118,6 +118,10 @@ internal fun MainActivity.ownsAudio(player: Player): Boolean {
 
 
 internal fun MainActivity.updateNowPlaying() {
+    if (audioPlayToken?.let(AudioPlayRequestGate::isCurrent) == false) {
+        pendingQueue = null
+        cancelPendingAudioRequest()
+    }
     val active = controller
     if (active == null || !ownsAudio(active)) {
         nowPlaying.visibility = View.GONE
@@ -172,10 +176,37 @@ internal fun MainActivity.resolveAudio(
     route: PlaybackRoute = PlaybackRoute.AUDIO,
     openPlayer: Boolean = true,
 ) {
-    if (!hasActiveSession(entry.provider)) {
+    val pending = pendingAudioRequest
+    val hasSession = hasActiveSession(entry.provider)
+    if (pending != null && pending.route == route && sameEntry(pending.entry, entry) &&
+        (pending.cachedHome?.isCurrent(AccountScope.current, gid, audioPlayToken)
+            ?: (hasSession && audioPlayToken?.let(AudioPlayRequestGate::isCurrent) == true))
+    ) {
+        if (openPlayer) pending.openPlayer = true
+        return
+    }
+    val waitingForAccount = !hasSession && (checkingAccount || !ready)
+    val waitingForController = hasSession && controller?.isConnected != true
+    val account = AccountScope.current
+    if ((waitingForAccount || waitingForController) && openPlayer &&
+        route == PlaybackRoute.AUDIO && entry.provider == SourceProvider.BAIDU &&
+        account.isNotEmpty() && isHomeRoot() && homeDisplayedEntries.any { sameEntry(it, entry) }
+    ) {
+        val cachedHome = CachedHomeAudio(account, gid)
+        beginAudioRequest(PendingAudioRequest(entry, route, openPlayer, cachedHome))
+        updateAudioRequestMessage(if (waitingForAccount) "正在确认网盘账号…" else "正在连接播放器…")
+        continueCachedHomeAudio()
+        return
+    }
+    if (!hasSession) {
         status.text = "请确认网盘登录后重试。"
         return
     }
+    resolveReadyAudio(entry, route, openPlayer)
+}
+
+
+private fun MainActivity.resolveReadyAudio(entry: PanEntry, route: PlaybackRoute, openPlayer: Boolean) {
     if (route == PlaybackRoute.AUDIO) {
         controller?.let { player ->
             val recordingId = player.currentMediaItem?.mediaMetadata?.extras
@@ -193,51 +224,78 @@ internal fun MainActivity.resolveAudio(
             }
         }
     }
+    val token = beginAudioRequest(PendingAudioRequest(entry, route, openPlayer))
+    val id = audioRequestId
+    updateAudioRequestMessage("正在打开 ${entry.name}…")
     if (entry.provider == SourceProvider.QUARK) {
-        resolveQuarkAudio(entry, openPlayer)
+        resolveQuarkAudio(entry, id, token)
         return
     }
     if (entry.isDisk) {
-        resolveDiskAudio(entry, openPlayer)
+        resolveDiskAudio(entry, id, token)
         return
     }
-    pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, entry) }
-    dispatchedAudioEntry = null
-    val id = ++audioRequestId
-    val token = AudioPlayRequestGate.begin()
-    audioPlayToken = token
-    pendingAudioEntry = entry
-    audioResolver.cancel()
-    mediaLinks.dismissCaptcha(RequestLane.AUDIO)
-    updateAudioRequestMessage("正在打开 ${entry.name}…")
     val key = mediaCacheKey(verifiedAccount, entry)
     if (route == PlaybackRoute.AUDIO) {
         val playlist = PanApi.audioPlaylist(entry)
         mediaAddresses.playlist(key, playlist)?.let { stream ->
-            startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+            startBackgroundAudio(entry, stream.uri, stream.playlist)
             return
         }
-    }
-    if (route == PlaybackRoute.AUDIO) {
-        audioResolver.start(PanApi.audioPlaylist(entry), web.settings.userAgentString) { result ->
+        audioResolver.start(playlist, web.settings.userAgentString) { result ->
             if (id != audioRequestId || isDestroyed) return@start
             if (!AudioPlayRequestGate.isCurrent(token)) {
                 cancelPendingAudioRequest()
                 return@start
             }
             val stream = result.getOrNull()
-            if (stream == null) resolveAudioFile(entry, route, openPlayer, id, token)
-            else {
+            if (stream == null) {
+                updateAudioRequestMessage("正在打开原始音频…")
+                resolveAudioFile(entry, route, id, token)
+            } else {
                 mediaAddresses.savePlaylist(key, stream)
-                startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+                startBackgroundAudio(entry, stream.uri, stream.playlist)
             }
         }
     } else {
         mediaAddresses.link(key)?.let { uri ->
-            openAudioLink(entry, uri, route, openPlayer, null)
+            openAudioLink(entry, uri, route)
             return
         }
-        resolveAudioFile(entry, route, openPlayer, id, token)
+        resolveAudioFile(entry, route, id, token)
+    }
+}
+
+
+private fun MainActivity.beginAudioRequest(request: PendingAudioRequest): Long {
+    pendingQueue = pendingQueue?.takeIf { sameEntry(it.entry, request.entry) }
+    dispatchedAudioEntry = null
+    pendingAudioPage = null
+    audioRequestId++
+    val token = AudioPlayRequestGate.begin()
+    audioPlayToken = token
+    pendingAudioRequest = request
+    audioResolver.cancel()
+    mediaLinks.dismissCaptcha(RequestLane.AUDIO)
+    return token
+}
+
+
+internal fun MainActivity.continueCachedHomeAudio() {
+    val request = pendingAudioRequest ?: return
+    val cachedHome = request.cachedHome ?: return
+    if (!isHomeRoot() || !cachedHome.isCurrent(AccountScope.current, gid, audioPlayToken)) {
+        pendingQueue = null
+        cancelPendingAudioRequest()
+        return
+    }
+    if (!activityVisible || native.visibility != View.VISIBLE || !hasActiveSession(request.entry.provider)) return
+    if (controller?.isConnected == true) {
+        resolveReadyAudio(request.entry, request.route, request.openPlayer)
+    } else if (controllerFuture?.let {
+        it.isDone && !runCatching { it.get().isConnected }.getOrDefault(false)
+    } == true) {
+        failAudioRequest("后台播放器尚未就绪，请稍后重试。")
     }
 }
 
@@ -258,41 +316,27 @@ internal fun MainActivity.resolveQuarkPlayback(entry: PanEntry, onResult: (Resul
 }
 
 
-internal fun MainActivity.resolveQuarkAudio(entry: PanEntry, openPlayer: Boolean) {
-    cancelPendingAudioRequest()
-    val id = audioRequestId
-    val token = AudioPlayRequestGate.begin()
-    audioPlayToken = token
-    pendingAudioEntry = entry
-    updateAudioRequestMessage("正在打开 ${entry.name}…")
+private fun MainActivity.resolveQuarkAudio(entry: PanEntry, id: Int, token: Long) {
     resolveQuarkPlayback(entry) { result ->
         if (id != audioRequestId) return@resolveQuarkPlayback
         if (!AudioPlayRequestGate.isCurrent(token)) {
             cancelPendingAudioRequest()
             return@resolveQuarkPlayback
         }
-        result.onSuccess { startBackgroundAudio(entry, it.uri, openPlayer) }
+        result.onSuccess { startBackgroundAudio(entry, it.uri) }
             .onFailure { failAudioRequest(it.message ?: "无法获取夸克音频播放地址") }
     }
 }
 
 
-internal fun MainActivity.resolveDiskAudio(entry: PanEntry, openPlayer: Boolean) {
-    val id = ++audioRequestId
-    val token = AudioPlayRequestGate.begin()
-    audioPlayToken = token
-    pendingAudioEntry = entry
-    dispatchedAudioEntry = null
-    audioResolver.cancel()
-    mediaLinks.dismissCaptcha(RequestLane.AUDIO)
-    updateAudioRequestMessage("正在打开 ${entry.name}…")
+private fun MainActivity.resolveDiskAudio(entry: PanEntry, id: Int, token: Long) {
     val account = verifiedAccount
     val key = mediaCacheKey(account, entry)
     fun isCurrentPlayback() = !isDestroyed && verifiedAccount == account &&
         audioPlayToken == token && AudioPlayRequestGate.isCurrent(token)
     fun playStream(stream: VideoStream) {
         mediaAddresses.savePlaylist(key, stream)
-        startBackgroundAudio(entry, stream.uri, openPlayer, stream.playlist)
+        startBackgroundAudio(entry, stream.uri, stream.playlist)
     }
     ensureBdstoken(
         onReady = { bd ->
@@ -326,7 +370,7 @@ internal fun MainActivity.resolveDiskAudio(entry: PanEntry, openPlayer: Boolean)
                                 mediaLinks.requestDiskLink(
                                     entry, bd, RequestLane.AUDIO, ::isCurrentPlayback,
                                     onFailure = { failAudioRequest("无法打开原始音频，请稍后重试。") },
-                                ) { link -> startBackgroundAudio(entry, link, openPlayer) }
+                                ) { link -> startBackgroundAudio(entry, link) }
                             }
                             else -> failAudioRequest(
                                 (error as? IllegalStateException)?.message ?: "获取网盘音频失败，请重试。",
@@ -347,10 +391,9 @@ internal fun MainActivity.resolveDiskAudio(entry: PanEntry, openPlayer: Boolean)
 
 
 
-internal fun MainActivity.resolveAudioFile(
+private fun MainActivity.resolveAudioFile(
     entry: PanEntry,
     route: PlaybackRoute,
-    openPlayer: Boolean,
     id: Int,
     token: Long,
 ) {
@@ -362,56 +405,59 @@ internal fun MainActivity.resolveAudioFile(
             cancelPendingAudioRequest()
             return@evaluateJavascript
         }
+        if (!ready || !hasVerifiedAccount()) {
+            failAudioRequest("网盘页面尚未就绪，请登录后重试。")
+            return@evaluateJavascript
+        }
         val viewer = result?.let { runCatching { JSONTokener(it).nextValue() as? String }.getOrNull() }
         if (viewer != null && viewer.matches(Regex("[0-9]{1,24}"))) {
-            requestMediaLink(entry, viewer, route, openPlayer = openPlayer)
+            requestMediaLink(entry, viewer, route)
         } else {
             load(PanApi.viewer(), lane = RequestLane.AUDIO) { json ->
                 val uk = json.optJSONObject("result")?.optString("uk").orEmpty()
                 check(uk.matches(Regex("[0-9]{1,24}"))) { "无法识别当前网盘账号，请重新登录后重试。" }
-                requestMediaLink(entry, uk, route, openPlayer = openPlayer)
+                requestMediaLink(entry, uk, route)
             }
         }
     }
 }
 
 
-internal fun MainActivity.requestMediaLink(
+private fun MainActivity.requestMediaLink(
     entry: PanEntry,
     viewer: String,
     route: PlaybackRoute,
     webResumeSeconds: Int? = null,
-    openPlayer: Boolean = true,
     historyRecording: AudioHistory.Recording? = null,
 ) {
     if (viewer != verifiedAccount) {
+        failAudioRequest("网盘账号正在重新确认，请稍后重试。")
         verifyAndRefresh()
         return
     }
     if (route == PlaybackRoute.AUDIO) {
         mediaAddresses.link(mediaCacheKey(viewer, entry))?.let { uri ->
-            openAudioLink(entry, uri, route, openPlayer, webResumeSeconds, historyRecording)
+            openAudioLink(entry, uri, route, webResumeSeconds, historyRecording)
             return
         }
     }
     mediaLinks.resolve(entry, viewer, lane = RequestLane.AUDIO) { uri ->
-        openAudioLink(entry, uri, route, openPlayer, webResumeSeconds, historyRecording)
+        openAudioLink(entry, uri, route, webResumeSeconds, historyRecording)
     }
 }
 
 
-internal fun MainActivity.openAudioLink(
+private fun MainActivity.openAudioLink(
     entry: PanEntry,
     uri: Uri,
     route: PlaybackRoute,
-    openPlayer: Boolean,
-    webResumeSeconds: Int?,
+    webResumeSeconds: Int? = null,
     historyRecording: AudioHistory.Recording? = null,
 ) {
     when (route) {
-        PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri, openPlayer)
+        PlaybackRoute.AUDIO -> startBackgroundAudio(entry, uri)
         PlaybackRoute.WEB_AUDIO -> {
-            pendingAudioEntry = null
+            pendingAudioRequest = null
             audioPlayToken = null
             confirmPlayback(entry)
             updateAudioRequestMessage(null)
@@ -438,7 +484,8 @@ internal fun MainActivity.startPdfReader(entry: PanEntry, file: File) {
 
 
 
-internal fun MainActivity.startBackgroundAudio(entry: PanEntry, uri: Uri, openPlayer: Boolean, playlist: ByteArray? = null) {
+private fun MainActivity.startBackgroundAudio(entry: PanEntry, uri: Uri, playlist: ByteArray? = null) {
+    val request = pendingAudioRequest?.takeIf { sameEntry(it.entry, entry) } ?: return
     val player = controller
     if (player == null || !player.isConnected) {
         failAudioRequest("后台播放器尚未就绪，请稍后重试。")
@@ -474,11 +521,11 @@ internal fun MainActivity.startBackgroundAudio(entry: PanEntry, uri: Uri, openPl
             if (!AudioPlayRequestGate.isCurrent(token)) {
                 cancelPendingAudioRequest()
             } else if (runCatching { result.get().resultCode }.getOrNull() == SessionResult.RESULT_SUCCESS) {
-                pendingAudioEntry = null
+                pendingAudioRequest = null
                 audioPlayToken = null
                 confirmPlayback(entry)
                 updateAudioRequestMessage(null)
-                if (openPlayer) pendingAudioPage = id to entry
+                if (request.openPlayer) pendingAudioPage = id to entry
                 updateNowPlaying()
             } else {
                 failAudioRequest("后台播放器启动失败，请重试。")
@@ -624,22 +671,26 @@ internal fun MainActivity.cancelPendingAudioRequest() {
     audioRequestId++
     audioResolver.cancel()
     mediaLinks.dismissCaptcha(RequestLane.AUDIO)
-    pendingAudioEntry = null
+    pendingAudioRequest = null
     pendingAudioPage = null
     updateAudioRequestMessage(null)
 }
 
 
 internal fun MainActivity.failAudioRequest(message: String) {
+    val showFeedback = pendingAudioRequest?.openPlayer == true && activityVisible && audioPage == null
     pendingQueue = null
+    audioPlayToken?.let(AudioPlayRequestGate::cancel)
     audioPlayToken = null
-    pendingAudioEntry = null
+    dispatchedAudioEntry = null
+    pendingAudioRequest = null
     val active = controller?.let(::currentAudioEntry)
     if (active != null && PlaybackQueueState.entries.any { sameEntry(it, active) }) {
         PlaybackQueueState.anchor = active
         renderCourseSwitch()
     }
     updateAudioRequestMessage(message)
+    if (showFeedback) toast(message)
 }
 
 

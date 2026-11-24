@@ -16,6 +16,7 @@ import androidx.core.content.edit
  */
 
 internal fun MainActivity.refresh(force: Boolean = false, cachedFirst: Boolean = false) {
+    continueCachedHomeAudio()
     if (homeCheckInFlight &&
         (!isHomeRoot() || homeRefreshFeedback?.refreshing == true || isDirectorySource(gid))
     ) {
@@ -700,7 +701,7 @@ internal fun MainActivity.renderRootMore(key: String) {
 }
 
 
-internal fun MainActivity.invalidateAccount() {
+internal fun MainActivity.invalidateAccount(preserveCachedHomeAudio: Boolean = false) {
     homeRefreshFeedback?.clear()
     pdfPreviewRef?.close()
     documentPreviewRef?.close()
@@ -715,7 +716,9 @@ internal fun MainActivity.invalidateAccount() {
     homeCheckInFlight = false
     lastHomeCheckAt = 0L
     renewingPlaybackId = null
-    cancelPendingAudioRequest()
+    if (!preserveCachedHomeAudio || pendingAudioRequest?.cachedHome == null) {
+        cancelPendingAudioRequest()
+    }
     requestId++
     checkingAccount = false
     verifiedAccount = ""
@@ -737,11 +740,14 @@ internal fun MainActivity.invalidateAccount() {
 
 
 internal fun MainActivity.verifyAndRefresh(force: Boolean = false) {
-    invalidateAccount()
+    invalidateAccount(preserveCachedHomeAudio = true)
     checkingAccount = true
     if (native.isVisible) refresh()
     probeAccount { changed, confirmed ->
         checkingAccount = false
+        if (!confirmed && pendingAudioRequest?.cachedHome != null) {
+            failAudioRequest("无法确认网盘账号，请登录后重试。")
+        }
         if (loginPending && confirmed) {
             loginPending = false
             if (pickingSource) openContacts() else showApp()

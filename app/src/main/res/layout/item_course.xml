@@ -26,12 +26,43 @@
             android:importantForAccessibility="no"
             android:visibility="gone" />
 
-        <ImageView
-            android:id="@+id/fmt"
+        <FrameLayout
             android:layout_width="@dimen/fmt_size"
-            android:layout_height="@dimen/fmt_size"
-            android:importantForAccessibility="no"
-            android:padding="12dp" />
+            android:layout_height="@dimen/fmt_size">
+
+            <ImageView
+                android:id="@+id/fmt"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:importantForAccessibility="no"
+                android:padding="12dp" />
+
+            <LinearLayout
+                android:id="@+id/itemAudioLoading"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <ProgressBar
+                    style="?android:attr/progressBarStyleSmall"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:importantForAccessibility="no"
+                    android:indeterminateTint="@color/accentInk" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:accessibilityLiveRegion="polite"
+                    android:gravity="center"
+                    android:maxLines="1"
+                    android:text="@string/audio_preparing"
+                    android:textColor="@color/accentInk"
+                    android:textSize="11sp" />
+            </LinearLayout>
+        </FrameLayout>
 
         <LinearLayout
             android:layout_width="0dp"

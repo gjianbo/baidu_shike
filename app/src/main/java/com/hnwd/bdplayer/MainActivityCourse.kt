@@ -387,6 +387,7 @@ private fun MainActivity.courseRow(
     row.tag = entryKey(entry)
     val fmt = row.findViewById<ImageView>(R.id.fmt)
     paintMediaIcon(fmt, kind, entry.directory)
+    if (pendingAudioRequest?.entry?.let(::entryKey) == row.tag) row.paintAudioLoading(true)
     if (screen == Screen.HOME && folders.isEmpty() && !showingHomeDirectory &&
         entry.provider == SourceProvider.BAIDU && !entry.isDisk && !entry.isContact &&
         hasVerifiedAccount() && (kind == MediaKind.IMAGE || kind == MediaKind.VIDEO)
@@ -448,6 +449,12 @@ private fun MainActivity.courseRow(
         }
     }
     return row
+}
+
+
+internal fun View.paintAudioLoading(loading: Boolean) {
+    findViewById<View>(R.id.fmt).visibility = if (loading) View.INVISIBLE else View.VISIBLE
+    findViewById<View>(R.id.itemAudioLoading).visibility = if (loading) View.VISIBLE else View.GONE
 }
 
 

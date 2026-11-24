@@ -247,10 +247,10 @@ internal object DownloadLinkResolver {
             val request = PanApi.deleteItems(token, listOf(target))
             json(request.url, ua, cookie, request.form.ifBlank { null })
             if (stagingEntries(token, ua, cookie)?.any { it.fileId == target.fileId } == true) {
-                android.util.Log.w(LOG_TAG, "transferred copy still present after delete: ${target.path}")
+                android.util.Log.w(LOG_TAG, "transferred copy still present after delete")
             }
         }.onFailure {
-            android.util.Log.w(LOG_TAG, "discard transferred copy failed", it)
+            android.util.Log.w(LOG_TAG, "discard transferred copy failed (${it.javaClass.simpleName})")
         }
     }
 

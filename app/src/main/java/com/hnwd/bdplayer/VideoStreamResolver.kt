@@ -115,6 +115,15 @@ internal fun withAdToken(url: String, token: String): String {
     return "$base?$rebuilt"
 }
 
+/** 群组音频清单的重试地址可以附带广告校验 token，其余部分须和原始地址一致。 */
+internal fun matchesGroupAudioPlaylistUrl(url: String, expected: String): Boolean {
+    if (url == expected) return true
+    val prefix = "$expected&adToken="
+    if (!url.startsWith(prefix)) return false
+    val token = url.substring(prefix.length)
+    return token.isNotEmpty() && token.none { it == '&' || it == '#' }
+}
+
 /**
  * 由「播放」取址 URL 推导网页版那条 `&nom3u8=1` 的**预检** URL：
  * 档位改 M3U8_FLV_264_480、加 nom3u8=1、去掉 isplayer/check_blue/adToken。

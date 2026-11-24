@@ -30,27 +30,43 @@ Debug 和 Release 的签名不同。切换版本时，先备份并确认文件�
 
 ## 开发与测试
 
+`JDK 17`、`Gradle 8.14.3` 和 Android SDK 36.1 与 CI 的配置一致。Android SDK 36.1 提供 Extension 20，满足 PDF 依赖的编译要求。
+
 ```
+sdkmanager --channel=3 "platforms;android-36.1" "build-tools;35.0.0"
 gradle :app:assembleDebug          # 打包
 gradle :app:testDebugUnitTest      # 单元测试（首次需要联网拉 junit / org.json）
 ```
+
+PR 和推送到 `main` 会运行发布脚本回归、夸克登录消息回归、Android 单测与 lint，无需正式包签名凭据。仓库如使用 PR 合并，可把 `Android checks and build` 设为必需检查。
 
 单测只覆盖不碰 Android 框架的纯逻辑：条目的编解码与排序、网盘响应解析、备份文件校验。
 以 `android.net.Uri` 为出入参的解析（媒体取址、验证码、文档直链）需要 Robolectric
 或设备上的 instrumented test，目前没有覆盖，改动这部分要真机验证。
 
-### 版本号门禁
+### 正式包与版本号门禁
 
-`app/build.gradle` 的 `versionCode` 每次发版都必须严格递增。CI（推送 `main` 或 `v*` tag）
-和本地 `build-release.sh` 在构建前都会执行 `.github/scripts/check-version-code.sh`，
-它以已发布的 `v*` tag 里的 `versionCode` 为基线检查：版本回退、或改了 `versionName`
-却没涨 `versionCode` 都会直接失败。`workflow_dispatch` 重发已有 tag 时改为校验
-`versionCode` 与该 tag 一致。手动执行：
+`app/build.gradle` 的 `versionCode` 在发布新 tag 时必须严格递增，tag 必须为 `v<versionName>`。正式 APK 只从对应 tag 的提交构建。推送新 tag 会先运行单测、lint 和版本门禁，再签名发布。发布任务在创建 Release 或补传 APK 前核对远端 tag 是否仍指向构建时记录的 Git 对象。
+
+在 Actions 手动指定已有 tag 会重建并保留 APK 构建产物。该 tag 没有 Release 时，按新版本门禁检查，通过后创建 Release。已有 Release 缺少 APK 时会尝试补传，已上传的同名 APK 会保留。
+尚无 Release 的旧 tag 会在历史已有相同或更高 `versionCode` 时被拒绝。
+
+本地打包用 `bash build-release.sh --tag vX.Y.Z`，也兼容 `--version X.Y.Z`。已发布版本可用 `bash build-release.sh --rebuild --tag vX.Y.Z` 按原版本号重建。脚本会在临时检出中构建，APK 输出到 `build/releases/`。本地 SDK 和签名文件应使用绝对路径。重建声明 API 37 的历史 tag 时还需安装 `platforms;android-37.0`。不带参数时要求当前提交恰好有发布 tag。
+
+本地发版从调用目录的 `HEAD` 读取已提交的版本门禁，CI 从运行工作流的提交读取门禁。重建历史 tag 时，APK 源码仍取自该 tag。
+
+历史 tag `v0.1.24`、`v1.0.1` 和 `v1.2.4` 的源码版本名分别是 `0.1.23`、`0.1.23` 和 `1.2.3`，本地和 Actions 的重建门禁都会拒绝这三个 tag。需要这些历史版本时，可使用原 Release 中仍可用的 APK。
+
+建议为 GitHub 的 `v*` tag 配置 ruleset，限制更新和删除，防止远端 tag 在校验与附件写入之间被移动。
 
 ```
-bash .github/scripts/check-version-code.sh           # 校验当前工作区
-bash .github/scripts/check-version-code.sh --release-tag v1.0.2   # 模拟发新 tag
-bash .github/scripts/test-check-version-code.sh     # 门禁自身的场景自测
+bash .github/scripts/check-version-code.sh        # 校验当前版本号
+bash .github/scripts/test-check-version-code.sh   # 门禁自身的场景自测
+bash .github/scripts/test-publish-android-release.sh
+node --test .github/scripts/test-quark-login-hook.mjs
+actionlint .github/workflows/android-release.yml
 ```
+
+发布脚本测试使用 `jq` 和模拟的 GitHub CLI。登录消息测试使用 Node.js 24。已安装 Go 时，可以用 `go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 .github/workflows/android-release.yml` 运行同版本的工作流静态检查。
 
 脚本依赖完整的 tag 历史，CI 的 `actions/checkout` 因此使用 `fetch-depth: 0`。
