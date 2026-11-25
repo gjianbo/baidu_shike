@@ -80,21 +80,26 @@ internal object UploadCenter {
         }
         val now = System.currentTimeMillis()
         liveIds = liveIds + tasks.map { it.id }
+        try {
+            UploadStore.begin(app, tasks.map { task ->
+                UploadRecord(
+                    id = task.id,
+                    name = sourceName(task.source),
+                    dir = dir,
+                    sizeBytes = -1,
+                    createdAt = now,
+                    source = UploadRecordLogic.sourceLabel(provider),
+                    sourceUri = retainSource(app, task.source),
+                    folderId = folderId,
+                    provider = provider,
+                    accountId = accountId,
+                )
+            })
+        } catch (error: Exception) {
+            liveIds = liveIds - tasks.map { it.id }.toSet()
+            throw error
+        }
         queue.addAll(tasks)
-        UploadStore.begin(app, tasks.map { task ->
-            UploadRecord(
-                id = task.id,
-                name = sourceName(task.source),
-                dir = dir,
-                sizeBytes = -1,
-                createdAt = now,
-                source = UploadRecordLogic.sourceLabel(provider),
-                sourceUri = retainSource(app, task.source),
-                folderId = folderId,
-                provider = provider,
-                accountId = accountId,
-            )
-        })
         queued(app, tasks.size)
     }
 
@@ -119,7 +124,7 @@ internal object UploadCenter {
         val batch = if (state.running) state else State(running = true)
         publish(batch.copy(total = batch.total + count, queued = queue.size))
         // 已在运行的服务可立即补位。新服务从 onStartCommand 启动队列。
-        if (serviceReady) pump(app)
+        if (serviceReady) main.post { pump(app) }
     }
 
     fun onServiceReady(context: Context) {

@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_card"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/setCollectorProviderRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <ImageView
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_empty_icon"
+            android:padding="10dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_cloud" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="13dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/SettingTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="默认上传网盘" />
+
+            <TextView
+                style="@style/SettingSub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="分享下载的视频存到哪个网盘" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/setCollectorProviderValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="@color/ink3"
+            android:textSize="11.5sp" />
+
+        <ImageView
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_marginStart="6dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_chevron_right" />
+    </LinearLayout>
+
+    <View
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginLeft="69dp"
+        android:background="@color/line" />
+
+    <LinearLayout
+        android:id="@+id/setCollectorRootRow"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/selectableItemBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <ImageView
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/bg_empty_icon"
+            android:padding="10dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_folder_add" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="13dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                style="@style/SettingTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="默认上传根目录" />
+
+            <TextView
+                style="@style/SettingSub"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="3dp"
+                android:text="收集时还可临时选子目录或新建" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/setCollectorRootValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:maxWidth="112dp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:textColor="@color/ink3"
+            android:textSize="11.5sp" />
+
+        <ImageView
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_marginStart="6dp"
+            android:importantForAccessibility="no"
+            android:src="@drawable/ic_chevron_right" />
+    </LinearLayout>
+</LinearLayout>

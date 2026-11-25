@@ -5,4 +5,6 @@
     <cache-path name="image_cache" path="images/" />
     <!-- 自更新下载的 APK，装完可随时被系统清理缓存回收。 -->
     <cache-path name="update_apk" path="update/" />
+    <!-- 视频收集：yt-dlp 产物落在 cacheDir/collector 下，经 FileProvider 交给上传队列。 -->
+    <cache-path name="collector_cache" path="collector/" />
 </paths>

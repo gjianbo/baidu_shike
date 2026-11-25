@@ -90,6 +90,7 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
         page.findViewById<View>(R.id.setUpdateRow).setOnClickListener { host.checkAppUpdate() }
+        host.bindCollectorRows(page)
         page.findViewById<TextView>(R.id.setAbout).text = aboutLine()
         host.addPage(page)
         bindPreviewCache(page)

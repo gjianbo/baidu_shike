@@ -1653,6 +1653,13 @@ class MainActivity : AppCompatActivity() {
         startActivity(Intent(this, DownloadActivity::class.java).putExtra(DownloadActivity.EXTRA_SHOW_UPLOADS, showUploads))
     }
 
+    internal fun openCollectorDownloads() {
+        startActivity(
+            Intent(this, DownloadActivity::class.java)
+                .putExtra(DownloadActivity.EXTRA_SHOW_COLLECTOR, true),
+        )
+    }
+
     internal fun chooseUploadFiles() {
         if (pendingUploadTarget != null) return
         val provider = diskProvider
@@ -1725,7 +1732,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun transferActiveCount(): Int =
-        DownloadCenter.activeCount(this) + UploadStore.activeCount(this)
+        DownloadCenter.activeCount(this) + UploadStore.activeCount(this) + CollectorTaskStore.activeCount(this)
 
     // ===================== SearchHost =====================
     // 搜索模块需要的最小宿主能力。与 MutationHost 同样用私有 inner class，

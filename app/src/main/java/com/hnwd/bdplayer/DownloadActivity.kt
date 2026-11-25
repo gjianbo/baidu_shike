@@ -45,6 +45,7 @@ class DownloadActivity : AppCompatActivity() {
     private lateinit var storageHint: TextView
     private lateinit var tabDownloads: TextView
     private lateinit var tabUploads: TextView
+    private lateinit var tabCollector: TextView
     private lateinit var historyFilterButton: TextView
     private lateinit var btnSelect: TextView
     private lateinit var btnClear: TextView
@@ -54,12 +55,22 @@ class DownloadActivity : AppCompatActivity() {
     private lateinit var selectionBar: FileSelectionBar
 
     private var showingUploads = false
+    private var showingCollector = false
     private var downloadFilter = HistoryFilter.ALL
     private var uploadFilter = HistoryFilter.ALL
+    private var collectorFilter = HistoryFilter.ALL
     private var historyFilter: HistoryFilter
-        get() = if (showingUploads) uploadFilter else downloadFilter
+        get() = when {
+            showingCollector -> collectorFilter
+            showingUploads -> uploadFilter
+            else -> downloadFilter
+        }
         set(value) {
-            if (showingUploads) uploadFilter = value else downloadFilter = value
+            when {
+                showingCollector -> collectorFilter = value
+                showingUploads -> uploadFilter = value
+                else -> downloadFilter = value
+            }
         }
     private var historyCounts = TransferFilter.Counts(0, 0, 0)
     /** 多选态：只对当前页签的历史记录生效，选中集合按记录 id 记（每次渲染都会重建视图）。 */
@@ -70,26 +81,31 @@ class DownloadActivity : AppCompatActivity() {
     private val selectableRows = mutableMapOf<HistoryKey, Pair<LinearLayout, ImageView>>()
     private var tasks: List<DownloadTask> = emptyList()
     private var uploads: List<UploadRecord> = emptyList()
+    private var collectorTasks: List<CollectorTask> = emptyList()
     private var speeds: Map<Long, Double> = emptyMap()
     private var lastBytes: Map<Long, Long> = emptyMap()
     private var lastSampleAt = 0L
     private data class HistoryViewState(
         val showingUploads: Boolean,
+        val showingCollector: Boolean,
         val filter: HistoryFilter,
         val selecting: Boolean,
         val downloads: List<DownloadTask>,
         val uploads: List<UploadRecord>,
+        val collectors: List<CollectorTask>,
     )
 
     private var lastHistoryState: HistoryViewState? = null
     private var lastActiveDownloads = emptyList<DownloadTask>()
     private var lastActiveUploads = emptyList<UploadRecord>()
+    private var lastActiveCollectors = emptyList<CollectorTask>()
 
     private val handler = Handler(Looper.getMainLooper())
     private val ticker = object : Runnable {
         override fun run() {
             tasks = DownloadCenter.refresh(this@DownloadActivity)
             uploads = UploadStore.records(this@DownloadActivity)
+            collectorTasks = CollectorTaskStore.records(this@DownloadActivity)
             sampleSpeeds()
             render()
             handler.postDelayed(this, 1_000)
@@ -116,6 +132,7 @@ class DownloadActivity : AppCompatActivity() {
         storageHint = findViewById(R.id.storageHint)
         tabDownloads = findViewById(R.id.tabDownloads)
         tabUploads = findViewById(R.id.tabUploads)
+        tabCollector = findViewById(R.id.tabCollector)
         historyFilterButton = findViewById(R.id.historyFilterButton)
         btnSelect = findViewById(R.id.btnSelect)
         btnClear = findViewById(R.id.btnClear)
@@ -130,8 +147,9 @@ class DownloadActivity : AppCompatActivity() {
         }
         btnClear.setOnClickListener { showClearMenu(it) }
         btnSelect.setOnClickListener { enterSelection() }
-        tabDownloads.setOnClickListener { switchTab(false) }
-        tabUploads.setOnClickListener { switchTab(true) }
+        tabDownloads.setOnClickListener { switchTab(TAB_DOWNLOADS) }
+        tabUploads.setOnClickListener { switchTab(TAB_UPLOADS) }
+        tabCollector.setOnClickListener { switchTab(TAB_COLLECTOR) }
         historyFilterButton.setOnClickListener { showHistoryFilter() }
         // 多选态下返回键先退出多选，而不是直接关掉传输中心。
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -149,8 +167,14 @@ class DownloadActivity : AppCompatActivity() {
         })
         showingUploads = savedInstanceState?.getBoolean(EXTRA_SHOW_UPLOADS)
             ?: intent.getBooleanExtra(EXTRA_SHOW_UPLOADS, false)
+        showingCollector = savedInstanceState?.getBoolean(EXTRA_SHOW_COLLECTOR)
+            ?: intent.getBooleanExtra(EXTRA_SHOW_COLLECTOR, false)
+        if (savedInstanceState == null && intent.getBooleanExtra(EXTRA_SHOW_COLLECTOR, false)) {
+            showingUploads = false
+        }
         downloadFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_DOWNLOAD_FILTER) ?: 0]
         uploadFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_UPLOAD_FILTER) ?: 0]
+        collectorFilter = HistoryFilter.entries[savedInstanceState?.getInt(STATE_COLLECTOR_FILTER) ?: 0]
         refreshNow()
     }
 
@@ -178,9 +202,9 @@ class DownloadActivity : AppCompatActivity() {
         val selectionHeader = findViewById<View>(R.id.fileSelectionBar)
         val selectionPad = if (wide) pagePad - dp(8) else dp(8)
         selectionHeader.setPaddingRelative(selectionPad, selectionHeader.paddingTop, selectionPad, selectionHeader.paddingBottom)
-        for (tab in listOf(tabDownloads, tabUploads)) {
+        for (tab in listOf(tabDownloads, tabUploads, tabCollector)) {
             tab.updateLayoutParams<LinearLayout.LayoutParams> {
-                width = if (wide) dp(112) else 0
+                width = if (wide) dp(104) else 0
                 weight = if (wide) 0f else 1f
             }
         }
@@ -189,8 +213,11 @@ class DownloadActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean(EXTRA_SHOW_UPLOADS, showingUploads)
+        outState.putBoolean(EXTRA_SHOW_COLLECTOR, showingCollector)
         outState.putInt(STATE_DOWNLOAD_FILTER, downloadFilter.ordinal)
         outState.putInt(STATE_UPLOAD_FILTER, uploadFilter.ordinal)
+        // 分享页签当前没有筛选，保留一个固定值，避免恢复时落到越界下标。
+        outState.putInt(STATE_COLLECTOR_FILTER, collectorFilter.ordinal)
         super.onSaveInstanceState(outState)
     }
 
@@ -214,6 +241,27 @@ class DownloadActivity : AppCompatActivity() {
     }
 
     private fun confirmClearHistory(failed: Boolean) {
+        if (showingCollector) {
+            val count = if (failed) historyCounts.failed else historyCounts.success
+            if (count == 0) return
+            val status = if (failed) "失败" else "已完成"
+            AlertDialog.Builder(this)
+                .setTitle("清理 $count 条${status}分享下载记录？")
+                .setMessage("只会移除传输中心里的分享任务记录，已下载/已上传的文件不受影响。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清理") { _, _ ->
+                    AppIo.execute {
+                        val removed = CollectorTaskStore.clearFinished(this, failed)
+                        runOnUiThread {
+                            if (isFinishing || isDestroyed) return@runOnUiThread
+                            refreshNow()
+                            toast("已清理 $removed 条分享下载记录")
+                        }
+                    }
+                }
+                .show()
+            return
+        }
         val uploadTab = showingUploads
         val direction = if (uploadTab) "上传" else "下载"
         val status = if (failed) "失败" else "已完成"
@@ -266,9 +314,15 @@ class DownloadActivity : AppCompatActivity() {
         super.onPause()
     }
 
-    private fun switchTab(uploadTab: Boolean) {
-        if (showingUploads == uploadTab) return
-        showingUploads = uploadTab
+    private fun switchTab(tab: Int) {
+        val nextUploads = tab == TAB_UPLOADS
+        val nextCollector = tab == TAB_COLLECTOR
+        if (showingUploads == nextUploads && showingCollector == nextCollector) return
+        showingUploads = nextUploads
+        showingCollector = nextCollector
+        selecting = false
+        selected.clear()
+        selectableRows.clear()
         render(force = true)
         findViewById<View>(R.id.downloadScroll).scrollTo(0, 0)
     }
@@ -354,6 +408,7 @@ class DownloadActivity : AppCompatActivity() {
     private fun refreshNow() {
         tasks = DownloadCenter.refresh(this)
         uploads = UploadStore.records(this)
+        collectorTasks = CollectorTaskStore.records(this)
         sampleSpeeds()
         render(force = true)
     }
@@ -373,44 +428,77 @@ class DownloadActivity : AppCompatActivity() {
     }
 
     private fun paintTabs() {
-        val downloadTab = !showingUploads
+        val downloadTab = !showingUploads && !showingCollector
+        val uploadTab = showingUploads
+        val collectorTab = showingCollector
         tabDownloads.isSelected = downloadTab
-        tabUploads.isSelected = showingUploads
+        tabUploads.isSelected = uploadTab
+        tabCollector.isSelected = collectorTab
         tabDownloads.setBackgroundResource(if (downloadTab) R.drawable.bg_chip_on else R.drawable.bg_chip)
         tabDownloads.setTextColor(color(if (downloadTab) R.color.accentInk else R.color.ink3))
-        tabUploads.setBackgroundResource(if (downloadTab) R.drawable.bg_chip else R.drawable.bg_chip_on)
-        tabUploads.setTextColor(color(if (downloadTab) R.color.ink3 else R.color.accentInk))
+        tabUploads.setBackgroundResource(if (uploadTab) R.drawable.bg_chip_on else R.drawable.bg_chip)
+        tabUploads.setTextColor(color(if (uploadTab) R.color.accentInk else R.color.ink3))
+        tabCollector.setBackgroundResource(if (collectorTab) R.drawable.bg_chip_on else R.drawable.bg_chip)
+        tabCollector.setTextColor(color(if (collectorTab) R.color.accentInk else R.color.ink3))
         historyFilterButton.text = TransferFilter.title(historyFilter)
+        historyFilterButton.visibility = if (showingCollector) View.GONE else View.VISIBLE
     }
 
     private fun render(force: Boolean = false) {
-        val pageDownloads = if (showingUploads) emptyList() else tasks
+        val pageDownloads = if (!showingUploads && !showingCollector) tasks else emptyList()
         val pageUploads = if (showingUploads) uploads else emptyList()
+        val pageCollectors = if (showingCollector) collectorTasks else emptyList()
         val (activeDownloads, finishedDownloads) = pageDownloads.partition(DownloadLogic::isActive)
         val (activeUploads, finishedUploads) = pageUploads.partition(UploadRecordLogic::isActive)
-        renderActive(activeDownloads, activeUploads)
+        val (activeCollectors, finishedCollectors) = pageCollectors.partition { it.isActive }
+        renderActive(activeDownloads, activeUploads, activeCollectors)
 
-        val historyState = HistoryViewState(showingUploads, historyFilter, selecting, finishedDownloads, finishedUploads)
+        val historyState = HistoryViewState(
+            showingUploads, showingCollector, historyFilter, selecting,
+            finishedDownloads, finishedUploads, finishedCollectors,
+        )
         if (!force && historyState == lastHistoryState) return
         lastHistoryState = historyState
-        historyCounts = TransferFilter.counts(finishedDownloads.map { it.state }, finishedUploads.map { it.state })
+        historyCounts = if (showingCollector) {
+            TransferFilter.Counts(
+                all = finishedCollectors.size,
+                success = finishedCollectors.count { it.state == CollectorTaskState.SUCCESS },
+                failed = finishedCollectors.count { it.state == CollectorTaskState.FAILED },
+            )
+        } else {
+            TransferFilter.counts(finishedDownloads.map { it.state }, finishedUploads.map { it.state })
+        }
         taskList.removeAllViews()
         selectableRows.clear()
 
-        val visibleDownloads = finishedDownloads.filter(::canSelectDownload)
-        val visibleUploads = finishedUploads.filter(::canSelectUpload)
-        val hasHistory = visibleDownloads.isNotEmpty() || visibleUploads.isNotEmpty()
-        btnSelect.visibility = if (hasHistory) View.VISIBLE else View.GONE
+        val visibleDownloads = if (showingCollector) emptyList() else finishedDownloads.filter(::canSelectDownload)
+        val visibleUploads = if (showingCollector) emptyList() else finishedUploads.filter(::canSelectUpload)
+        val visibleCollectors = if (showingCollector) finishedCollectors.filter {
+            when (collectorFilter) {
+                HistoryFilter.ALL -> true
+                HistoryFilter.SUCCESS -> it.state == CollectorTaskState.SUCCESS
+                HistoryFilter.FAILED -> it.state == CollectorTaskState.FAILED
+            }
+        } else emptyList()
+        val hasHistory = visibleDownloads.isNotEmpty() || visibleUploads.isNotEmpty() || visibleCollectors.isNotEmpty()
+        btnSelect.visibility = if (hasHistory && !showingCollector) View.VISIBLE else View.GONE
         btnClear.visibility = if (historyCounts.all > 0) View.VISIBLE else View.GONE
         if (hasHistory) {
-            if (showingUploads) {
-                visibleUploads.sortedByDescending { it.finishedAt }.groupBy { dayLabel(it.finishedAt) }
+            when {
+                showingCollector -> visibleCollectors.sortedByDescending { it.finishedAt }
+                    .groupBy { dayLabel(it.finishedAt) }
+                    .forEach { (day, records) ->
+                        addSection(day)
+                        records.forEach(::addCollectorHistoryRow)
+                    }
+                showingUploads -> visibleUploads.sortedByDescending { it.finishedAt }
+                    .groupBy { dayLabel(it.finishedAt) }
                     .forEach { (day, records) ->
                         addSection(day)
                         records.forEach(::addUploadHistoryRow)
                     }
-            } else {
-                visibleDownloads.sortedByDescending { it.finishedAt }.groupBy { dayLabel(it.finishedAt) }
+                else -> visibleDownloads.sortedByDescending { it.finishedAt }
+                    .groupBy { dayLabel(it.finishedAt) }
                     .forEach { (day, records) ->
                         addSection(day)
                         records.forEach(::addHistoryRow)
@@ -418,24 +506,40 @@ class DownloadActivity : AppCompatActivity() {
             }
         } else {
             addEmpty(when {
+                showingCollector -> if (collectorFilter == HistoryFilter.ALL) "还没有分享下载记录" else TransferFilter.emptyText(collectorFilter)
                 historyFilter != HistoryFilter.ALL -> TransferFilter.emptyText(historyFilter)
                 showingUploads -> "还没有上传记录"
                 else -> "还没有下载记录"
             })
         }
         if (selecting) selected.retainAll(selectableRows.keys)
-        storageHint.text = if (showingUploads) "上传保存到网盘目标目录" else "下载保存到 下载 / ${DownloadLogic.FOLDER}/"
+        storageHint.text = when {
+            showingCollector -> "分享下载完成后会自动加入上传队列"
+            showingUploads -> "上传保存到网盘目标目录"
+            else -> "下载保存到 下载 / ${DownloadLogic.FOLDER}/"
+        }
         paintTabs()
         paintSelection()
     }
 
     // 进度刷新只重绘进行中分区，避免打断历史行上的长按和勾选。
-    private fun renderActive(downloads: List<DownloadTask>, uploads: List<UploadRecord>) {
+    private fun renderActive(
+        downloads: List<DownloadTask>,
+        uploads: List<UploadRecord>,
+        collectors: List<CollectorTask>,
+    ) {
         activeList.visibility = if (selecting) View.GONE else View.VISIBLE
-        if (selecting || downloads == lastActiveDownloads && uploads == lastActiveUploads) return
+        if (selecting || downloads == lastActiveDownloads && uploads == lastActiveUploads &&
+            collectors == lastActiveCollectors
+        ) return
         lastActiveDownloads = downloads
         lastActiveUploads = uploads
+        lastActiveCollectors = collectors
         activeList.removeAllViews()
+        if (collectors.isNotEmpty()) {
+            addSection("分享下载中 ${collectors.size}", activeList)
+            collectors.sortedByDescending { it.createdAt }.forEach(::addCollectorActiveRow)
+        }
         if (downloads.isNotEmpty()) {
             addSection("进行中 ${downloads.size}", activeList)
             addSummary(downloads)
@@ -450,11 +554,13 @@ class DownloadActivity : AppCompatActivity() {
             addSection("排队中 ${queued.size}", activeList)
             queued.forEach(::addQueuedUploadRow)
         }
-        if (downloads.isNotEmpty() || uploads.isNotEmpty()) addSection("历史记录", activeList)
+        if (downloads.isNotEmpty() || uploads.isNotEmpty() || collectors.isNotEmpty()) {
+            addSection("历史记录", activeList)
+        }
     }
 
     private fun showHistoryFilter() {
-        if (selecting) return
+        if (selecting || showingCollector) return
         PopupMenu(this, historyFilterButton).apply {
             HistoryFilter.entries.forEach { filter ->
                 menu.add(0, filter.ordinal, filter.ordinal, TransferFilter.label(filter, historyCounts))
@@ -1040,6 +1146,79 @@ class DownloadActivity : AppCompatActivity() {
         taskList.addView(row)
     }
 
+    /** 分享下载进行中：yt-dlp 阶段由 CollectorTaskStore 持久化，完成后交给上传页。 */
+    private fun addCollectorActiveRow(task: CollectorTask) {
+        val row = card()
+        row.addView(typeIcon(if (task.name.contains('.')) task.name else "视频.mp4"))
+        val main = vertical().apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(11) }
+        }
+        main.addView(title(task.name))
+        main.addView(meta(listOf(task.platformLabel, task.providerLabel, task.dir).joinToString(" · ")))
+        main.addView(progressBar(task.percent.coerceIn(0, 100), false))
+        main.addView(meta("${task.percent.coerceIn(0, 100)}% · ${task.label}"))
+        row.addView(main)
+        activeList.addView(row)
+    }
+
+    /** 分享下载历史：成功条目提供「查看上传」，让用户知道文件已经进入上传页签。 */
+    private fun addCollectorHistoryRow(task: CollectorTask) {
+        val row = card()
+        row.addView(typeIcon(if (task.name.contains('.')) task.name else "视频.mp4"))
+        val main = vertical().apply {
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                .apply { marginStart = dp(11) }
+        }
+        main.addView(title(task.name))
+        val detail = listOfNotNull(
+            task.platformLabel,
+            task.providerLabel,
+            task.dir.takeIf { it.isNotBlank() },
+            timeLabel(task.finishedAt),
+            task.message.takeIf { it.isNotBlank() && task.state == CollectorTaskState.FAILED },
+        ).joinToString(" · ")
+        main.addView(
+            meta(detail, if (task.state == CollectorTaskState.FAILED) R.color.danger else R.color.ink3),
+        )
+        row.addView(main)
+        if (task.state == CollectorTaskState.SUCCESS) {
+            if (task.message.endsWith(" · $COLLECTOR_LOCAL_COPY_FAILED")) {
+                main.addView(meta(COLLECTOR_LOCAL_COPY_FAILED, R.color.danger))
+            }
+            row.addView(action("查看上传") { switchTab(TAB_UPLOADS) })
+        } else {
+            row.addView(action("重新收集") { retryCollector(task) })
+        }
+        taskList.addView(row)
+    }
+
+    /** 失败条目保留原始链接和落点，可直接再跑一次；新任务会生成新 id。 */
+    private fun retryCollector(task: CollectorTask) {
+        if (task.url.isBlank() || task.accountId.isBlank()) {
+            toast("这条记录缺少链接或账号，请重新添加分享下载")
+            return
+        }
+        val target = CollectorTarget(
+            provider = task.provider,
+            accountId = task.accountId,
+            rootDir = task.dir,
+            rootFolderId = task.folderId,
+            subDir = "",
+            subFolderId = task.folderId,
+        )
+        CollectorForegroundService.start(
+            this,
+            task.url,
+            task.platform,
+            target,
+            task.keepLocal,
+            task.name.substringBeforeLast('.', task.name),
+        )
+        toast("已重新加入分享下载队列")
+        refreshNow()
+    }
+
     private fun tag(label: String) = TextView(this).apply {
         text = label
         textSize = 10.5f
@@ -1198,8 +1377,13 @@ class DownloadActivity : AppCompatActivity() {
 
     companion object {
         internal const val EXTRA_SHOW_UPLOADS = "show_transfer_uploads"
+        internal const val EXTRA_SHOW_COLLECTOR = "show_transfer_collector"
         private const val STATE_DOWNLOAD_FILTER = "transfer_download_filter"
         private const val STATE_UPLOAD_FILTER = "transfer_upload_filter"
+        private const val STATE_COLLECTOR_FILTER = "transfer_collector_filter"
+        private const val TAB_DOWNLOADS = 0
+        private const val TAB_UPLOADS = 1
+        private const val TAB_COLLECTOR = 2
         internal const val EXTRA_VERIFY_DOWNLOAD = "verify_download"
         private const val MENU_CLEAR_SUCCESS = 1
         private const val MENU_CLEAR_FAILED = 2

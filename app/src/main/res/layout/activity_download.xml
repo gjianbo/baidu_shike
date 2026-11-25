@@ -99,6 +99,19 @@
             android:textSize="12.5sp"
             android:textStyle="bold" />
 
+        <TextView
+            android:id="@+id/tabCollector"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_chip"
+            android:gravity="center"
+            android:text="分享"
+            android:textColor="@color/ink3"
+            android:textSize="12.5sp"
+            android:textStyle="bold" />
+
         <Space
             android:id="@+id/transferTabsSpacer"
             android:layout_width="0dp"

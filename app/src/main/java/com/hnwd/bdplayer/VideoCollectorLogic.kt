@@ -1,13 +1,14 @@
 package com.hnwd.bdplayer
 
+import java.net.URI
 import java.util.Locale
 
 /**
- * 视频收集器的纯逻辑层：只做「分享文本 → 平台/视频 ID → 直链地址 → 文件名」，
- * 不碰 Android / OkHttp，可在 JVM 单测里直接跑。真正的网络请求在 VideoCollector 里完成。
+ * 视频收集器的纯逻辑层：分享文本 → 平台/视频 ID → 目标路径校验。
+ * 不碰 Android / OkHttp / yt-dlp，可在 JVM 单测里直接跑；下载交给引擎，这里不再手搓直链解析。
  */
 internal object VideoCollectorLogic {
-    enum class Platform { BILIBILI, X }
+    enum class Platform { BILIBILI, X, DOUYIN }
 
     data class Parsed(
         val platform: Platform,
@@ -17,23 +18,19 @@ internal object VideoCollectorLogic {
         val suggestedName: String,
     )
 
-    data class Resolution(
-        val url: String,
-        val filename: String,
-        val mediaType: String,
-        val needReferer: Boolean,
-    )
-
     /**
-     * URL 里的 ID 约定：B 站 BV 号大小写敏感且固定 12 位；aid 为纯数字；X 的状态 ID 为纯数字。
+     * URL 里的 ID 约定：B 站 BV 号大小写敏感且固定 12 位；aid 为纯数字；
+     * X 的状态 ID 为纯数字；抖音长链 ID 为纯数字，短链是一段 code。
      * 用白名单字符而不是 `.*`，否则会把后面的路径/查询串一起吞掉。
      */
     private val BILIBILI_BV = Regex("""(BV[0-9A-Za-z]{10})""")
     private val BILIBILI_AV = Regex("""(?:^|/)av(\d{1,15})(?:/|\?|#|$)""")
     private val X_STATUS = Regex("""(?:^|/)status/(\d{5,25})""")
+    private val DOUYIN_VIDEO = Regex("""/video/(\d{8,25})""")
+    private val DOUYIN_SHORT = Regex("""v\.douyin\.com/([A-Za-z0-9_-]{4,40})""")
 
-    private fun parsedOrNull(platform: Platform, id: String, canonical: String, api: String, name: String): Parsed? =
-        if (id.isBlank()) null else Parsed(platform, id, canonical, api, name)
+    private fun parsedOrNull(platform: Platform, id: String, canonical: String, name: String): Parsed =
+        Parsed(platform, id, canonical, canonical, name)
 
     /**
      * 从分享文本里抽取第一个可识别的视频链接。分享语里常同时含短链、表情与中文说明，
@@ -50,32 +47,34 @@ internal object VideoCollectorLogic {
                 "bilibili.com/video/" in lower || "b23.tv/" in lower -> {
                     BILIBILI_BV.find(clean)?.let { bv ->
                         val id = bv.value
-                        return parsedOrNull(
-                            Platform.BILIBILI, id,
-                            "https://www.bilibili.com/video/$id/",
-                            "https://api.bilibili.com/x/web-interface/view?bvid=$id",
-                            "B站-$id",
-                        )
+                        return parsedOrNull(Platform.BILIBILI, id, "https://www.bilibili.com/video/$id/", "B站-$id")
                     }
                     BILIBILI_AV.find(clean)?.let { av ->
                         val aid = av.groupValues[1]
-                        return parsedOrNull(
-                            Platform.BILIBILI, "av$aid",
-                            "https://www.bilibili.com/video/av$aid/",
-                            "https://api.bilibili.com/x/web-interface/view?aid=$aid",
-                            "B站-av$aid",
-                        )
+                        return parsedOrNull(Platform.BILIBILI, "av$aid", "https://www.bilibili.com/video/av$aid/", "B站-av$aid")
                     }
                 }
-                lower.contains("x.com/") || lower.contains("twitter.com/") || lower.contains("mobile.twitter.com/") -> {
+                "x.com/" in lower || "twitter.com/" in lower -> {
                     X_STATUS.find(clean)?.let { status ->
                         val id = status.groupValues[1]
-                        return parsedOrNull(
-                            Platform.X, id,
-                            "https://x.com/i/status/$id",
-                            "https://api.vxtwitter.com/Twitter/status/$id",
-                            "X-$id",
-                        )
+                        return parsedOrNull(Platform.X, id, "https://x.com/i/status/$id", "X-$id")
+                    }
+                }
+                "douyin.com" in lower -> {
+                    val uri = runCatching { URI(clean) }.getOrNull() ?: continue
+                    if (uri.rawUserInfo != null || uri.port != -1) continue
+                    val host = uri.host?.lowercase(Locale.US)
+                    val path = uri.rawPath.orEmpty()
+                    if (host == "douyin.com" || host == "www.douyin.com") {
+                        val id = DOUYIN_VIDEO.matchEntire(path.trimEnd('/'))?.groupValues?.get(1)
+                            ?: if (path.trimEnd('/') == "/jingxuan") {
+                                uri.rawQuery.orEmpty().split('&').filter { it.substringBefore('=') == "modal_id" }
+                                    .singleOrNull()?.substringAfter('=', "")?.takeIf { it.matches(Regex("[0-9]{8,25}")) }
+                            } else null
+                        if (id != null) return parsedOrNull(Platform.DOUYIN, id, "https://www.douyin.com/video/$id", "抖音-$id")
+                    } else if (host == "v.douyin.com") {
+                        val id = DOUYIN_SHORT.matchEntire("v.douyin.com${path.trimEnd('/')}")?.groupValues?.get(1)
+                        if (id != null) return parsedOrNull(Platform.DOUYIN, id, "https://v.douyin.com/$id/", "抖音-$id")
                     }
                 }
             }
@@ -84,84 +83,53 @@ internal object VideoCollectorLogic {
     }
 
     /**
-     * 把 B 站 view API 的 JSON（播放页同源接口）解析成可下载媒体地址。
-     * 只取 DASH 里同时带视频/音频且 url 已给出的项；没有音频时退回纯视频流，
-     * 优先返回最高清晰度的可直链项。无 cookies 的公开视频才有 url，会员/登录项会被跳过。
+     * 子目录是一层目录名（选择器逐层下钻，不允许一次填多级路径）。
+     * 空表示直接存默认根；拒绝绝对路径、`..` 跳转与网盘不支持的字符。
      */
-    fun resolveBilibili(json: String): Resolution? {
-        val root = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return null
-        if (root.optInt("code", -1) != 0) return null
-        val data = root.optJSONObject("data") ?: return null
-        val title = data.optString("title", "").takeIf { it.isNotBlank() } ?: "B站视频"
-        val dash = data.optJSONObject("dash")
-        val pick: (String) -> Pair<String, String>? = { key ->
-            val arr = dash?.optJSONArray(key)
-            var best: Pair<String, String>? = null
-            if (arr != null) for (i in 0 until arr.length()) {
-                val item = arr.optJSONObject(i) ?: continue
-                val url = item.optString("url", "").ifBlank { item.optString("backupUrl", "").let { b -> b.substringBefore(',') } }
-                if (url.startsWith("https://") || url.startsWith("http://")) {
-                    val bandwidth = item.optLong("bandwidth", 0)
-                    val current = best
-                    if (current == null || bandwidth > current.second.toLongOrNull().let { it ?: 0 }) {
-                        best = url to bandwidth.toString()
-                    }
-                }
-            }
-            best?.let { it.first to it.second }
-        }
-        val video = pick("video")
-        val audio = pick("audio")
-        if (video == null && audio == null) return null
-        val url = video?.first ?: audio!!.first
-        val extension = if (audio != null && video != null) "mp4" else if (video != null) "m4v" else "m4a"
-        val type = when (extension) {
-            "mp4" -> "video/mp4"
-            "m4v" -> "video/mp4"
-            else -> "audio/mp4"
-        }
-        return Resolution(
-            url = url,
-            filename = safeFilename("$title.$extension"),
-            mediaType = type,
-            needReferer = true,
-        )
+    fun collectorSubDirValid(subDir: String): Boolean {
+        if (subDir.isEmpty()) return true
+        if (subDir.startsWith('/') || subDir.startsWith('\\')) return false
+        if (subDir.split('/', '\\').any { it == ".." }) return false
+        return diskNameError(subDir) == null
     }
 
-    /**
-     * vxtwitter 的公开推文 JSON 里，media 数组给出视频直链。优先选 mp4，
-     * 没有则取第一个带 URL 的媒体项；宽度只作为排序线索，不影响可用性。
-     */
-    fun resolveX(json: String): Resolution? {
-        val root = runCatching { org.json.JSONObject(json) }.getOrNull() ?: return null
-        val medias = root.optJSONArray("media") ?: return null
-        var best: org.json.JSONObject? = null
-        var bestWidth = -1
-        for (i in 0 until medias.length()) {
-            val item = medias.optJSONObject(i) ?: continue
-            val type = item.optString("type", "")
-            if (type != "video" && type != "animated_gif") continue
-            val variants = item.optJSONArray("variants") ?: continue
-            for (j in 0 until variants.length()) {
-                val variant = variants.optJSONObject(j) ?: continue
-                val url = variant.optString("url", "")
-                if (!url.startsWith("https://") && !url.startsWith("http://")) continue
-                val width = variant.optInt("width", item.optInt("width", 0))
-                if (width >= bestWidth) {
-                    best = variant
-                    bestWidth = width
-                }
-            }
-        }
-        val url = best?.optString("url", "").takeIf { !it.isNullOrBlank() } ?: return null
-        val name = root.optString("user_name", "X").ifBlank { "X" }
-        return Resolution(
-            url = url,
-            filename = safeFilename("X-$name-${System.currentTimeMillis()}.mp4"),
-            mediaType = "video/mp4",
-            needReferer = false,
-        )
+    /** 从网盘返回的完整路径推导相对路径，拒绝无关目录与越界路径。 */
+    fun collectorRelativeDir(rootDir: String, selectedDir: String): String? {
+        val root = rootDir.trimEnd('/').ifBlank { "/" }
+        val selected = selectedDir.trimEnd('/').ifBlank { "/" }
+        if (root == selected) return ""
+        val prefix = root.trimEnd('/') + "/"
+        if (!selected.startsWith(prefix)) return null
+        return selected.removePrefix(prefix).takeIf(::validRelativeDir)
     }
 
-    private fun safeFilename(name: String): String = DownloadLogic.safeName(name)
+    private fun validRelativeDir(path: String): Boolean =
+        path.split('/').all { it.isNotEmpty() && collectorSubDirValid(it) }
+
+    fun collectorBaiduDir(rootDir: String, subDir: String): String {
+        val root = rootDir.trimEnd('/').ifBlank { "/" }
+        if (subDir.isEmpty() || !validRelativeDir(subDir)) return root
+        return "${root.trimEnd('/')}/$subDir"
+    }
+
+    fun collectorOutputPrefix(platform: String): String = when (platform) {
+        "BILIBILI" -> "B站-"
+        "X" -> "X-"
+        "DOUYIN" -> "抖音-"
+        else -> "视频-"
+    }
+
+    fun collectorDownloadedName(custom: String?, fileName: String, platform: String, url: String): String {
+        val title = fileName.substringBeforeLast('.').removePrefix(collectorOutputPrefix(platform)).trim()
+        val fallback = parse(url)?.suggestedName ?: "分享视频"
+        return collectorFileName(custom, title.takeUnless { it.isBlank() || it.equals("NA", ignoreCase = true) } ?: fallback)
+    }
+
+    /** 自定义名可带扩展名；引擎标题已经去掉扩展名，保留标题中的句点。 */
+    fun collectorFileName(custom: String?, title: String?): String {
+        val customName = custom?.trim()?.takeIf(String::isNotBlank)
+            ?.let { it.substringBeforeLast('.').ifBlank { it } }
+        val raw = customName ?: title?.takeIf(String::isNotBlank) ?: "视频"
+        return DownloadLogic.safeName(raw).ifBlank { "视频" }.take(60)
+    }
 }

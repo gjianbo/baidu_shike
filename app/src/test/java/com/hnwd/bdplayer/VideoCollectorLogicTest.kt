@@ -16,7 +16,6 @@ class VideoCollectorLogicTest {
         assertEquals(VideoCollectorLogic.Platform.BILIBILI, parsed!!.platform)
         assertEquals("BV1xx411c7mD", parsed.id)
         assertEquals("https://www.bilibili.com/video/BV1xx411c7mD/", parsed.canonicalUrl)
-        assertTrue(parsed.apiUrl.contains("bvid=BV1xx411c7mD"))
         assertEquals("B站-BV1xx411c7mD", parsed.suggestedName)
     }
 
@@ -24,7 +23,7 @@ class VideoCollectorLogicTest {
     fun parse_recognizesAvAndShortLink() {
         val av = VideoCollectorLogic.parse("http://m.bilibili.com/video/av12345678?from=share")
         assertEquals("av12345678", av?.id)
-        assertEquals("https://api.bilibili.com/x/web-interface/view?aid=12345678", av?.apiUrl)
+        assertEquals("https://www.bilibili.com/video/av12345678/", av?.canonicalUrl)
 
         val short = VideoCollectorLogic.parse("https://b23.tv/BV1GJ411x7h7?share_source=copy_web")
         assertEquals("BV1GJ411x7h7", short?.id)
@@ -37,7 +36,6 @@ class VideoCollectorLogicTest {
         assertEquals(VideoCollectorLogic.Platform.X, parsed!!.platform)
         assertEquals("1791234567890123456", parsed.id)
         assertEquals("https://x.com/i/status/1791234567890123456", parsed.canonicalUrl)
-        assertTrue(parsed.apiUrl.startsWith("https://api.vxtwitter.com/"))
     }
 
     @Test
@@ -48,77 +46,93 @@ class VideoCollectorLogicTest {
     }
 
     @Test
+    fun parse_recognizesDouyinLongAndShortLink() {
+        val long = VideoCollectorLogic.parse("https://www.douyin.com/video/7123456789012345678?modal_id=1")
+        assertEquals(VideoCollectorLogic.Platform.DOUYIN, long?.platform)
+        assertEquals("7123456789012345678", long?.id)
+
+        val short = VideoCollectorLogic.parse("8.86 复制打开抖音，看看 https://v.douyin.com/iRxyAbCd/ 的视频")
+        assertEquals(VideoCollectorLogic.Platform.DOUYIN, short?.platform)
+        assertEquals("iRxyAbCd", short?.id)
+        assertTrue(short!!.canonicalUrl.contains("v.douyin.com"))
+    }
+
+    @Test
+    fun parse_resolvesDouyinJingxuanModalToVideo() {
+        val parsed = VideoCollectorLogic.parse("看看 https://www.douyin.com/jingxuan?from=share&modal_id=7702043484349320482")
+        assertEquals(VideoCollectorLogic.Platform.DOUYIN, parsed?.platform)
+        assertEquals("7702043484349320482", parsed?.id)
+        assertEquals("https://www.douyin.com/video/7702043484349320482", parsed?.canonicalUrl)
+        assertNull(VideoCollectorLogic.parse("https://www.douyin.com.evil.example/jingxuan?modal_id=7702043484349320482"))
+        assertNull(VideoCollectorLogic.parse("https://www.douyin.com/jingxuan?modal_id=7702043484349320482x"))
+        assertNull(VideoCollectorLogic.parse("https://www.douyin.com/jingxuan?modal_id=7702043484349320482&modal_id=7702043484349320483"))
+    }
+
+    @Test
     fun parse_rejectsUnrelatedOrEmptyText() {
         assertNull(VideoCollectorLogic.parse(""))
         assertNull(VideoCollectorLogic.parse("这是一段普通文字，没有链接"))
         assertNull(VideoCollectorLogic.parse("https://example.com/video/BV1xx411c7mD"))
         assertNull(VideoCollectorLogic.parse("https://x.com/user/media/12345"))
+        assertNull(VideoCollectorLogic.parse("https://www.douyin.com/user/self"))
     }
 
     @Test
-    fun resolveBilibili_picksHighestBandwidthVideo() {
-        val json = """
-            {"code":0,"data":{"title":"测试课程 第1讲","dash":{
-              "video":[
-                {"id":64,"bandwidth":100000,"url":"https://upos.example.com/360p.m4v"},
-                {"id":80,"bandwidth":900000,"url":"https://upos.example.com/1080p.m4v"}
-              ],
-              "audio":[{"id":30216,"bandwidth":64000,"url":"https://upos.example.com/audio.m4a"}]
-            }}}
-        """.trimIndent()
-        val r = VideoCollectorLogic.resolveBilibili(json)
-        assertNotNull(r)
-        assertEquals("https://upos.example.com/1080p.m4v", r!!.url)
-        assertEquals("测试课程 第1讲.mp4", r.filename)
-        assertEquals("video/mp4", r.mediaType)
-        assertTrue(r.needReferer)
+    fun collectorSubDirValid_acceptsEmptyAndSingleName() {
+        assertTrue(VideoCollectorLogic.collectorSubDirValid(""))
+        assertTrue(VideoCollectorLogic.collectorSubDirValid("教育"))
+        assertTrue(VideoCollectorLogic.collectorSubDirValid("哲学-随笔"))
     }
 
     @Test
-    fun resolveBilibili_fallsBackToAudioOnly() {
-        val json = """
-            {"code":0,"data":{"title":"纯音频","dash":{"audio":[{"bandwidth":128000,"backupUrl":"https://backup.example.com/a.m4a,https://other.example.com/a.m4a"}]}}}
-        """.trimIndent()
-        val r = VideoCollectorLogic.resolveBilibili(json)
-        assertNotNull(r)
-        assertEquals("https://backup.example.com/a.m4a", r!!.url)
-        assertEquals("纯音频.m4a", r.filename)
-        assertEquals("audio/mp4", r.mediaType)
+    fun collectorSubDirValid_rejectsEscapeAndIllegalChars() {
+        assertFalse(VideoCollectorLogic.collectorSubDirValid("/"))
+        assertFalse(VideoCollectorLogic.collectorSubDirValid("教育/哲学"))
+        assertFalse(VideoCollectorLogic.collectorSubDirValid(".."))
+        assertFalse(VideoCollectorLogic.collectorSubDirValid("a/../b"))
+        assertFalse(VideoCollectorLogic.collectorSubDirValid("a:b"))
+        assertFalse(VideoCollectorLogic.collectorSubDirValid("a?b"))
     }
 
     @Test
-    fun resolveBilibili_rejectsFailureAndMissingStreams() {
-        assertNull(VideoCollectorLogic.resolveBilibili("""{"code":-404,"data":{"title":"无"}}"""))
-        assertNull(VideoCollectorLogic.resolveBilibili("not json"))
-        assertNull(VideoCollectorLogic.resolveBilibili("""{"code":0,"data":{"title":"空","dash":{}}}"""))
-        assertNull(VideoCollectorLogic.resolveBilibili("""{"code":0,"data":{"title":"无直链","dash":{"video":[{"bandwidth":1}]}}}"""))
+    fun collectorBaiduDir_joinsUnderRootAndFallsBackOnIllegal() {
+        assertEquals("/我的收集/教育", VideoCollectorLogic.collectorBaiduDir("/我的收集", "教育"))
+        assertEquals("/教育", VideoCollectorLogic.collectorBaiduDir("/", "教育"))
+        assertEquals("/我的收集", VideoCollectorLogic.collectorBaiduDir("/我的收集/", ""))
+        assertEquals("/我的收集", VideoCollectorLogic.collectorBaiduDir("/我的收集", "../越界"))
+        assertEquals("/", VideoCollectorLogic.collectorBaiduDir("", "/"))
     }
 
     @Test
-    fun resolveX_picksVideoVariantAndBuildsSafeName() {
-        val json = """
-            {"user_name":"Teacher","media":[
-              {"type":"photo","variants":[{"url":"https://pbs.example.com/photo.jpg","bitrate":0}]},
-              {"type":"video","width":1280,"variants":[
-                {"url":"https://video.example.com/480.mp4","bitrate":832000},
-                {"url":"https://video.example.com/1080.mp4","bitrate":2176000}
-              ]}
-            ]}
-        """.trimIndent()
-        val r = VideoCollectorLogic.resolveX(json)
-        assertNotNull(r)
-        assertEquals("https://video.example.com/1080.mp4", r!!.url)
-        assertTrue(r.filename.startsWith("X-Teacher-"))
-        assertTrue(r.filename.endsWith(".mp4"))
-        assertFalse(r.filename.contains("/"))
-        assertEquals("video/mp4", r.mediaType)
-        assertFalse(r.needReferer)
+    fun collectorRelativeDir_preservesNestedSelectionAndRejectsOtherBranches() {
+        assertEquals("教育/哲学", VideoCollectorLogic.collectorRelativeDir("/收集/", "/收集/教育/哲学"))
+        assertEquals("/收集/教育/哲学", VideoCollectorLogic.collectorBaiduDir("/收集", "教育/哲学"))
+        assertEquals("", VideoCollectorLogic.collectorRelativeDir("/收集", "/收集/"))
+        assertEquals("课程/教育", VideoCollectorLogic.collectorRelativeDir("/", "/课程/教育"))
+        assertNull(VideoCollectorLogic.collectorRelativeDir("/收集", "/收集备份/教育"))
+        assertNull(VideoCollectorLogic.collectorRelativeDir("/收集", "/收集/../教育"))
+        assertNull(VideoCollectorLogic.collectorRelativeDir("/收集", "/收集/教育//哲学"))
     }
 
     @Test
-    fun resolveX_rejectsTweetWithoutVideo() {
-        assertNull(VideoCollectorLogic.resolveX("""{"media":[{"type":"photo","variants":[{"url":"https://example.com/p.jpg"}]}]}"""))
-        assertNull(VideoCollectorLogic.resolveX("broken"))
-        assertNull(VideoCollectorLogic.resolveX("""{}"""))
+    fun collectorDownloadedName_preservesTitleAndFallsBackToShareId() {
+        val url = "https://www.bilibili.com/video/BV1xx411c7mD/"
+        assertEquals("X-课程 2.0", VideoCollectorLogic.collectorDownloadedName(null, "B站-X-课程 2.0.mp4", "BILIBILI", url))
+        assertEquals("B站-BV1xx411c7mD", VideoCollectorLogic.collectorDownloadedName(null, "B站-.mp4", "BILIBILI", url))
+        assertEquals("B站-BV1xx411c7mD", VideoCollectorLogic.collectorDownloadedName(null, "B站-NA.mp4", "BILIBILI", url))
+        assertEquals("我的视频", VideoCollectorLogic.collectorDownloadedName("我的视频.mp4", "B站-.mp4", "BILIBILI", url))
+        assertEquals("分享视频", VideoCollectorLogic.collectorDownloadedName(null, "视频-.mp4", "UNKNOWN", ""))
+    }
+
+    @Test
+    fun collectorFileName_prefersCustomThenTitleAndTruncates() {
+        assertEquals("我的课件", VideoCollectorLogic.collectorFileName("我的课件.mp4", "分享标题"))
+        assertEquals("分享标题", VideoCollectorLogic.collectorFileName("", "分享标题"))
+        assertEquals("视频", VideoCollectorLogic.collectorFileName(null, null))
+        val long = "标题".repeat(100)
+        assertEquals(60, VideoCollectorLogic.collectorFileName(null, long).length)
+        val cleaned = VideoCollectorLogic.collectorFileName("a/b:c", null)
+        assertFalse(cleaned.contains("/"))
+        assertFalse(cleaned.contains(":"))
     }
 }
