@@ -168,7 +168,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="4dp"
-                android:text="B站 / X / 抖音链接"
+                android:text="B站 / X / 抖音 / 小红书"
                 android:textColor="@color/ink3"
                 android:textSize="11sp" />
         </LinearLayout>

@@ -137,11 +137,12 @@
                 android:textSize="14sp" />
 
             <TextView
+                android:id="@+id/collectorSupportHint"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="4dp"
                 android:layout_marginTop="6dp"
-                android:text="支持 B站 / X / 抖音，整段分享文案也能识别"
+                android:text="B站 / X / 抖音 / 小红书全部由转发服务器解析"
                 android:textColor="@color/ink3"
                 android:textSize="11sp" />
 
@@ -316,6 +317,8 @@
                     android:contentDescription="上传后保留本机副本"
                     android:minWidth="48dp" />
             </LinearLayout>
+
+
         </LinearLayout>
     </ScrollView>
 

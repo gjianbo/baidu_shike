@@ -754,6 +754,7 @@ internal fun MainActivity.verifyAndRefresh(force: Boolean = false) {
         } else if (native.isVisible) {
             refresh(force = force || changed)
         }
+        onShareAccountChecked()
         // 无论本次探测是否成功都要清标记，否则残留到后续任意一次 verifyAndRefresh
         // 都会在 confirmed 时突然弹出「管理百度来源」，属于误触发。
         if (pendingAddProvider == SourceProvider.BAIDU) {

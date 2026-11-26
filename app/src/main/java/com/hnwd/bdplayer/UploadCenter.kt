@@ -6,9 +6,11 @@ import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 
@@ -31,6 +33,7 @@ internal object UploadCenter {
     private class Task(
         val id: Long, val source: Uri, val dir: String, val folderId: String,
         val provider: SourceProvider, val accountId: String, val attempt: Long = System.nanoTime(),
+        val ownedSource: CollectorUploadSource? = null,
     ) {
         @Volatile var cancelled = false
         var worker: UploadWorker? = null
@@ -42,6 +45,8 @@ internal object UploadCenter {
     private val listeners = CopyOnWriteArrayList<(State) -> Unit>()
     private val main = Handler(Looper.getMainLooper())
     private val queue = ArrayDeque<Task>()
+    // 停止服务后旧的准备线程仍可能在退场；源文件必须保留占用到清理完成。
+    private val ownedSources = ConcurrentHashMap.newKeySet<File>()
     private val seq = AtomicLong()
     private var currentTask: Task? = null
     private var serviceReady = false
@@ -67,20 +72,32 @@ internal object UploadCenter {
         listeners.forEach { runCatching { it(next) } }
     }
 
+    /** 调用方只能移交一次自己拥有的分享下载暂存文件；抛出异常时不发生移交。 */
     fun enqueue(
         context: Context, sources: List<Uri>, dir: String,
         folderId: String, provider: SourceProvider, accountId: String,
+        ownedSourceFile: File? = null,
     ) {
-        if (sources.isEmpty()) return
+        if (sources.isEmpty() && ownedSourceFile == null) return
         require(accountId.isNotBlank())
         val app = context.applicationContext
+        val owned = ownedSourceFile?.let {
+            require(sources.size == 1) { "暂存源文件只能对应一个上传任务" }
+            val source = CollectorUploadSource.validate(app.cacheDir, AccountScope.key("v", accountId), it)
+            val expectedUri = FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", source.file)
+            require(sources.single() == expectedUri) { "上传 URI 与暂存源文件不一致" }
+            source
+        }
         val tasks = sources.map { uri ->
             val id = seq.updateAndGet { previous -> maxOf(previous + 1, System.currentTimeMillis() * 1000) }
-            Task(id, uri, dir, folderId, provider, accountId)
+            Task(id, uri, dir, folderId, provider, accountId, ownedSource = owned)
         }
         val now = System.currentTimeMillis()
-        liveIds = liveIds + tasks.map { it.id }
+        val ids = tasks.map { it.id }.toSet()
+        if (owned != null) require(ownedSources.add(owned.file)) { "暂存源文件已加入上传队列" }
         try {
+            require(owned == null || owned.file.isFile) { "暂存源文件已不存在" }
+            liveIds = liveIds + ids
             UploadStore.begin(app, tasks.map { task ->
                 UploadRecord(
                     id = task.id,
@@ -89,14 +106,15 @@ internal object UploadCenter {
                     sizeBytes = -1,
                     createdAt = now,
                     source = UploadRecordLogic.sourceLabel(provider),
-                    sourceUri = retainSource(app, task.source),
+                    sourceUri = if (task.ownedSource == null) retainSource(app, task.source) else "",
                     folderId = folderId,
                     provider = provider,
                     accountId = accountId,
                 )
             })
         } catch (error: Exception) {
-            liveIds = liveIds - tasks.map { it.id }.toSet()
+            liveIds = liveIds - ids
+            owned?.let { ownedSources.remove(it.file) }
             throw error
         }
         queue.addAll(tasks)
@@ -152,24 +170,37 @@ internal object UploadCenter {
         }
 
         currentTask = task
-        val name = sourceName(task.source)
-        UploadStore.markRunning(app, task.id)
-        publish(state.copy(name = name, percent = 0, label = "正在准备文件…", queued = queue.size))
-        AppIo.execute {
-            clearStaleStaging(app)
-            val staged = runCatching { copyToCache(app, task) }
-            main.post {
-                val file = staged.getOrNull()
-                if (currentTask !== task || task.cancelled) {
-                    file?.file?.delete()
-                    if (currentTask === task) finish(app, task, false, "已取消上传")
-                } else if (file == null) {
-                    val message = staged.exceptionOrNull()?.message ?: "无法读取所选文件"
-                    finish(app, task, false, "上传失败：$message")
-                } else {
-                    startTask(app, task, file)
+        try {
+            val name = sourceName(task.source)
+            UploadStore.markRunning(app, task.id)
+            publish(state.copy(name = name, percent = 0, label = "正在准备文件…", queued = queue.size))
+            AppIo.execute {
+                val staged = runCatching {
+                    try {
+                        clearStaleStaging(app)
+                        copyToCache(app, task)
+                    } finally {
+                        // 流已关闭（或从未打开），上传 worker 只读暂存副本。
+                        releaseOwnedSource(task)
+                    }
                 }
+                val file = staged.getOrNull()
+                val posted = main.post {
+                    if (currentTask !== task || task.cancelled) {
+                        file?.file?.delete()
+                        if (currentTask === task) finish(app, task, false, "已取消上传")
+                    } else if (file == null) {
+                        val message = staged.exceptionOrNull()?.message ?: "无法读取所选文件"
+                        finish(app, task, false, "上传失败：$message")
+                    } else {
+                        startTask(app, task, file)
+                    }
+                }
+                if (!posted) file?.file?.delete()
             }
+        } catch (error: Exception) {
+            releaseOwnedSource(task)
+            finish(app, task, false, "上传失败：${error.message ?: "无法准备文件"}")
         }
     }
 
@@ -230,6 +261,7 @@ internal object UploadCenter {
         }
         val waiting = queue.firstOrNull { it.id == id } ?: return false
         queue.remove(waiting)
+        releaseOwnedSource(waiting)
         UploadStore.remove(context, id)
         liveIds = liveIds - id
         publish(state.copy(queued = queue.size, total = state.total - 1))
@@ -244,9 +276,12 @@ internal object UploadCenter {
     fun stop(context: Context, message: String) {
         serviceReady = false
         if (!state.running) return
-        val tasks = queue.toList() + listOfNotNull(currentTask)
+        val waiting = queue.toList()
+        val tasks = waiting + listOfNotNull(currentTask)
         queue.clear()
         currentTask = null
+        // 当前任务仍可能在读源文件，由准备线程关闭流后释放。
+        waiting.forEach(::releaseOwnedSource)
         tasks.forEach { task ->
             if (task.commit?.cancel() != false) {
                 task.cancelled = true
@@ -259,6 +294,15 @@ internal object UploadCenter {
             running = false, finished = true, success = false, queued = 0,
             failed = state.failed + tasks.size, message = message, label = message,
         ))
+    }
+
+    private fun releaseOwnedSource(task: Task) {
+        val source = task.ownedSource ?: return
+        try {
+            source.delete()
+        } finally {
+            ownedSources.remove(source.file)
+        }
     }
 
     private fun clearStaleStaging(app: Context) {
@@ -333,6 +377,37 @@ internal object UploadCenter {
         } catch (error: Exception) {
             file.delete()
             throw error
+        }
+    }
+}
+
+/** 唯一可移交的源：本账号收集缓存中单个 job 目录的普通文件。 */
+internal class CollectorUploadSource private constructor(val file: File, private val job: File) {
+    fun delete() {
+        // 绝不递归清理，也不跟随移交后被替换的符号链接。
+        runCatching {
+            if (job.canonicalFile != job || file.canonicalFile != file) return@runCatching
+            if (file.isFile) file.delete()
+            if (job.isDirectory) job.delete() // 有其他文件时保留目录。
+        }
+    }
+
+    companion object {
+        fun validate(cacheDir: File, accountDirectory: String, source: File): CollectorUploadSource {
+            val cache = cacheDir.canonicalFile
+            val absolute = source.absoluteFile
+            val account = absolute.parentFile?.parentFile
+            val root = account?.parentFile
+            require(account?.name == accountDirectory && root?.name == "collector" &&
+                (root.parentFile == cacheDir.absoluteFile || root.parentFile == cache)) {
+                "源文件不在本账号的收集缓存中"
+            }
+            val jobName = checkNotNull(absolute.parentFile).name
+            require(jobName.startsWith("job-") && jobName.length > 4) { "无效的收集任务目录" }
+            val job = File(File(File(cache, "collector"), accountDirectory), jobName)
+            val expected = File(job, absolute.name)
+            require(absolute.canonicalFile == expected && expected.isFile) { "无效的收集暂存文件" }
+            return CollectorUploadSource(expected, job)
         }
     }
 }

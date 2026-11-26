@@ -242,6 +242,16 @@ class MainActivity : AppCompatActivity() {
     )
 
     private var pendingUploadTarget: UploadTarget? = null
+    internal var collectorSheetDialog: android.app.Dialog? = null
+    // 空字符串表示收到了文本分享，但其中没有可识别的视频链接。
+    private var pendingSharedVideo: String? = null
+    private var clipboardPrompt: AlertDialog? = null
+    private var pendingClipboardConfirmation = false
+    private val attemptedClipboardLinks = mutableSetOf<String>()
+    private var shareUiResumed = false
+    private var shareAccountChecked = false
+    private val shareAccountTimeout = Runnable { openPendingSharedVideo(waitForAccount = false) }
+    private val clipboardCheck = Runnable { checkClipboardForSharedVideo() }
     private val uploadLauncher =
         registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
             val target = pendingUploadTarget
@@ -360,6 +370,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         readDownloadVerification(intent)
+        if (savedInstanceState == null) readSharedVideo(intent)
+        else {
+            pendingSharedVideo = savedInstanceState.getString(STATE_SHARED_VIDEO)
+            pendingClipboardConfirmation = savedInstanceState.getBoolean("shared_video_from_clipboard")
+        }
         savedInstanceState?.getBundle(STATE_UPLOAD_TARGET)?.let { saved ->
             val provider = SourceProvider.entries.firstOrNull { it.name == saved.getString("provider") }
             val accountId = saved.getString("account").orEmpty()
@@ -736,7 +751,34 @@ class MainActivity : AppCompatActivity() {
                 putString("folder", target.folderId)
             })
         }
+        outState.putString(STATE_SHARED_VIDEO, pendingSharedVideo)
+        outState.putBoolean("shared_video_from_clipboard", pendingClipboardConfirmation)
         super.onSaveInstanceState(outState)
+    }
+
+    override fun onPostResume() {
+        super.onPostResume()
+        shareUiResumed = true
+        openPendingSharedVideo()
+    }
+
+    /**
+     * Android 10+ 只允许前台且获得焦点的应用读剪贴板，所以真正读的地方放在这里，
+     * onResume 里只是排队，等拿到焦点再读一次。
+     */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && activityVisible && pendingSharedVideo == null) {
+            shell.removeCallbacks(clipboardCheck)
+            shell.postDelayed(clipboardCheck, 400L)
+        }
+    }
+
+    override fun onPause() {
+        shareUiResumed = false
+        shell.removeCallbacks(shareAccountTimeout)
+        shell.removeCallbacks(clipboardCheck)
+        super.onPause()
     }
 
     override fun onResume() {
@@ -744,6 +786,11 @@ class MainActivity : AppCompatActivity() {
         verifyPendingDownload()
         // 从夸克登录页返回后，设置页的网盘登录态需要重算。
         if (screen == Screen.SETTINGS && ready) refresh()
+        // 分享意图优先；没有分享意图时再看一眼剪贴板，迟一点问，避开首屏渲染。
+        if (pendingSharedVideo == null) {
+            shell.removeCallbacks(clipboardCheck)
+            shell.postDelayed(clipboardCheck, 600L)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -751,6 +798,8 @@ class MainActivity : AppCompatActivity() {
         setIntent(intent)
         readDownloadVerification(intent)
         verifyPendingDownload()
+        readSharedVideo(intent)
+        openPendingSharedVideo()
         if (intent.action == ACTION_OPEN_PLAYER) {
             // Activity 存活时 controller / 账号校验可能仍在异步建立，openCurrentPlayback()
             // 的守卫此刻不成立会静默失败。先挂起标志，让 controller 就绪回调与
@@ -759,6 +808,77 @@ class MainActivity : AppCompatActivity() {
             // 同上：消费掉一次性 action，避免成为持久 base intent。
             intent.action = null
             openCurrentPlayback()
+        }
+    }
+
+    private fun readSharedVideo(intent: Intent) {
+        if (intent.action != Intent.ACTION_SEND || !"text/plain".equals(intent.type, ignoreCase = true)) return
+        val text = runCatching { intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString() }.getOrNull().orEmpty()
+        // 只处理文本，不读取外部 URI；解析后只保留受支持平台的链接。
+        clipboardPrompt?.dismiss()
+        pendingClipboardConfirmation = false
+        pendingSharedVideo = VideoCollectorLogic.parse(text.take(16_384))?.canonicalUrl.orEmpty()
+        intent.action = null
+        intent.removeExtra(Intent.EXTRA_TEXT)
+    }
+
+    /**
+     * 打开 App 时看一眼剪贴板：如果里面是受支持平台的视频链接，问一句要不要直接分享下载。
+     *
+     * 约束：
+     * - 只在界面真正可见、且没有浮层/播放页占着屏幕时问，避免和别的弹窗打在一起；
+     * - 同一条链接只问一次（SharedLinkPrompt），用户选「取消」后不再重复；
+     * - 只是提示，不会自动开始收集，也不会把链接写进任何日志。
+     */
+    internal fun checkClipboardForSharedVideo() {
+        if (!activityVisible || !shareUiResumed || !hasWindowFocus() || isFinishing || isDestroyed) return
+        if (pendingSharedVideo != null || clipboardPrompt?.isShowing == true || collectorSheetDialog?.isShowing == true) return
+        if (videoPage != null || videoLoading != null) return
+        val clipboard = getSystemService(android.content.ClipboardManager::class.java) ?: return
+        val text = runCatching {
+            clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text
+                ?.take(16_384)?.toString()
+        }.getOrNull() ?: return
+        val parsed = VideoCollectorLogic.parse(text) ?: return
+        val url = parsed.canonicalUrl
+        if (url in attemptedClipboardLinks || !SharedLinkPrompt.shouldPrompt(this, url)) return
+        val platform = VideoCollectorLogic.platformLabel(parsed.platform)
+        clipboardPrompt = AlertDialog.Builder(this)
+            .setTitle("发现${platform}链接")
+            .setMessage("剪贴板里有一条${platform}视频链接，要打开分享下载吗？")
+            .setNegativeButton("不用了") { _, _ -> SharedLinkPrompt.markPrompted(this, url) }
+            .setOnCancelListener { SharedLinkPrompt.markPrompted(this, url) }
+            .setPositiveButton("分享下载") { _, _ ->
+                pendingClipboardConfirmation = true
+                pendingSharedVideo = url
+                openPendingSharedVideo()
+            }
+            .show()
+    }
+
+    internal fun onShareAccountChecked() {
+        shareAccountChecked = true
+        openPendingSharedVideo()
+    }
+
+    private fun openPendingSharedVideo(waitForAccount: Boolean = true) {
+        val url = pendingSharedVideo ?: return
+        if (!shareUiResumed || isFinishing || isDestroyed) return
+        shell.removeCallbacks(shareAccountTimeout)
+        if (url.isNotEmpty() && waitForAccount && (!shareAccountChecked || checkingAccount) &&
+            CollectorTargetStore.defaultProvider(SettingsHostAdapter()) == SourceProvider.BAIDU && !hasVerifiedAccount()
+        ) {
+            shell.postDelayed(shareAccountTimeout, 12_000L)
+            return
+        }
+        val fromClipboard = pendingClipboardConfirmation
+        pendingClipboardConfirmation = false
+        pendingSharedVideo = null
+        if (url.isEmpty()) toast("分享内容里没有可识别的 B站 / X / 抖音 / 小红书链接")
+        else {
+            // 即使打开失败，弹窗关闭后恢复焦点也不能在同一前台会话里再次提示。
+            if (fromClipboard) attemptedClipboardLinks.add(url)
+            if (showCollectorSheet(url) && fromClipboard) SharedLinkPrompt.markPrompted(this, url)
         }
     }
 
@@ -975,6 +1095,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         activityVisible = false
+        attemptedClipboardLinks.clear()
         pdfPreviewRef?.close()
         documentPreviewRef?.close()
         imagePreviewRef?.close()
@@ -1879,6 +2000,7 @@ class MainActivity : AppCompatActivity() {
         const val STATE_FAVORITES_ORIGIN = "favorites_origin"
         const val STATE_FOLDERS = "folder_trail"
         private const val STATE_UPLOAD_TARGET = "upload_target"
+        private const val STATE_SHARED_VIDEO = "shared_video"
         /** 「待确认删除」登记的有效期：超过后以服务端列表为准，避免文件被永久隐藏。 */
         const val PENDING_DELETE_TTL_MS = 30_000L
     }

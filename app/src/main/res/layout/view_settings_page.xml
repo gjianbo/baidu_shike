@@ -561,7 +561,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
-                    android:text="设置默认网盘和保存目录" />
+                    android:text="设置网盘、保存目录和解析服务器" />
             </LinearLayout>
 
             <TextView

@@ -27,6 +27,21 @@ class VideoCollectorLogicTest {
 
         val short = VideoCollectorLogic.parse("https://b23.tv/BV1GJ411x7h7?share_source=copy_web")
         assertEquals("BV1GJ411x7h7", short?.id)
+
+        val opaque = VideoCollectorLogic.parse("【B站】我在看 https://b23.tv/aB3xYz7，打开看看")
+        assertEquals(VideoCollectorLogic.Platform.BILIBILI, opaque?.platform)
+        assertEquals("https://b23.tv/aB3xYz7", opaque?.canonicalUrl)
+        assertEquals(opaque, VideoCollectorLogic.parse(opaque!!.canonicalUrl))
+    }
+
+    @Test
+    fun parse_matchesRealHostsAndTakesFirstSupportedLink() {
+        assertNull(VideoCollectorLogic.parse("https://fakebilibili.com/video/BV1xx411c7mD"))
+        assertNull(VideoCollectorLogic.parse("https://notx.com/name/status/123456789"))
+        assertNull(VideoCollectorLogic.parse("https://b23.tv.example.org/abc123"))
+        assertNull(VideoCollectorLogic.parse("https://www.bilibili.com/foo?next=bilibili.com/video/BV1xx411c7mD"))
+        val parsed = VideoCollectorLogic.parse("链接：https://example.org/page；视频：https://x.com/name/status/123456789/video/1！再看 https://v.douyin.com/abc123/")
+        assertEquals("https://x.com/i/status/123456789", parsed?.canonicalUrl)
     }
 
     @Test
@@ -66,6 +81,21 @@ class VideoCollectorLogicTest {
         assertNull(VideoCollectorLogic.parse("https://www.douyin.com.evil.example/jingxuan?modal_id=7702043484349320482"))
         assertNull(VideoCollectorLogic.parse("https://www.douyin.com/jingxuan?modal_id=7702043484349320482x"))
         assertNull(VideoCollectorLogic.parse("https://www.douyin.com/jingxuan?modal_id=7702043484349320482&modal_id=7702043484349320483"))
+    }
+
+    @Test
+    fun parse_recognizesXiaohongshuShortAndNoteLinks() {
+        val short = VideoCollectorLogic.parse("米克和月半比帅 https://xhslink.cn/o/3dk4TLf0GUb 保留这段，去【小红书】瞧瞧笔记~")
+        assertEquals(VideoCollectorLogic.Platform.XIAOHONGSHU, short?.platform)
+        assertEquals("3dk4TLf0GUb", short?.id)
+        assertEquals("https://xhslink.cn/o/3dk4TLf0GUb", short?.canonicalUrl)
+        assertTrue(short!!.suggestedName.startsWith("小红书-"))
+
+        val note = VideoCollectorLogic.parse("https://www.xiaohongshu.com/explore/6b02eee2000000002a03be8e?xsec_token=ABC123")
+        assertEquals(VideoCollectorLogic.Platform.XIAOHONGSHU, note?.platform)
+        assertEquals("6b02eee2000000002a03be8e", note?.id)
+        assertTrue(note!!.canonicalUrl.contains("xsec_token=ABC123"))
+        assertNull(VideoCollectorLogic.parse("https://xhslink.cn.example.org/o/abc123"))
     }
 
     @Test

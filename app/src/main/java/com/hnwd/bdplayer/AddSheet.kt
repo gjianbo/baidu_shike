@@ -1,37 +1,23 @@
 package com.hnwd.bdplayer
 
 import android.app.Dialog
-import android.graphics.Color
-import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.widget.EditText
-import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
-import androidx.core.graphics.drawable.toDrawable
 
 /**
  * 网盘页右下角 FAB 的「添加」面板。
  *
- * 只放两项：新建文件夹（按 provider 分派）与上传文件（后台前台服务接管）。
- * 真实传输在 UploadCenter + UploadForegroundService 里，本面板只调起系统文件选择器。
+ * 提供上传文件、分享下载与新建文件夹。
+ * 真实传输由前台服务接管。
  */
 internal fun MainActivity.showAddSheet() {
     if (screen != Screen.DISK || !hasActiveSession()) return
     val quark = diskProvider == SourceProvider.QUARK
     val wide = resources.configuration.screenWidthDp >= 600
     val view = layoutInflater.inflate(R.layout.dialog_add_sheet, null, false)
-    view.setBackgroundResource(if (wide) R.drawable.bg_sheet_floating else R.drawable.bg_search_sheet)
-    view.elevation = if (wide) dp(18).toFloat() else 0f
-    val frame = FrameLayout(this).apply {
-        if (wide) setPadding(dp(12), dp(12), dp(12), dp(12))
-        addView(view, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-        ))
-    }
-    val dialog = Dialog(this)
-    dialog.setContentView(frame)
+    val dialog = Dialog(this).apply { requestWindowFeature(android.view.Window.FEATURE_NO_TITLE) }
     val dir = currentDiskDir()
     val target = if (dir.isBlank() || dir == "/" || dir == QuarkPersonalDrive.ROOT) "根目录" else dir
     view.findViewById<TextView>(R.id.addTarget).text =
@@ -51,18 +37,7 @@ internal fun MainActivity.showAddSheet() {
     }
     view.findViewById<View>(R.id.addCancel).setOnClickListener { dialog.dismiss() }
     view.findViewById<View>(R.id.addClose).setOnClickListener { dialog.dismiss() }
-    dialog.window?.apply {
-        setBackgroundDrawable(Color.TRANSPARENT.toDrawable())
-        setDimAmount(if (wide) 0.3f else 0.45f)
-        setGravity(if (wide) Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL else Gravity.BOTTOM)
-        if (!wide) setWindowAnimations(R.style.SearchSheetAnimation)
-    }
-    dialog.setCanceledOnTouchOutside(true)
-    dialog.show()
-    dialog.window?.setLayout(
-        if (wide) dp(664) else ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.WRAP_CONTENT,
-    )
+    showCollectorSheetDialog(dialog, view, wide, widthDp = 504)
 }
 
 /** 夸克网盘新建目录走 QuarkPersonalDrive.create()，不能走百度的 /api/create。 */

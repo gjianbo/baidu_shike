@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 解析服务器地址由用户自己填写，可能是局域网/自用 HTTP 服务；这里允许明文，HTTPS 仍走系统证书校验。 -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

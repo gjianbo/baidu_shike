@@ -10,7 +10,7 @@ internal enum class CollectorTaskState { RUNNING, SUCCESS, FAILED }
 /**
  * 一条分享下载任务记录。
  *
- * 分享下载先由 yt-dlp 把远端视频下载到本机缓存，再交给 UploadCenter。这个模型只覆盖
+ * 分享下载先把远端视频下载到本机缓存，再交给 UploadCenter。这个模型只覆盖
  * 第一段（解析、下载、加入上传队列），让「传输」页在任务进行中就能看到它；上传阶段
  * 会以普通的 UploadRecord 出现在「上传」页签里。
  */
@@ -31,13 +31,19 @@ internal data class CollectorTask(
     val percent: Int = 0,
     val label: String = "准备收集视频…",
     val message: String = "",
+    // null 表示旧版记录；空字符串表示用户明确未指定文件名。
+    val customName: String? = null,
 ) {
+    val retryName: String
+        get() = customName ?: name.takeUnless { it == "分享视频" }
+            ?.replace(Regex("\\.(mp4|mov|m4v|webm)$", RegexOption.IGNORE_CASE), "").orEmpty()
     val isActive: Boolean get() = state == CollectorTaskState.RUNNING
     val platformLabel: String
         get() = when (platform) {
             "BILIBILI" -> "B站"
             "X" -> "X"
             "DOUYIN" -> "抖音"
+            "XIAOHONGSHU" -> "小红书"
             else -> "视频"
         }
     val providerLabel: String
@@ -71,7 +77,6 @@ internal object CollectorTaskRuntime {
 internal object CollectorTaskStore {
     private const val PREF = "collector_tasks"
     private const val KEY = "records"
-    private const val MAX_RECORDS = 60
     private val lock = Any()
 
     private fun prefs(context: Context) = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
@@ -149,8 +154,8 @@ internal object CollectorTaskStore {
                 )
             } else task
         }
-        if (changed) write(context, reconciled)
-        reconciled
+        if (changed) CollectorTaskLogic.trim(reconciled).also { write(context, it) }
+        else raw
     }
 
     fun activeCount(context: Context): Int = synchronized(lock) {
@@ -205,6 +210,7 @@ internal object CollectorTaskLogic {
         .put("percent", task.percent)
         .put("label", task.label)
         .put("message", task.message)
+        .put("customName", task.customName)
 
     private fun fromJson(item: JSONObject) = CollectorTask(
         id = item.getLong("id"),
@@ -225,5 +231,6 @@ internal object CollectorTaskLogic {
         percent = item.optInt("percent", 0),
         label = item.optString("label").ifBlank { "准备收集视频…" },
         message = item.optString("message"),
+        customName = item.opt("customName") as? String,
     )
 }

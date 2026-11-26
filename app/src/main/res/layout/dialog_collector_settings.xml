@@ -1,126 +1,271 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/collectorSettingsSheet"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:background="@drawable/bg_card"
-    android:orientation="vertical">
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_sheet_floating"
+    android:clipToOutline="true"
+    android:elevation="18dp"
+    android:orientation="vertical"
+    android:paddingStart="24dp"
+    android:paddingTop="20dp"
+    android:paddingEnd="24dp"
+    android:paddingBottom="18dp">
 
     <LinearLayout
-        android:id="@+id/setCollectorProviderRow"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:background="?attr/selectableItemBackground"
-        android:clickable="true"
-        android:focusable="true"
         android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:padding="16dp">
-
-        <ImageView
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:background="@drawable/bg_empty_icon"
-            android:padding="10dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_cloud" />
-
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="13dp"
-            android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                style="@style/SettingTitle"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="默认上传网盘" />
-
-            <TextView
-                style="@style/SettingSub"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
-                android:text="分享下载的视频存到哪个网盘" />
-        </LinearLayout>
+        android:orientation="horizontal">
 
         <TextView
-            android:id="@+id/setCollectorProviderValue"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:textColor="@color/ink3"
-            android:textSize="11.5sp" />
+            android:layout_weight="1"
+            android:letterSpacing="-0.02"
+            android:text="分享下载"
+            android:textColor="@color/ink"
+            android:textSize="20sp"
+            android:textStyle="bold" />
 
         <ImageView
-            android:layout_width="18dp"
-            android:layout_height="18dp"
-            android:layout_marginStart="6dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_chevron_right" />
+            android:id="@+id/collectorSettingsClose"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="关闭"
+            android:padding="11dp"
+            android:src="@drawable/ic_close"
+            app:tint="@color/ink2" />
     </LinearLayout>
 
-    <View
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:layout_marginLeft="69dp"
-        android:background="@color/line" />
-
-    <LinearLayout
-        android:id="@+id/setCollectorRootRow"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:background="?attr/selectableItemBackground"
-        android:clickable="true"
-        android:focusable="true"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:padding="16dp">
-
-        <ImageView
-            android:layout_width="40dp"
-            android:layout_height="40dp"
-            android:background="@drawable/bg_empty_icon"
-            android:padding="10dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_folder_add" />
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:scrollbars="none">
 
         <LinearLayout
-            android:layout_width="0dp"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="13dp"
-            android:layout_weight="1"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:paddingTop="8dp"
+            android:paddingBottom="4dp">
+
+            <LinearLayout
+                android:id="@+id/setCollectorProviderRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="12dp">
+
+                <ImageView
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="@drawable/bg_empty_icon"
+                    android:importantForAccessibility="no"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_cloud" />
+
+                <TextView
+                    style="@style/SettingTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="13dp"
+                    android:layout_weight="1"
+                    android:text="上传网盘" />
+
+                <TextView
+                    android:id="@+id/setCollectorProviderValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/ink3"
+                    android:textSize="11.5sp" />
+
+                <ImageView
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:layout_marginStart="6dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_chevron_right" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="69dp"
+                android:background="@color/line" />
+
+            <LinearLayout
+                android:id="@+id/setCollectorRootRow"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:padding="12dp">
+
+                <ImageView
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="@drawable/bg_empty_icon"
+                    android:importantForAccessibility="no"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_folder_add" />
+
+                <TextView
+                    style="@style/SettingTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="13dp"
+                    android:layout_weight="1"
+                    android:text="分享下载位置" />
+
+                <TextView
+                    android:id="@+id/setCollectorRootValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:maxWidth="112dp"
+                    android:textColor="@color/ink3"
+                    android:textSize="11.5sp" />
+
+                <ImageView
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:layout_marginStart="6dp"
+                    android:importantForAccessibility="no"
+                    android:src="@drawable/ic_chevron_right" />
+            </LinearLayout>
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginTop="8dp"
+                android:background="@color/line" />
 
             <TextView
                 style="@style/SettingTitle"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="默认上传根目录" />
+                android:layout_marginStart="4dp"
+                android:layout_marginTop="14dp"
+                android:text="解析服务器" />
 
             <TextView
-                style="@style/SettingSub"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="3dp"
-                android:text="收集时还可临时选子目录或新建" />
+                android:layout_marginStart="4dp"
+                android:layout_marginTop="4dp"
+                android:lineSpacingExtra="2dp"
+                android:text="B站 / X / 抖音 / 小红书由你填写的 MeTube 服务只读解析；不使用则不填。"
+                android:textColor="@color/ink3"
+                android:textSize="11.5sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_marginTop="12dp"
+                android:text="服务地址"
+                android:textColor="@color/ink2"
+                android:textSize="12sp"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/setForwardUrl"
+                android:layout_width="match_parent"
+                android:layout_height="46dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_input"
+                android:hint="http://fnos.hnwd.cn:19011"
+                android:inputType="textUri"
+                android:maxLines="1"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:singleLine="true"
+                android:textColor="@color/ink"
+                android:textColorHint="@color/ink3"
+                android:textSize="14sp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_marginTop="6dp"
+                android:text="填写完整地址，例如 http://fnos.hnwd.cn:19011 或 https://你的域名；支持本机回环地址。"
+                android:textColor="@color/ink3"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/setForwardStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:layout_marginTop="12dp"
+                android:lineSpacingExtra="2dp"
+                android:textColor="@color/danger"
+                android:textSize="12sp"
+                android:visibility="gone" />
         </LinearLayout>
+    </ScrollView>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:orientation="horizontal">
 
         <TextView
-            android:id="@+id/setCollectorRootValue"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:maxWidth="112dp"
-            android:maxLines="1"
-            android:ellipsize="end"
-            android:textColor="@color/ink3"
-            android:textSize="11.5sp" />
+            android:id="@+id/setForwardClear"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_weight="0.8"
+            android:background="@drawable/bg_outline_button"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="清除"
+            android:textColor="@color/danger"
+            android:textSize="13.5sp"
+            android:visibility="gone" />
 
-        <ImageView
-            android:layout_width="18dp"
-            android:layout_height="18dp"
-            android:layout_marginStart="6dp"
-            android:importantForAccessibility="no"
-            android:src="@drawable/ic_chevron_right" />
+        <TextView
+            android:id="@+id/setForwardTest"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_outline_button"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="测试连接"
+            android:textColor="@color/ink2"
+            android:textSize="13.5sp" />
+
+        <TextView
+            android:id="@+id/setForwardSave"
+            android:layout_width="0dp"
+            android:layout_height="46dp"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1.25"
+            android:background="@drawable/bg_primary_button"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="保存"
+            android:textColor="@color/onAccent"
+            android:textSize="13.5sp"
+            android:textStyle="bold" />
     </LinearLayout>
 </LinearLayout>

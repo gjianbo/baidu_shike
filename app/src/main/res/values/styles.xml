@@ -70,6 +70,11 @@
         <item name="android:windowExitAnimation">@anim/slide_out_down</item>
     </style>
 
+    <style name="RightSheetAnimation">
+        <item name="android:windowEnterAnimation">@anim/slide_in_from_right</item>
+        <item name="android:windowExitAnimation">@anim/slide_out_to_right</item>
+    </style>
+
     <style name="TransferActionSheetTheme" parent="AppTheme">
         <item name="android:windowIsFloating">true</item>
         <item name="android:windowNoTitle">true</item>

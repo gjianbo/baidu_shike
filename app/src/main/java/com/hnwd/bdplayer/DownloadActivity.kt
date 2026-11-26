@@ -1146,7 +1146,7 @@ class DownloadActivity : AppCompatActivity() {
         taskList.addView(row)
     }
 
-    /** 分享下载进行中：yt-dlp 阶段由 CollectorTaskStore 持久化，完成后交给上传页。 */
+    /** 分享下载进行中：任务状态由 CollectorTaskStore 持久化，完成后交给上传页。 */
     private fun addCollectorActiveRow(task: CollectorTask) {
         val row = card()
         row.addView(typeIcon(if (task.name.contains('.')) task.name else "视频.mp4"))
@@ -1207,14 +1207,29 @@ class DownloadActivity : AppCompatActivity() {
             subDir = "",
             subFolderId = task.folderId,
         )
-        CollectorForegroundService.start(
-            this,
-            task.url,
-            task.platform,
-            target,
-            task.keepLocal,
-            task.name.substringBeforeLast('.', task.name),
-        )
+        val config = ForwardServerStore.load(this)
+        if (config == null) {
+            toast("请先在设置 → 分享下载中配置转发服务器")
+            return
+        }
+        if (ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null) {
+            toast(ForwardServerLogic.INVALID_SERVER_URL)
+            return
+        }
+        try {
+            CollectorForegroundService.start(
+                this,
+                task.url,
+                task.platform,
+                target,
+                task.keepLocal,
+                task.retryName,
+            )
+        } catch (_: Exception) {
+            toast("无法启动分享下载，请稍后重试")
+            refreshNow()
+            return
+        }
         toast("已重新加入分享下载队列")
         refreshNow()
     }

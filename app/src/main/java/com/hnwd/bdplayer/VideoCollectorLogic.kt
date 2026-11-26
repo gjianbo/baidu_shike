@@ -5,10 +5,10 @@ import java.util.Locale
 
 /**
  * 视频收集器的纯逻辑层：分享文本 → 平台/视频 ID → 目标路径校验。
- * 不碰 Android / OkHttp / yt-dlp，可在 JVM 单测里直接跑；下载交给引擎，这里不再手搓直链解析。
+ * 不碰 Android / OkHttp / 网络，可在 JVM 单测里直接跑；下载交给转发服务器，这里只做链接识别。
  */
 internal object VideoCollectorLogic {
-    enum class Platform { BILIBILI, X, DOUYIN }
+    enum class Platform { BILIBILI, X, DOUYIN, XIAOHONGSHU }
 
     data class Parsed(
         val platform: Platform,
@@ -23,11 +23,14 @@ internal object VideoCollectorLogic {
      * X 的状态 ID 为纯数字；抖音长链 ID 为纯数字，短链是一段 code。
      * 用白名单字符而不是 `.*`，否则会把后面的路径/查询串一起吞掉。
      */
-    private val BILIBILI_BV = Regex("""(BV[0-9A-Za-z]{10})""")
-    private val BILIBILI_AV = Regex("""(?:^|/)av(\d{1,15})(?:/|\?|#|$)""")
-    private val X_STATUS = Regex("""(?:^|/)status/(\d{5,25})""")
+    private val BILIBILI_BV = Regex("""BV[0-9A-Za-z]{10}""")
+    private val BILIBILI_AV = Regex("""av\d{1,15}""")
+    private val BILIBILI_SHORT = Regex("""/[A-Za-z0-9]{4,32}""")
+    private val X_STATUS = Regex("""^/(?:[A-Za-z0-9_]+|i/web)/status/(\d{5,25})(?:/|$)""")
     private val DOUYIN_VIDEO = Regex("""/video/(\d{8,25})""")
     private val DOUYIN_SHORT = Regex("""v\.douyin\.com/([A-Za-z0-9_-]{4,40})""")
+    private val XHS_NOTE = Regex("""/(?:explore|discovery/item)/([0-9a-fA-F]{16,32})(?:/|$)""")
+    private val XHS_SHORT = Regex("""/(?:o|a|m)/([A-Za-z0-9_-]{4,40})""")
 
     private fun parsedOrNull(platform: Platform, id: String, canonical: String, name: String): Parsed =
         Parsed(platform, id, canonical, canonical, name)
@@ -39,32 +42,44 @@ internal object VideoCollectorLogic {
     fun parse(text: String): Parsed? {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return null
-        val urls = Regex("""https?://[^\s<>"'）】]+""").findAll(trimmed).map { it.value }
-        for (raw in urls) {
-            val clean = raw.trimEnd('。', '，', ',', '.', ';', '；', '!', '！', ')', ']')
-            val lower = clean.lowercase(Locale.US)
-            when {
-                "bilibili.com/video/" in lower || "b23.tv/" in lower -> {
-                    BILIBILI_BV.find(clean)?.let { bv ->
-                        val id = bv.value
+        val urls = Regex("""https?://[^\s<>"'（）【】，。；！、]+""", RegexOption.IGNORE_CASE).findAll(trimmed)
+        for (match in urls) {
+            val clean = match.value.trimEnd(',', '.', ';', '!', ')', ']', '》', '」', '』')
+            val uri = runCatching { URI(clean) }.getOrNull() ?: continue
+            if (uri.rawUserInfo != null || uri.port != -1) continue
+            val host = uri.host?.lowercase(Locale.US) ?: continue
+            val path = uri.rawPath.orEmpty().trimEnd('/')
+            when (host) {
+                "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv" -> {
+                    val id = if (host == "b23.tv") path.removePrefix("/")
+                        else path.takeIf { it.startsWith("/video/") }?.removePrefix("/video/") ?: continue
+                    if (BILIBILI_BV.matches(id) || BILIBILI_AV.matches(id)) {
                         return parsedOrNull(Platform.BILIBILI, id, "https://www.bilibili.com/video/$id/", "B站-$id")
                     }
-                    BILIBILI_AV.find(clean)?.let { av ->
-                        val aid = av.groupValues[1]
-                        return parsedOrNull(Platform.BILIBILI, "av$aid", "https://www.bilibili.com/video/av$aid/", "B站-av$aid")
+                    if (host == "b23.tv" && BILIBILI_SHORT.matches(path)) {
+                        return parsedOrNull(Platform.BILIBILI, id, "https://b23.tv/$id", "B站-$id")
                     }
                 }
-                "x.com/" in lower || "twitter.com/" in lower -> {
-                    X_STATUS.find(clean)?.let { status ->
+                "x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com" -> {
+                    X_STATUS.find(path)?.let { status ->
                         val id = status.groupValues[1]
                         return parsedOrNull(Platform.X, id, "https://x.com/i/status/$id", "X-$id")
                     }
                 }
-                "douyin.com" in lower -> {
-                    val uri = runCatching { URI(clean) }.getOrNull() ?: continue
-                    if (uri.rawUserInfo != null || uri.port != -1) continue
-                    val host = uri.host?.lowercase(Locale.US)
-                    val path = uri.rawPath.orEmpty()
+                "xiaohongshu.com", "www.xiaohongshu.com", "m.xiaohongshu.com", "xhslink.com", "xhslink.cn" -> {
+                    if (host == "xhslink.com" || host == "xhslink.cn") {
+                        val short = XHS_SHORT.find(path)?.groupValues?.get(1)
+                        if (short != null) {
+                            return parsedOrNull(Platform.XIAOHONGSHU, short, clean, "小红书-$short")
+                        }
+                    } else {
+                        val note = XHS_NOTE.find(path)?.groupValues?.get(1)
+                        if (note != null) {
+                            return parsedOrNull(Platform.XIAOHONGSHU, note, clean, "小红书-${note.take(12)}")
+                        }
+                    }
+                }
+                "douyin.com", "www.douyin.com", "v.douyin.com" -> {
                     if (host == "douyin.com" || host == "www.douyin.com") {
                         val id = DOUYIN_VIDEO.matchEntire(path.trimEnd('/'))?.groupValues?.get(1)
                             ?: if (path.trimEnd('/') == "/jingxuan") {
@@ -112,10 +127,19 @@ internal object VideoCollectorLogic {
         return "${root.trimEnd('/')}/$subDir"
     }
 
+    /** 平台显示名，用于剪贴板提示这类只给用户看的一句话。 */
+    fun platformLabel(platform: Platform): String = when (platform) {
+        Platform.BILIBILI -> "B站"
+        Platform.X -> "X"
+        Platform.DOUYIN -> "抖音"
+        Platform.XIAOHONGSHU -> "小红书"
+    }
+
     fun collectorOutputPrefix(platform: String): String = when (platform) {
         "BILIBILI" -> "B站-"
         "X" -> "X-"
         "DOUYIN" -> "抖音-"
+        "XIAOHONGSHU" -> "小红书-"
         else -> "视频-"
     }
 
