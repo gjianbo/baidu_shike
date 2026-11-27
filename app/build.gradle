@@ -26,9 +26,9 @@ android {
         applicationId 'com.hnwd.bdplayer'
         minSdk 29
         targetSdk 35
-        versionCode 39
+        versionCode 40
         // 正式包从 v<versionName> tag 构建，发新版本时同步递增 versionCode。
-        versionName '1.3.8'
+        versionName '1.3.9'
     }
 
     buildFeatures { aidl true }
