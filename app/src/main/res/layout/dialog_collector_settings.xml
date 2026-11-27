@@ -24,7 +24,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:letterSpacing="-0.02"
-            android:text="分享下载"
+            android:text="下载设置"
             android:textColor="@color/ink"
             android:textSize="20sp"
             android:textStyle="bold" />
@@ -42,9 +42,7 @@
 
     <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:fillViewport="true"
+        android:layout_height="wrap_content"
         android:scrollbars="none">
 
         <LinearLayout
@@ -127,7 +125,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginStart="13dp"
                     android:layout_weight="1"
-                    android:text="分享下载位置" />
+                    android:text="保存目录" />
 
                 <TextView
                     android:id="@+id/setCollectorRootValue"
@@ -147,125 +145,6 @@
                     android:src="@drawable/ic_chevron_right" />
             </LinearLayout>
 
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginTop="8dp"
-                android:background="@color/line" />
-
-            <TextView
-                style="@style/SettingTitle"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:layout_marginTop="14dp"
-                android:text="解析服务器" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:layout_marginTop="4dp"
-                android:lineSpacingExtra="2dp"
-                android:text="B站 / X / 抖音 / 小红书由你填写的 MeTube 服务只读解析；不使用则不填。"
-                android:textColor="@color/ink3"
-                android:textSize="11.5sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:layout_marginTop="12dp"
-                android:text="服务地址"
-                android:textColor="@color/ink2"
-                android:textSize="12sp"
-                android:textStyle="bold" />
-
-            <EditText
-                android:id="@+id/setForwardUrl"
-                android:layout_width="match_parent"
-                android:layout_height="46dp"
-                android:layout_marginTop="8dp"
-                android:background="@drawable/bg_input"
-                android:hint="http://fnos.hnwd.cn:19011"
-                android:inputType="textUri"
-                android:maxLines="1"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:singleLine="true"
-                android:textColor="@color/ink"
-                android:textColorHint="@color/ink3"
-                android:textSize="14sp" />
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:layout_marginTop="6dp"
-                android:text="填写完整地址，例如 http://fnos.hnwd.cn:19011 或 https://你的域名；支持本机回环地址。"
-                android:textColor="@color/ink3"
-                android:textSize="11sp" />
-
-            <TextView
-                android:id="@+id/setForwardStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="4dp"
-                android:layout_marginTop="12dp"
-                android:lineSpacingExtra="2dp"
-                android:textColor="@color/danger"
-                android:textSize="12sp"
-                android:visibility="gone" />
         </LinearLayout>
     </ScrollView>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:orientation="horizontal">
-
-        <TextView
-            android:id="@+id/setForwardClear"
-            android:layout_width="0dp"
-            android:layout_height="46dp"
-            android:layout_weight="0.8"
-            android:background="@drawable/bg_outline_button"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center"
-            android:text="清除"
-            android:textColor="@color/danger"
-            android:textSize="13.5sp"
-            android:visibility="gone" />
-
-        <TextView
-            android:id="@+id/setForwardTest"
-            android:layout_width="0dp"
-            android:layout_height="46dp"
-            android:layout_marginStart="10dp"
-            android:layout_weight="1"
-            android:background="@drawable/bg_outline_button"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center"
-            android:text="测试连接"
-            android:textColor="@color/ink2"
-            android:textSize="13.5sp" />
-
-        <TextView
-            android:id="@+id/setForwardSave"
-            android:layout_width="0dp"
-            android:layout_height="46dp"
-            android:layout_marginStart="10dp"
-            android:layout_weight="1.25"
-            android:background="@drawable/bg_primary_button"
-            android:clickable="true"
-            android:focusable="true"
-            android:gravity="center"
-            android:text="保存"
-            android:textColor="@color/onAccent"
-            android:textSize="13.5sp"
-            android:textStyle="bold" />
-    </LinearLayout>
 </LinearLayout>

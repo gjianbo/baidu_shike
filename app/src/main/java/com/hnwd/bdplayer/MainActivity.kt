@@ -817,7 +817,7 @@ class MainActivity : AppCompatActivity() {
         // 只处理文本，不读取外部 URI；解析后只保留受支持平台的链接。
         clipboardPrompt?.dismiss()
         pendingClipboardConfirmation = false
-        pendingSharedVideo = VideoCollectorLogic.parse(text.take(16_384))?.canonicalUrl.orEmpty()
+        pendingSharedVideo = VideoCollectorLogic.parse(text)?.canonicalUrl.orEmpty()
         intent.action = null
         intent.removeExtra(Intent.EXTRA_TEXT)
     }
@@ -837,7 +837,7 @@ class MainActivity : AppCompatActivity() {
         val clipboard = getSystemService(android.content.ClipboardManager::class.java) ?: return
         val text = runCatching {
             clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.text
-                ?.take(16_384)?.toString()
+                ?.toString()
         }.getOrNull() ?: return
         val parsed = VideoCollectorLogic.parse(text) ?: return
         val url = parsed.canonicalUrl
@@ -874,7 +874,7 @@ class MainActivity : AppCompatActivity() {
         val fromClipboard = pendingClipboardConfirmation
         pendingClipboardConfirmation = false
         pendingSharedVideo = null
-        if (url.isEmpty()) toast("分享内容里没有可识别的 B站 / X / 抖音 / 小红书链接")
+        if (url.isEmpty()) toast("分享内容里没有可识别的视频链接")
         else {
             // 即使打开失败，弹窗关闭后恢复焦点也不能在同一前台会话里再次提示。
             if (fromClipboard) attemptedClipboardLinks.add(url)

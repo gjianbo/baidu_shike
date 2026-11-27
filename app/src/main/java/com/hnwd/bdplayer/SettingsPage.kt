@@ -1,7 +1,7 @@
 package com.hnwd.bdplayer
 
 import android.app.Activity
-import android.content.SharedPreferences
+import android.content.Intent
 import android.view.View
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -16,7 +16,7 @@ import java.text.DecimalFormat
  * 设置页刻意不持有任何跨页状态：它每次 [render] 都按当前账号重新算一遍，
  * 所以宿主只需要提供「读」和「跳转」，不需要回写。
  */
-internal interface SettingsHost {
+internal interface SettingsHost : CollectorPreferencesHost {
     val hostActivity: Activity
 
     fun clearStatus()
@@ -38,12 +38,10 @@ internal interface SettingsHost {
     fun checkAppUpdate()
 
     /** 夸克会话是否有效（Cookie 判定归宿主，设置页只读结果）。 */
-    fun quarkLoggedIn(): Boolean
     fun markQuarkEverLogged()
 
     fun account(): String
     fun accountName(): String
-    fun accountVerified(): Boolean
     fun shareSources(): List<ShareSource>
     fun renderAccountAvatar(icon: ImageView)
 
@@ -60,7 +58,6 @@ internal interface SettingsHost {
         onSelect: (SheetChoice) -> Unit,
     )
 
-    fun settings(): SharedPreferences
     fun say(message: String)
     fun refresh()
 }
@@ -90,7 +87,11 @@ internal class SettingsPage(private val host: SettingsHost) {
         page.findViewById<View>(R.id.setDownloadRow).setOnClickListener { host.openDownloads() }
         page.findViewById<TextView>(R.id.setDownloadValue).text = host.downloadSummary()
         page.findViewById<View>(R.id.setUpdateRow).setOnClickListener { host.checkAppUpdate() }
-        host.bindCollectorRows(page)
+        page.findViewById<View>(R.id.setExtensionsRow).setOnClickListener {
+            activity.startActivity(Intent(activity, ExtensionsActivity::class.java).apply {
+                if (host.accountVerified()) putExtra(ExtensionsActivity.BAIDU_ACCOUNT, host.account())
+            })
+        }
         page.findViewById<TextView>(R.id.setAbout).text = aboutLine()
         host.addPage(page)
         bindPreviewCache(page)

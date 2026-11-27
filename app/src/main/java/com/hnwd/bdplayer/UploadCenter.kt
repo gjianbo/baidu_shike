@@ -77,8 +77,8 @@ internal object UploadCenter {
         context: Context, sources: List<Uri>, dir: String,
         folderId: String, provider: SourceProvider, accountId: String,
         ownedSourceFile: File? = null,
-    ) {
-        if (sources.isEmpty() && ownedSourceFile == null) return
+    ): List<Long> {
+        if (sources.isEmpty() && ownedSourceFile == null) return emptyList()
         require(accountId.isNotBlank())
         val app = context.applicationContext
         val owned = ownedSourceFile?.let {
@@ -107,6 +107,7 @@ internal object UploadCenter {
                     createdAt = now,
                     source = UploadRecordLogic.sourceLabel(provider),
                     sourceUri = if (task.ownedSource == null) retainSource(app, task.source) else "",
+                    collectorSource = task.ownedSource?.file?.relativeTo(app.cacheDir.canonicalFile)?.path.orEmpty(),
                     folderId = folderId,
                     provider = provider,
                     accountId = accountId,
@@ -119,6 +120,21 @@ internal object UploadCenter {
         }
         queue.addAll(tasks)
         queued(app, tasks.size)
+        return tasks.map { it.id }
+    }
+
+    fun failQueued(context: Context, id: Long, message: String) {
+        val waiting = queue.firstOrNull { it.id == id } ?: return
+        queue.remove(waiting)
+        releaseOwnedSource(waiting)
+        UploadStore.finish(context, id, false, message)
+        liveIds = liveIds - id
+        if (queue.isEmpty() && currentTask == null) {
+            publish(state.copy(running = false, finished = true, success = false, queued = 0,
+                failed = state.failed + 1, message = message, label = message))
+        } else {
+            publish(state.copy(queued = queue.size, failed = state.failed + 1))
+        }
     }
 
     private fun retainSource(app: Context, uri: Uri): String = runCatching {
@@ -128,10 +144,16 @@ internal object UploadCenter {
 
     fun retry(context: Context, id: Long): Boolean {
         val app = context.applicationContext
-        val accepted = UploadStore.retry(app, id) { record ->
-            val task = Task(record.id, record.sourceUri.toUri(), record.dir, record.folderId, record.provider, record.accountId)
+        val accepted = UploadStore.retry(app, id) enqueueRetry@{ record, owned ->
+            val uri = if (owned != null) {
+                runCatching { FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", owned.file) }
+                    .getOrNull() ?: return@enqueueRetry false
+            } else record.sourceUri.toUri()
+            if (owned != null && !ownedSources.add(owned.file)) return@enqueueRetry false
+            val task = Task(record.id, uri, record.dir, record.folderId, record.provider, record.accountId, ownedSource = owned)
             liveIds = liveIds + task.id
             queue.addLast(task)
+            true
         }
         if (!accepted) return false
         queued(app, 1)
@@ -176,19 +198,18 @@ internal object UploadCenter {
             publish(state.copy(name = name, percent = 0, label = "正在准备文件…", queued = queue.size))
             AppIo.execute {
                 val staged = runCatching {
-                    try {
-                        clearStaleStaging(app)
-                        copyToCache(app, task)
-                    } finally {
-                        // 流已关闭（或从未打开），上传 worker 只读暂存副本。
-                        releaseOwnedSource(task)
-                    }
+                    clearStaleStaging(app)
+                    task.ownedSource?.let {
+                        check(it.file.isFile) { "分享下载的源文件已不存在" }
+                        StagedFile(it.file, it.file.name)
+                    } ?: copyToCache(app, task)
                 }
                 val file = staged.getOrNull()
                 val posted = main.post {
                     if (currentTask !== task || task.cancelled) {
-                        file?.file?.delete()
+                        if (task.ownedSource == null) file?.file?.delete()
                         if (currentTask === task) finish(app, task, false, "已取消上传")
+                        else releaseOwnedSource(task)
                     } else if (file == null) {
                         val message = staged.exceptionOrNull()?.message ?: "无法读取所选文件"
                         finish(app, task, false, "上传失败：$message")
@@ -196,10 +217,12 @@ internal object UploadCenter {
                         startTask(app, task, file)
                     }
                 }
-                if (!posted) file?.file?.delete()
+                if (!posted) {
+                    if (task.ownedSource == null) file?.file?.delete()
+                    releaseOwnedSource(task)
+                }
             }
         } catch (error: Exception) {
-            releaseOwnedSource(task)
             finish(app, task, false, "上传失败：${error.message ?: "无法准备文件"}")
         }
     }
@@ -218,8 +241,9 @@ internal object UploadCenter {
             }
         }
         val onResult: (Boolean, String) -> Unit = { ok, message ->
-            file.delete()
-            finish(app, task, ok, message)
+            if (task.ownedSource == null) file.delete()
+            if (currentTask === task) finish(app, task, ok, message)
+            else releaseOwnedSource(task)
         }
         runCatching {
             val session = TransferSession.capture(task.provider)
@@ -238,6 +262,7 @@ internal object UploadCenter {
 
     private fun finish(app: Context, task: Task, ok: Boolean, message: String) {
         if (currentTask !== task) return
+        releaseOwnedSource(task)
         UploadStore.finish(app, task.id, ok, message)
         UploadStore.releaseUnusedGrants(app)
         liveIds = liveIds - task.id
@@ -298,11 +323,12 @@ internal object UploadCenter {
 
     private fun releaseOwnedSource(task: Task) {
         val source = task.ownedSource ?: return
-        try {
-            source.delete()
-        } finally {
-            ownedSources.remove(source.file)
-        }
+        ownedSources.remove(source.file)
+    }
+
+    fun discardCollectorSource(context: Context, record: UploadRecord) {
+        val source = CollectorUploadSource.restore(context, record) ?: return
+        if (source.file !in ownedSources) source.delete()
     }
 
     private fun clearStaleStaging(app: Context) {
@@ -393,6 +419,12 @@ internal class CollectorUploadSource private constructor(val file: File, private
     }
 
     companion object {
+        fun restore(context: Context, record: UploadRecord): CollectorUploadSource? = runCatching {
+            val cache = context.cacheDir.canonicalFile
+            require(record.collectorSource.isNotBlank() && !File(record.collectorSource).isAbsolute)
+            validate(cache, AccountScope.key("v", record.accountId), File(cache, record.collectorSource))
+        }.getOrNull()
+
         fun validate(cacheDir: File, accountDirectory: String, source: File): CollectorUploadSource {
             val cache = cacheDir.canonicalFile
             val absolute = source.absoluteFile

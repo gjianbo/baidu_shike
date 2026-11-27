@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <permission android:name="com.hnwd.bdplayer.CONTROL_AUDIO" android:protectionLevel="signature" />
     <uses-permission android:name="com.hnwd.bdplayer.CONTROL_AUDIO" />
+    <uses-permission android:name="com.hnwd.bdplayer_ext_share.BIND_DOWNLOAD" />
+    <queries>
+        <package android:name="com.hnwd.bdplayer_ext_share" />
+    </queries>
     <application
         android:name=".PlayerApp"
         android:allowBackup="false"
@@ -69,6 +73,13 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <activity android:name=".ExtensionsActivity" android:exported="false" />
+        <activity android:name=".CollectorSitesActivity" android:exported="false" />
+        <activity
+            android:name=".ExtensionShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:permission="com.hnwd.bdplayer_ext_share.FORWARD_SHARE" />
         <activity android:name=".QuarkDriveActivity" android:exported="false"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout" />
         <activity

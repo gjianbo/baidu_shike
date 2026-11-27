@@ -525,7 +525,7 @@
         android:orientation="vertical">
 
         <LinearLayout
-            android:id="@+id/setCollectorSettingsRow"
+            android:id="@+id/setExtensionsRow"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="?attr/selectableItemBackground"
@@ -541,7 +541,7 @@
                 android:background="@drawable/bg_empty_icon"
                 android:padding="10dp"
                 android:importantForAccessibility="no"
-                android:src="@drawable/ic_cloud" />
+                android:src="@drawable/ic_download" />
 
             <LinearLayout
                 android:layout_width="0dp"
@@ -554,25 +554,15 @@
                     style="@style/SettingTitle"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="分享下载" />
+                    android:text="扩展管理" />
 
                 <TextView
                     style="@style/SettingSub"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="3dp"
-                    android:text="设置网盘、保存目录和解析服务器" />
+                    android:text="安装、更新和配置扩展" />
             </LinearLayout>
-
-            <TextView
-                android:id="@+id/setCollectorSettingsValue"
-                android:maxWidth="112dp"
-                android:maxLines="1"
-                android:ellipsize="end"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="@color/ink3"
-                android:textSize="11.5sp" />
 
             <ImageView
                 android:layout_width="18dp"

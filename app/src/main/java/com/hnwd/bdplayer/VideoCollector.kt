@@ -11,6 +11,7 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.ConnectivityManager
@@ -58,8 +59,14 @@ internal data class CollectorTarget(
             subFolderId.ifBlank { rootFolderId } else ""
 }
 
+internal interface CollectorPreferencesHost {
+    fun settings(): SharedPreferences
+    fun accountVerified(): Boolean
+    fun quarkLoggedIn(): Boolean
+}
+
 /**
- * 默认网盘 / 默认根目录的持久化。存在 SettingsHost.settings()（即 account_scope），
+ * 默认网盘 / 默认根目录的持久化。存在 account_scope，
  * 键按 AccountScope.key() 分桶，避免串账号。子目录是"本次选择"，不进这里。
  */
 internal object CollectorTargetStore {
@@ -69,7 +76,7 @@ internal object CollectorTargetStore {
     private const val KEY_ROOT_PATH = "root_path"
     private const val KEY_ROOT_FID = "root_fid"
 
-    fun defaultProvider(host: SettingsHost): SourceProvider {
+    fun defaultProvider(host: CollectorPreferencesHost): SourceProvider {
         val saved = host.settings().getString(bucket() + KEY_PROVIDER, "").orEmpty()
         if (saved == "BAIDU" || saved == "QUARK") return SourceProvider.valueOf(saved)
         return when {
@@ -79,7 +86,7 @@ internal object CollectorTargetStore {
         }
     }
 
-    fun load(host: SettingsHost, accountId: String): CollectorTarget {
+    fun load(host: CollectorPreferencesHost, accountId: String): CollectorTarget {
         val prefs = host.settings()
         val b = bucket()
         val provider = defaultProvider(host)
@@ -89,14 +96,14 @@ internal object CollectorTargetStore {
         return CollectorTarget(provider, accountId, rootPath, rootFid, "", "")
     }
 
-    fun saveProvider(host: SettingsHost, provider: SourceProvider) {
+    fun saveProvider(host: CollectorPreferencesHost, provider: SourceProvider) {
         if (provider == defaultProvider(host)) return
         val key = bucket()
         host.settings().edit().putString(key + KEY_PROVIDER, provider.name)
             .remove(key + KEY_ROOT_PATH).remove(key + KEY_ROOT_FID).apply()
     }
 
-    fun saveRoot(host: SettingsHost, provider: SourceProvider, rootPath: String, rootFid: String) {
+    fun saveRoot(host: CollectorPreferencesHost, provider: SourceProvider, rootPath: String, rootFid: String) {
         host.settings().edit()
             .putString(bucket() + KEY_PROVIDER, provider.name)
             .putString(bucket() + KEY_ROOT_PATH, rootPath)
@@ -104,12 +111,7 @@ internal object CollectorTargetStore {
             .apply()
     }
 
-    fun summary(host: SettingsHost): String {
-        val b = bucket()
-        val provider = defaultProvider(host)
-        val root = host.settings().getString(b + KEY_ROOT_PATH, "/").orEmpty().ifBlank { "/" }
-        return "${TransferSession.providerName(provider)} · $root"
-    }
+
 }
 
 /* ---------------------------------------------------------------------------
@@ -127,6 +129,18 @@ internal fun MainActivity.collectorCanUse(provider: SourceProvider): Boolean = w
     SourceProvider.QUARK -> QuarkPersonalDrive.openSession() != null
 }
 
+private fun collectorUnavailableReason(context: Context, platform: String): String? {
+    if (ExtensionDownload.available(context, platform)) return null
+    val server = ForwardServerStore.load(context)?.baseUrl?.let(ForwardServerLogic::normalizeBaseUrl)
+    if (!ExtensionDownload.requiresLocalExtension(platform) && server != null) return null
+    return if (ExtensionDownload.supports(platform)) {
+        "请先在扩展管理中安装或更新分享下载扩展"
+    } else {
+        val label = VideoCollectorLogic.platformLabel(VideoCollectorLogic.Platform.valueOf(platform))
+        "当前分享下载扩展暂不支持$label"
+    }
+}
+
 /* ---------------------------------------------------------------------------
  * 收集弹窗（唯一入口：showCollectorSheet）。布局在 dialog_collector_sheet.xml，
  * 宽屏为右侧浮层，窄屏为底部弹层；各入口（首页 chip / FAB 行）都只调这一个函数。
@@ -135,6 +149,14 @@ internal fun MainActivity.collectorCanUse(provider: SourceProvider): Boolean = w
 internal fun MainActivity.showCollectorSheet(sharedUrl: String? = null): Boolean {
     val existing = collectorSheetDialog?.takeIf { it.isShowing }
     if (existing != null && sharedUrl == null) return false
+    if (sharedUrl != null) {
+        val link = VideoCollectorLogic.parse(sharedUrl) ?: return false
+        val reason = collectorUnavailableReason(this, link.platform.name)
+        if (reason != null) {
+            toast(reason)
+            return false
+        }
+    }
     val host = SettingsHostAdapter()
     val available = listOf(SourceProvider.BAIDU, SourceProvider.QUARK).filter { collectorCanUse(it) }
     if (available.isEmpty()) {
@@ -181,17 +203,24 @@ internal fun MainActivity.showCollectorSheet(sharedUrl: String? = null): Boolean
         folderSub.text = if (target.subDir.isBlank())
             "默认根目录 · 点击选择或新建" else "本次子目录 · 点击更换"
     }
-    fun refreshForwardServer() {
+    fun refreshSupportedPlatforms() {
         val config = ForwardServerStore.load(ctx)
+        val serverAvailable = config?.let { ForwardServerLogic.normalizeBaseUrl(it.baseUrl) != null } == true
+        val extra = if (serverAvailable) " · 小红书使用已保存的解析服务" else ""
         supportHint.text = when {
-            config == null -> "请先在设置 → 分享下载中配置解析服务器"
-            ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null -> "请在设置 → 分享下载中检查服务地址"
+            ExtensionDownload.available(ctx, "YOUTUBE") ->
+                "B站 / 抖音 / 微博 / X / TikTok / 小红书 / YouTube 可在本机下载"
+            ExtensionDownload.available(ctx, "WEIBO") ->
+                "B站 / 抖音 / 微博 / X / TikTok 可在本机下载$extra"
+            ExtensionDownload.installed(ctx) -> "B站 / X / 抖音可在本机下载$extra"
+            config == null -> "请在扩展管理中安装分享下载扩展，并使用支持的链接"
+            ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null -> "已保存的解析服务地址无效，请使用扩展支持的链接"
             else -> "B站 / X / 抖音 / 小红书由 ${config.displayHost} 解析"
         }
     }
     refreshTarget()
     refreshFolder()
-    refreshForwardServer()
+    refreshSupportedPlatforms()
 
     pasteButton.setOnClickListener {
         val clipboard = getSystemService(ClipboardManager::class.java)
@@ -213,13 +242,21 @@ internal fun MainActivity.showCollectorSheet(sharedUrl: String? = null): Boolean
             toast("请先粘贴可识别的视频链接")
             return@setOnClickListener
         }
+        if (ExtensionDownload.available(ctx, parsed.platform.name)) {
+            toast("本机下载完成后会自动使用视频标题，也可以先填写文件名")
+            return@setOnClickListener
+        }
+        if (ExtensionDownload.requiresLocalExtension(parsed.platform.name)) {
+            toast("请先在设置 → 扩展管理中安装或更新分享下载扩展")
+            return@setOnClickListener
+        }
         val previousName = nameInput.text.toString()
         fetchTitle.isEnabled = false
         fetchTitle.alpha = 0.45f
         AppIo.execute {
             val title = runCatching {
                 val config = checkNotNull(ForwardServerStore.load(ctx)) {
-                    "请先在设置 → 分享下载中配置解析服务器"
+                    "请在扩展管理中安装分享下载扩展，并使用支持的链接"
                 }
                 ForwardServerClient(config).parse(parsed.canonicalUrl).title
             }
@@ -245,7 +282,11 @@ internal fun MainActivity.showCollectorSheet(sharedUrl: String? = null): Boolean
 
     var folderTrail: List<Pair<String, String>>? = null
     folderRow.setOnClickListener {
-        ctx.openCollectorFolderPicker(host, target, folderTrail = folderTrail, onTrail = { folderTrail = it }) { path, fid ->
+        val provider = target.provider
+        ctx.openCollectorFolderPicker(
+            target, currentAccount = { if (collectorCanUse(provider)) collectorAccount(provider) else "" },
+            folderTrail = folderTrail, onTrail = { folderTrail = it },
+        ) { path, fid ->
             val relative = VideoCollectorLogic.collectorRelativeDir(target.rootDir, path)
                 ?: return@openCollectorFolderPicker
             target = target.copy(subDir = relative, subFolderId = if (relative.isEmpty()) "" else fid)
@@ -264,13 +305,8 @@ internal fun MainActivity.showCollectorSheet(sharedUrl: String? = null): Boolean
             toast("没找到可识别的视频链接")
             return@setOnClickListener
         }
-        val config = ForwardServerStore.load(ctx)
-        if (config == null) {
-            toast("请先在设置 → 分享下载中配置解析服务器")
-            return@setOnClickListener
-        }
-        if (ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null) {
-            toast(ForwardServerLogic.INVALID_SERVER_URL)
+        collectorUnavailableReason(ctx, parsed.platform.name)?.let { reason ->
+            toast(reason)
             return@setOnClickListener
         }
         val account = runCatching { collectorAccount(target.provider) }.getOrDefault("")
@@ -375,9 +411,9 @@ internal fun Activity.showCollectorSheetDialog(
     )
 }
 
-private fun MainActivity.openCollectorFolderPicker(
-    host: SettingsHost,
+private fun Activity.openCollectorFolderPicker(
     target: CollectorTarget,
+    currentAccount: () -> String,
     choosingRoot: Boolean = false,
     folderTrail: List<Pair<String, String>>? = null,
     onTrail: (List<Pair<String, String>>) -> Unit = {},
@@ -417,8 +453,7 @@ private fun MainActivity.openCollectorFolderPicker(
     )
     var revision = 0
     fun select(path: String, fid: String) {
-        if (runCatching { collectorAccount(target.provider) }.getOrNull() != target.accountId ||
-            !collectorCanUse(target.provider)) {
+        if (runCatching(currentAccount).getOrNull() != target.accountId) {
             toast("网盘账号已变更，请重新打开目录选择")
             dialog.dismiss()
             return
@@ -447,7 +482,7 @@ private fun MainActivity.openCollectorFolderPicker(
         status.setOnClickListener(null)
         setFolderControls(false)
         AppIo.execute {
-            val result = runCatching { collectorListDirs(target.provider, path, fid, host) }
+            val result = runCatching { collectorListDirs(target.provider, path, fid) }
             ctx.runOnUiThread {
                 if (!dialog.isShowing || version != revision) return@runOnUiThread
                 result.onFailure {
@@ -490,7 +525,7 @@ private fun MainActivity.openCollectorFolderPicker(
             val name = input.text.toString().trim()
             val error = diskNameError(name)
             if (error != null) { input.error = error; return@setOnClickListener }
-            if (runCatching { collectorAccount(target.provider) }.getOrNull() != target.accountId) {
+            if (runCatching(currentAccount).getOrNull() != target.accountId) {
                 toast("网盘账号已变更，请重新打开目录选择")
                 naming.dismiss(); dialog.dismiss(); return@setOnClickListener
             }
@@ -500,7 +535,7 @@ private fun MainActivity.openCollectorFolderPicker(
             status.setOnClickListener(null)
             status.text = "正在新建文件夹…"
             AppIo.execute {
-                val result = runCatching { collectorCreateDir(target.provider, path, fid, name, host) }
+                val result = runCatching { collectorCreateDir(target.provider, path, fid, name) }
                 ctx.runOnUiThread {
                     if (!dialog.isShowing || version != revision) return@runOnUiThread
                     result.onSuccess { (createdPath, createdFid) ->
@@ -516,7 +551,7 @@ private fun MainActivity.openCollectorFolderPicker(
 
 /** 只列一层子目录；返回 (显示名, 完整路径, fid)。百度 fid 不用，传空。 */
 private fun collectorListDirs(
-    provider: SourceProvider, dir: String, fid: String, host: SettingsHost,
+    provider: SourceProvider, dir: String, fid: String,
 ): List<Triple<String, String, String>> = when (provider) {
     SourceProvider.BAIDU -> {
         val session = TransferSession.capture(SourceProvider.BAIDU)
@@ -544,7 +579,7 @@ private fun collectorListDirs(
 
 /** 在默认根下新建一层子目录；返回 (完整路径, fid)。 */
 private fun collectorCreateDir(
-    provider: SourceProvider, dir: String, fid: String, name: String, host: SettingsHost,
+    provider: SourceProvider, dir: String, fid: String, name: String,
 ): Pair<String, String> = when (provider) {
     SourceProvider.BAIDU -> {
         val session = TransferSession.capture(SourceProvider.BAIDU)
@@ -610,105 +645,37 @@ private const val COLLECTOR_MIN_FREE_BYTES = 128L * 1024 * 1024
 internal const val COLLECTOR_LOCAL_COPY_FAILED = "本机副本保存失败"
 
 /* ---------------------------------------------------------------------------
- * 分享下载设置：保存位置和解析服务器统一放在设置页。
+ * 分享下载设置：默认网盘和保存目录。
  * ------------------------------------------------------------------------- */
 
-internal fun SettingsHost.bindCollectorRows(page: View) {
-    val entry = page.findViewById<View>(R.id.setCollectorSettingsRow) ?: return
-    val value = page.findViewById<TextView>(R.id.setCollectorSettingsValue)
-    fun refresh() {
-        val target = CollectorTargetStore.summary(this)
-        val config = ForwardServerStore.load(hostActivity)
-        val server = when {
-            config == null -> "解析服务未配置"
-            ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null -> "解析地址待更新"
-            else -> "解析服务已配置"
-        }
-        value.text = "$target · $server"
-    }
-    refresh()
-    entry.setOnClickListener {
-        val panel = hostActivity.layoutInflater.inflate(R.layout.dialog_collector_settings, null)
-        val dialog = android.app.Dialog(hostActivity)
-        dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
-        bindCollectorPanel(panel, dialog) { refresh() }
-        val wide = hostActivity.resources.configuration.screenWidthDp >= 600
-        hostActivity.showCollectorSheetDialog(
-            dialog, panel, wide, widthDp = 504,
-            phoneHeightFraction = 0.9f, phoneMaxHeightDp = 780,
-        )
-    }
+internal fun Activity.showCollectorSettings(
+    settingsHost: CollectorPreferencesHost,
+    accountFor: (SourceProvider) -> String,
+) {
+    val panel = layoutInflater.inflate(R.layout.dialog_collector_settings, null)
+    val dialog = android.app.Dialog(this)
+    dialog.requestWindowFeature(android.view.Window.FEATURE_NO_TITLE)
+    bindCollectorPanel(settingsHost, panel, dialog, accountFor)
+    val wide = resources.configuration.screenWidthDp >= 600
+    showCollectorSheetDialog(dialog, panel, wide, widthDp = 504)
 }
 
-private fun SettingsHost.bindCollectorPanel(
+private fun Activity.bindCollectorPanel(
+    settingsHost: CollectorPreferencesHost,
     page: View,
     dialog: android.app.Dialog,
-    onChanged: () -> Unit,
+    accountFor: (SourceProvider) -> String,
 ) {
+    val hostActivity = this
     val providerRow = page.findViewById<View>(R.id.setCollectorProviderRow) ?: return
     val providerValue = page.findViewById<TextView>(R.id.setCollectorProviderValue)
     val rootRow = page.findViewById<View>(R.id.setCollectorRootRow)
     val rootValue = page.findViewById<TextView>(R.id.setCollectorRootValue)
-    val urlInput = page.findViewById<EditText>(R.id.setForwardUrl)
-    val status = page.findViewById<TextView>(R.id.setForwardStatus)
-    val clear = page.findViewById<TextView>(R.id.setForwardClear)
-    val test = page.findViewById<TextView>(R.id.setForwardTest)
-    val save = page.findViewById<TextView>(R.id.setForwardSave)
-    page.findViewById<View>(R.id.collectorSettingsClose)?.setOnClickListener { dialog.dismiss() }
-    var savedConfig = ForwardServerStore.load(hostActivity)
-    var busy = false
-
-    if (savedConfig != null) {
-        urlInput.setText(savedConfig.baseUrl)
-        clear.visibility = View.VISIBLE
-    }
-
-    fun showStatus(message: String, colorRes: Int) {
-        status.visibility = View.VISIBLE
-        status.setTextColor(hostActivity.getColor(colorRes))
-        status.text = message
-        status.post { if (dialog.isShowing) status.requestRectangleOnScreen(android.graphics.Rect(0, 0, status.width, status.height)) }
-    }
-
-    fun setBusy(value: Boolean) {
-        busy = value
-        listOf(urlInput, clear, test, save).forEach { it.isEnabled = !busy }
-        test.alpha = if (busy) 0.55f else 1f
-        save.alpha = if (busy) 0.55f else 1f
-    }
-
-    fun readConfig(): ForwardServerConfig? {
-        val baseUrl = ForwardServerLogic.normalizeBaseUrl(urlInput.text?.toString().orEmpty())
-        if (baseUrl == null) {
-            showStatus(ForwardServerLogic.INVALID_SERVER_URL, R.color.danger)
-            return null
-        }
-        return ForwardServerConfig(baseUrl)
-    }
-
-    /** 解析服务不需要登录；只需确认 /resolve 端点连通并返回可识别的 JSON。 */
-    fun verify(config: ForwardServerConfig, onSuccess: () -> Unit) {
-        if (busy) return
-        setBusy(true)
-        showStatus("正在测试解析服务连接…", R.color.ink3)
-        AppIo.execute {
-            val result = runCatching { ForwardServerClient(config).checkService() }
-            hostActivity.runOnUiThread {
-                if (!dialog.isShowing) return@runOnUiThread
-                setBusy(false)
-                result.onSuccess { onSuccess() }
-                    .onFailure { error ->
-                        logCollectorFailure("解析服务连接失败", error)
-                        showStatus("连接失败：${collectorError(error)}", R.color.danger)
-                    }
-            }
-        }
-    }
+    page.findViewById<View>(R.id.collectorSettingsClose).setOnClickListener { dialog.dismiss() }
 
     fun refresh() {
-        providerValue?.text = TransferSession.providerName(CollectorTargetStore.defaultProvider(this))
-        rootValue?.text = CollectorTargetStore.load(this, "").rootDir
-        onChanged()
+        providerValue?.text = TransferSession.providerName(CollectorTargetStore.defaultProvider(settingsHost))
+        rootValue?.text = CollectorTargetStore.load(settingsHost, "").rootDir
     }
     refresh()
 
@@ -716,74 +683,23 @@ private fun SettingsHost.bindCollectorPanel(
         val all = arrayOf("百度网盘", "夸克网盘")
         AlertDialog.Builder(hostActivity).setTitle("默认上传网盘").setItems(all) { _, which ->
             val chosen = if (which == 0) SourceProvider.BAIDU else SourceProvider.QUARK
-            CollectorTargetStore.saveProvider(this, chosen)
+            CollectorTargetStore.saveProvider(settingsHost, chosen)
             refresh()
         }.show()
     }
     rootRow?.setOnClickListener {
-        val provider = CollectorTargetStore.defaultProvider(this)
-        val activity = hostActivity as? MainActivity ?: return@setOnClickListener
-        activity.openCollectorRootPicker(this, provider) { path, fid ->
-            CollectorTargetStore.saveRoot(this, provider, path, fid)
+        val provider = CollectorTargetStore.defaultProvider(settingsHost)
+        val account = runCatching { accountFor(provider) }.getOrDefault("")
+        if (account.isBlank()) {
+            toast("请先登录当前网盘")
+            return@setOnClickListener
+        }
+        val target = CollectorTarget(provider, account, "/", QuarkPersonalDrive.ROOT, "", "")
+        openCollectorFolderPicker(target, currentAccount = { accountFor(provider) }, choosingRoot = true) { path, fid ->
+            CollectorTargetStore.saveRoot(settingsHost, provider, path, fid)
             refresh()
         }
     }
-
-    test.setOnClickListener {
-        val config = readConfig() ?: return@setOnClickListener
-        verify(config) {
-            showStatus("连接成功：接口可达，尚未验证视频能否解析。", R.color.ok)
-        }
-    }
-
-    save.setOnClickListener {
-        val config = readConfig() ?: return@setOnClickListener
-        verify(config) {
-            val persisted = runCatching { ForwardServerStore.save(hostActivity, config) }
-            val failure = persisted.exceptionOrNull()
-            if (failure != null) {
-                logCollectorFailure("保存解析服务器失败", failure)
-                showStatus("保存失败：${collectorError(failure)}", R.color.danger)
-                return@verify
-            }
-            savedConfig = config
-            hostActivity.toast("解析服务器已保存")
-            onChanged()
-            dialog.dismiss()
-        }
-    }
-
-    clear.setOnClickListener {
-        if (busy) return@setOnClickListener
-        AlertDialog.Builder(hostActivity)
-            .setTitle("清除解析服务器配置？")
-            .setMessage("清除后分享下载将不可用，重新填写服务地址后才能继续使用。")
-            .setNegativeButton("取消", null)
-            .setPositiveButton("清除") { _, _ ->
-                if (busy || !dialog.isShowing) return@setPositiveButton
-                val failure = runCatching { ForwardServerStore.clear(hostActivity) }.exceptionOrNull()
-                if (failure != null) {
-                    logCollectorFailure("清除解析服务器失败", failure)
-                    showStatus("清除失败：${collectorError(failure)}", R.color.danger)
-                    return@setPositiveButton
-                }
-                savedConfig = null
-                urlInput.setText("")
-                clear.visibility = View.GONE
-                showStatus("已清除，请重新配置后再使用分享下载", R.color.ink3)
-                onChanged()
-            }
-            .show()
-    }
-}
-
-private fun MainActivity.openCollectorRootPicker(
-    host: SettingsHost, provider: SourceProvider, onPick: (String, String) -> Unit,
-) {
-    val account = runCatching { collectorAccount(provider) }.getOrDefault("")
-    if (account.isBlank() || !collectorCanUse(provider)) { toast("请先登录当前网盘"); return }
-    val target = CollectorTarget(provider, account, "/", QuarkPersonalDrive.ROOT, "", "")
-    openCollectorFolderPicker(host, target, choosingRoot = true, onPick = onPick)
 }
 
 /* ---------------------------------------------------------------------------
@@ -803,14 +719,21 @@ internal class CollectorForegroundService : Service() {
         private const val EXTRA_NAME = "name"
         private const val EXTRA_TASK_ID = "task_id"
         private const val EXTRA_SERVER_URL = "server_url"
+        private const val EXTRA_PLATFORM = "platform"
+        private const val EXTRA_SITE_COOKIES = "site_cookies"
         private val taskSequence = java.util.concurrent.atomic.AtomicLong()
+        private var runningService: CollectorForegroundService? = null
+
+        fun cancel(taskId: Long): Boolean = runningService?.cancelTask(taskId) == true
 
         fun start(
             context: Context, url: String, platform: String, target: CollectorTarget,
-            keepLocal: Boolean, customName: String,
+            keepLocal: Boolean, customName: String, siteCookies: String = "", requireExtension: Boolean = false,
         ): Long {
-            val serverUrl = ForwardServerStore.load(context)?.baseUrl?.let(ForwardServerLogic::normalizeBaseUrl)
-                ?: error("请先在设置 → 分享下载中配置有效的解析服务器")
+            val local = ExtensionDownload.available(context, platform)
+            check((!requireExtension && !ExtensionDownload.requiresLocalExtension(platform) && siteCookies.isEmpty()) || local) { "请安装分享下载扩展后重试" }
+            val serverUrl = if (local) null else ForwardServerStore.load(context)?.baseUrl?.let(ForwardServerLogic::normalizeBaseUrl)
+                ?: error("此链接暂无可用的下载方式")
             val now = System.currentTimeMillis()
             val taskId = taskSequence.updateAndGet { maxOf(now, it + 1) }
             CollectorTaskStore.begin(
@@ -827,6 +750,7 @@ internal class CollectorForegroundService : Service() {
                     keepLocal = keepLocal,
                     createdAt = now,
                     customName = customName,
+                    localExtension = local,
                 ),
             )
             val intent = Intent(context, CollectorForegroundService::class.java).apply {
@@ -839,6 +763,8 @@ internal class CollectorForegroundService : Service() {
                 putExtra(EXTRA_NAME, customName)
                 putExtra(EXTRA_TASK_ID, taskId)
                 putExtra(EXTRA_SERVER_URL, serverUrl)
+                putExtra(EXTRA_PLATFORM, platform)
+                if (siteCookies.isNotEmpty()) putExtra(EXTRA_SITE_COOKIES, siteCookies)
             }
             try {
                 context.startForegroundService(intent)
@@ -854,8 +780,10 @@ internal class CollectorForegroundService : Service() {
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
     // 队列和通知都由主线程串行驱动；后台 worker 只执行队首任务。
-    private val waiting = ArrayDeque<() -> Unit>()
-    private var running = false
+    private val waiting = LinkedHashMap<Long, () -> Unit>()
+    @Volatile private var runningId: Long? = null
+    @Volatile private var cancelledId: Long? = null
+    private val running: Boolean get() = runningId != null
     private val acceptedIds = mutableSetOf<Long>()
     private var latestStartId = 0
     private val stopWhenIdle = Runnable {
@@ -864,15 +792,16 @@ internal class CollectorForegroundService : Service() {
 
     private fun pump() {
         if (running || cancelled) return
-        val next = waiting.removeFirstOrNull() ?: return
-        running = true
-        next()
+        val nextId = waiting.keys.firstOrNull() ?: return
+        runningId = nextId
+        checkNotNull(waiting.remove(nextId)).invoke()
     }
 
     private fun completeJob(taskId: Long, text: String, success: Boolean) {
         acceptedIds.remove(taskId)
         if (cancelled) return
-        running = false
+        runningId = null
+        cancelledId = null
         if (waiting.isNotEmpty()) {
             pump()
         } else {
@@ -883,6 +812,27 @@ internal class CollectorForegroundService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        runningService = this
+    }
+
+    private fun cancelTask(taskId: Long): Boolean {
+        if (taskId == runningId && cancelledId != taskId) {
+            cancelledId = taskId
+            updateTask(taskId, "正在取消…", 0)
+            return true
+        }
+        if (waiting.remove(taskId) == null) return false
+        acceptedIds.remove(taskId)
+        CollectorTaskStore.finish(this, taskId, false, "已取消分享下载")
+        return true
+    }
+
+    private fun checkTaskActive(taskId: Long) {
+        check(!cancelled && cancelledId != taskId) { "分享下载已中断" }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         latestStartId = startId
@@ -905,7 +855,12 @@ internal class CollectorForegroundService : Service() {
         val customName = intent.getStringExtra(EXTRA_NAME).orEmpty()
         val taskId = intent.getLongExtra(EXTRA_TASK_ID, 0L)
         val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL)?.let(ForwardServerLogic::normalizeBaseUrl)
-        if (taskId <= 0 || url.isBlank() || account.isBlank() || serverUrl == null) {
+        val platform = intent.getStringExtra(EXTRA_PLATFORM).orEmpty()
+        val siteCookies = intent.getStringExtra(EXTRA_SITE_COOKIES).orEmpty()
+        intent.removeExtra(EXTRA_SITE_COOKIES)
+        if (taskId <= 0 || url.isBlank() || account.isBlank() ||
+            (serverUrl == null && !ExtensionDownload.supports(platform))
+        ) {
             val reason = "链接、解析服务器或网盘账号无效"
             if (taskId > 0) CollectorTaskStore.finish(this, taskId, false, reason)
             if (!running) completeJob(taskId, reason, false)
@@ -913,8 +868,8 @@ internal class CollectorForegroundService : Service() {
         }
         acceptedIds.add(taskId)
         if (running) CollectorTaskStore.progress(this, taskId, 0, "等待收集…")
-        waiting.addLast {
-            AppIo.execute { runCollect(taskId, url, serverUrl, provider, account, dir, fid, keep, customName) }
+        waiting[taskId] = {
+            AppIo.execute { runCollect(taskId, url, serverUrl, platform, siteCookies, provider, account, dir, fid, keep, customName) }
         }
         pump()
         return START_NOT_STICKY
@@ -922,6 +877,7 @@ internal class CollectorForegroundService : Service() {
 
     override fun onDestroy() {
         cancelled = true
+        if (runningService === this) runningService = null
         main.removeCallbacks(stopWhenIdle)
         waiting.clear()
         acceptedIds.forEach(CollectorTaskRuntime::markStopped)
@@ -930,23 +886,36 @@ internal class CollectorForegroundService : Service() {
     }
 
     private fun runCollect(
-        taskId: Long, url: String, serverUrl: String, provider: SourceProvider,
+        taskId: Long, url: String, serverUrl: String?, platform: String, siteCookies: String, provider: SourceProvider,
         account: String, dir: String, fid: String, keep: Boolean, customName: String,
     ) {
         var temporaryBucket: File? = null
         try {
+            checkTaskActive(taskId)
             check(isNetworkAvailable(this)) { "当前无可用网络，请连接网络后重试" }
             val availableBytes = StatFs(cacheDir.absolutePath).availableBytes
             check(availableBytes >= COLLECTOR_MIN_FREE_BYTES) { "本机空间不足，请至少腾出 128 MB 后重试" }
             // 不把已排队的链接发送给用户后来配置的另一台服务器。
             val currentServer = ForwardServerStore.load(this)?.baseUrl?.let(ForwardServerLogic::normalizeBaseUrl)
-            check(currentServer == serverUrl) { "解析服务器配置已变更，请重新收集" }
+            check(serverUrl == null || currentServer == serverUrl) { "解析服务器配置已变更，请重新收集" }
             updateTask(taskId, "准备收集视频…", 0)
             val parent = File(cacheDir, "collector/${AccountScope.key("v", account)}")
             check(parent.mkdirs() || parent.isDirectory) { "无法创建收集目录" }
             val bucket = java.nio.file.Files.createTempDirectory(parent.toPath(), "job-").toFile()
             temporaryBucket = bucket
-            val video = downloadViaForwardServer(ForwardServerConfig(serverUrl), url, bucket, taskId, customName)
+            val video = if (serverUrl == null) {
+                val pending = File(bucket, "pending.mp4")
+                val session = siteCookies.ifEmpty {
+                    CollectorSite.fromPlatform(platform)?.let { CollectorSiteSessions.read(this, it)?.cookies }.orEmpty()
+                }
+                val engineName = ExtensionDownload.download(this, taskId, platform, url, session, pending, {
+                    checkTaskActive(taskId)
+                }) { label, percent -> updateTask(taskId, label, percent) }
+                val base = VideoCollectorLogic.collectorFileName(customName, engineName.removeSuffix(".mp4"))
+                File(bucket, "$base.mp4").also { destination ->
+                    check(destination == pending || pending.renameTo(destination)) { "无法保存扩展交接的视频" }
+                }
+            } else downloadViaForwardServer(ForwardServerConfig(serverUrl), url, bucket, taskId, customName)
             CollectorTaskStore.updateName(this, taskId, video.name)
             val uri = FileProvider.getUriForFile(applicationContext, "$packageName.fileprovider", video)
             val copyResult = if (keep) {
@@ -954,12 +923,11 @@ internal class CollectorForegroundService : Service() {
                     .onFailure { logCollectorFailure("保存本机副本失败", it) }
             } else null
             updateTask(taskId, "已下载，正在加入上传队列…", 100)
-            // UploadCenter 的队列只在主线程修改；先请求启动服务，避免启动被拒绝后留下排队任务。
+            // 先持久化交接，后台服务启动受限时也能直接重试已下载的文件。
             main.post {
-                try {
-                    check(!cancelled) { "分享下载已中断" }
-                    UploadForegroundService.start(applicationContext)
-                    UploadCenter.enqueue(applicationContext, listOf(uri), dir, fid, provider, account, ownedSourceFile = video)
+                val uploadId = try {
+                    checkTaskActive(taskId)
+                    UploadCenter.enqueue(applicationContext, listOf(uri), dir, fid, provider, account, ownedSourceFile = video).single()
                 } catch (error: Exception) {
                     val copyStatus = when {
                         copyResult?.isSuccess == true -> " · 本机副本已保留"
@@ -971,14 +939,19 @@ internal class CollectorForegroundService : Service() {
                     }
                     return@post
                 }
-                // 上传端仍需读取 FileProvider URI，不能在交接完成时删除源文件。
+                val uploadStarted = runCatching { UploadForegroundService.start(applicationContext) }
+                    .onFailure { error ->
+                        logCollectorFailure("无法启动后台上传", error)
+                        UploadCenter.failQueued(applicationContext, uploadId, "无法启动后台上传，请返回应用后重试")
+                    }.isSuccess
+                val status = if (uploadStarted) "已加入上传队列" else "已下载，请在上传列表重试"
                 val message = when {
-                    copyResult?.isFailure == true -> "已加入上传队列 · $COLLECTOR_LOCAL_COPY_FAILED"
-                    copyResult?.isSuccess == true -> "已加入上传队列 · 本机副本已保留"
-                    else -> "已加入上传队列"
+                    copyResult?.isFailure == true -> "$status · $COLLECTOR_LOCAL_COPY_FAILED"
+                    copyResult?.isSuccess == true -> "$status · 本机副本已保留"
+                    else -> status
                 }
                 CollectorTaskStore.finish(this, taskId, true, message)
-                if (copyResult?.isFailure == true) {
+                if (!uploadStarted || copyResult?.isFailure == true) {
                     android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
                 }
                 completeJob(taskId, message, true)
@@ -993,7 +966,7 @@ internal class CollectorForegroundService : Service() {
     ): File {
         updateTask(taskId, "正在连接解析服务…", 0)
         val client = ForwardServerClient(config)
-        check(!cancelled) { "分享下载已中断" }
+        checkTaskActive(taskId)
         updateTask(taskId, "正在解析视频…", 0)
         val parsed = client.parse(url)
         val title = parsed.title.ifBlank { "分享视频" }
@@ -1003,11 +976,11 @@ internal class CollectorForegroundService : Service() {
         val destination = File(bucket, "$baseName.$ext")
         updateTask(taskId, "正在下载视频…", 0)
         client.download(parsed.videoUrl, destination, checkActive = {
-            check(!cancelled) { "分享下载已中断" }
+            checkTaskActive(taskId)
         }) { percent ->
             updateTask(taskId, "正在下载视频 $percent%", percent)
         }
-        check(!cancelled) { "分享下载已中断" }
+        checkTaskActive(taskId)
         return destination
     }
 
@@ -1017,7 +990,7 @@ internal class CollectorForegroundService : Service() {
                 .onFailure { logCollectorFailure("清理暂存文件失败", it) }
         }
         logCollectorFailure(stage, error)
-        val message = "$stage：${collectorError(error)}$suffix"
+        val message = if (cancelledId == taskId) "已取消分享下载" else "$stage：${collectorError(error)}$suffix"
         if (taskId > 0) CollectorTaskStore.finish(this, taskId, false, message)
         main.post {
             if (cancelled) return@post
@@ -1093,6 +1066,7 @@ internal class CollectorForegroundService : Service() {
     }
 
     private fun updateTask(taskId: Long, text: String, percent: Int) {
+        if (cancelledId == taskId && text != "正在取消…") return
         if (taskId > 0) CollectorTaskStore.progress(this, taskId, percent, text)
         notifyOnUi(text, percent)
     }

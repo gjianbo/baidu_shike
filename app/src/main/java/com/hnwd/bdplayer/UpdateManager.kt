@@ -298,12 +298,16 @@ internal object UpdateManager {
      */
     private fun verifySignature(context: Context, apk: File): Boolean = runCatching {
         val pm = context.packageManager
-        val installed = pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
         val archive = pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
             ?: return@runCatching false
-        val mine = signerDigests(installed)
-        mine.isNotEmpty() && mine == signerDigests(archive)
+        matchesAppSignature(context, archive)
     }.getOrDefault(false)
+
+    fun matchesAppSignature(context: Context, archive: PackageInfo): Boolean {
+        val app = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        val mine = signerDigests(app)
+        return mine.isNotEmpty() && mine == signerDigests(archive)
+    }
 
     @Suppress("DEPRECATION")
     private fun signerDigests(info: PackageInfo): Set<String> {

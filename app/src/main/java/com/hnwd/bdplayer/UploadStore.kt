@@ -20,9 +20,24 @@ internal object UploadStore {
     private fun readRaw(context: Context): List<UploadRecord> =
         UploadRecordLogic.decode(prefs(context).getString(KEY, "[]"))
 
-    private fun write(context: Context, list: List<UploadRecord>, durable: Boolean = false) {
-        val editor = prefs(context).edit().putString(KEY, UploadRecordLogic.encode(UploadRecordLogic.trim(list)))
-        if (durable) check(editor.commit()) { "无法保存网盘提交状态" } else editor.apply()
+    private fun write(
+        context: Context, list: List<UploadRecord>, durable: Boolean = false,
+        previousSources: List<UploadRecord> = emptyList(),
+    ) {
+        val trimmed = UploadRecordLogic.trim(list)
+        val candidates = if (trimmed.size == list.size) previousSources else previousSources + list
+        val retained = trimmed.mapNotNull { it.collectorSource.takeIf(String::isNotBlank) }.toSet()
+        val removed = candidates.filter {
+            it.collectorSource.isNotBlank() && it.collectorSource !in retained
+        }.distinctBy { it.collectorSource }
+        val editor = prefs(context).edit().putString(KEY, UploadRecordLogic.encode(trimmed))
+        if (durable || removed.isNotEmpty()) {
+            val saved = editor.commit()
+            if (durable) check(saved) { "无法保存上传记录" }
+            if (saved) removed.forEach { record -> UploadCenter.discardCollectorSource(context, record) }
+        } else {
+            editor.apply()
+        }
     }
 
     fun checkpoint(context: Context, id: Long, state: UploadCommitState, remoteFileId: String) = synchronized(lock) {
@@ -34,10 +49,11 @@ internal object UploadStore {
     }
 
     fun records(context: Context): List<UploadRecord> = synchronized(lock) {
+        val before = readRaw(context)
         val reconciled = UploadRecordLogic.reconcileInterrupted(
-            readRaw(context), UploadCenter.activeIds(), System.currentTimeMillis(),
+            before, UploadCenter.activeIds(), System.currentTimeMillis(),
         )
-        if (reconciled.changed) write(context, reconciled.records)
+        if (reconciled.changed) write(context, reconciled.records, previousSources = before)
         reconciled.records
     }
 
@@ -46,27 +62,32 @@ internal object UploadStore {
     }
 
     fun begin(context: Context, queued: List<UploadRecord>) = synchronized(lock) {
-        write(context, records(context) + queued)
+        write(context, records(context) + queued, durable = queued.any { it.collectorSource.isNotBlank() })
     }
 
-    fun retry(context: Context, id: Long, onQueued: (UploadRecord) -> Unit): Boolean = synchronized(lock) {
+    fun retry(context: Context, id: Long, onQueued: (UploadRecord, CollectorUploadSource?) -> Boolean): Boolean = synchronized(lock) {
         val list = records(context).toMutableList()
         val index = list.indexOfFirst { it.id == id }
         if (index < 0) return@synchronized false
         val record = list[index]
         if (!UploadRecordLogic.canRetry(record)) return@synchronized false
-        val source = Uri.parse(record.sourceUri)
-        if (context.contentResolver.persistedUriPermissions.none { it.uri == source && it.isReadPermission }) {
-            return@synchronized false
+        val owned = if (record.collectorSource.isNotBlank()) {
+            CollectorUploadSource.restore(context, record) ?: return@synchronized false
+        } else {
+            val source = Uri.parse(record.sourceUri)
+            if (context.contentResolver.persistedUriPermissions.none { it.uri == source && it.isReadPermission }) {
+                return@synchronized false
+            }
+            null
         }
         val queued = record.copy(
             state = UploadRecordState.QUEUED, finishedAt = 0,
             percent = 0, message = "", label = "排队中",
         )
+        // 锁内登记队列，避免并发读取把尚未登记的排队记录当作中断任务。
+        if (!onQueued(queued, owned)) return@synchronized false
         list[index] = queued
         write(context, list)
-        // 锁内登记队列，避免并发读取把尚未登记的排队记录当作中断任务。
-        onQueued(queued)
         true
     }
 
@@ -107,15 +128,16 @@ internal object UploadStore {
         val list = records(context).toMutableList()
         val index = list.indexOfFirst { it.id == id }
         if (index < 0) return
-        list[index] = UploadRecordLogic.finish(list[index], success, message, System.currentTimeMillis())
-        write(context, list)
+        val before = list[index]
+        list[index] = UploadRecordLogic.finish(before, success, message, System.currentTimeMillis())
+        write(context, list, previousSources = listOf(before))
     }
 
     /** 排队任务被移出队列时整条删掉，不进历史。 */
     fun remove(context: Context, id: Long): Unit = synchronized(lock) {
-        val list = records(context).toMutableList()
-        if (list.removeAll { it.id == id }) {
-            write(context, list)
+        val (removed, kept) = records(context).partition { it.id == id }
+        if (removed.isNotEmpty()) {
+            write(context, kept, previousSources = removed)
             releaseUnusedGrants(context)
         }
     }
@@ -127,7 +149,7 @@ internal object UploadStore {
             !UploadRecordLogic.isActive(it) && selectedById[it.id] == it
         }
         if (removed.isNotEmpty()) {
-            write(context, kept)
+            write(context, kept, previousSources = removed)
             releaseUnusedGrants(context)
         }
         removed

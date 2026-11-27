@@ -1159,6 +1159,11 @@ class DownloadActivity : AppCompatActivity() {
         main.addView(progressBar(task.percent.coerceIn(0, 100), false))
         main.addView(meta("${task.percent.coerceIn(0, 100)}% · ${task.label}"))
         row.addView(main)
+        if (task.label != "正在取消…") {
+            row.addView(action("取消") {
+                if (CollectorForegroundService.cancel(task.id)) refreshNow()
+            })
+        }
         activeList.addView(row)
     }
 
@@ -1188,13 +1193,20 @@ class DownloadActivity : AppCompatActivity() {
             }
             row.addView(action("查看上传") { switchTab(TAB_UPLOADS) })
         } else {
-            row.addView(action("重新收集") { retryCollector(task) })
+            val needsLogin = task.message.contains(ExtensionDownload.LOGIN_MESSAGE) &&
+                ExtensionDownload.available(this, task.platform)
+            if (needsLogin) {
+                val label = if (CollectorSite.fromPlatform(task.platform)?.loginUrl == null) "配置 Cookie 并重试" else "登录并重试"
+                row.addView(action(label) { CollectorSiteLogin.show(this, task) { retryCollector(task, it) } })
+            } else {
+                row.addView(action("重新收集") { retryCollector(task) })
+            }
         }
         taskList.addView(row)
     }
 
     /** 失败条目保留原始链接和落点，可直接再跑一次；新任务会生成新 id。 */
-    private fun retryCollector(task: CollectorTask) {
+    private fun retryCollector(task: CollectorTask, siteCookies: String = "") {
         if (task.url.isBlank() || task.accountId.isBlank()) {
             toast("这条记录缺少链接或账号，请重新添加分享下载")
             return
@@ -1208,11 +1220,16 @@ class DownloadActivity : AppCompatActivity() {
             subFolderId = task.folderId,
         )
         val config = ForwardServerStore.load(this)
-        if (config == null) {
-            toast("请先在设置 → 分享下载中配置转发服务器")
+        val local = ExtensionDownload.available(this, task.platform)
+        if (!local && (task.localExtension || ExtensionDownload.requiresLocalExtension(task.platform))) {
+            toast("请安装或更新分享下载扩展后重试")
             return
         }
-        if (ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null) {
+        if (!local && config == null) {
+            toast("此链接暂无可用的下载方式。请检查扩展是否已安装并支持此平台")
+            return
+        }
+        if (!local && config != null && ForwardServerLogic.normalizeBaseUrl(config.baseUrl) == null) {
             toast(ForwardServerLogic.INVALID_SERVER_URL)
             return
         }
@@ -1224,6 +1241,8 @@ class DownloadActivity : AppCompatActivity() {
                 target,
                 task.keepLocal,
                 task.retryName,
+                siteCookies,
+                requireExtension = task.localExtension,
             )
         } catch (_: Exception) {
             toast("无法启动分享下载，请稍后重试")

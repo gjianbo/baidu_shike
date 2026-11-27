@@ -8,7 +8,10 @@ import java.util.Locale
  * 不碰 Android / OkHttp / 网络，可在 JVM 单测里直接跑；下载交给转发服务器，这里只做链接识别。
  */
 internal object VideoCollectorLogic {
-    enum class Platform { BILIBILI, X, DOUYIN, XIAOHONGSHU }
+    private const val MAX_SHARE_TEXT_LENGTH = 65_536
+    private const val MAX_MEDIA_URL_LENGTH = 16_384
+
+    enum class Platform { BILIBILI, X, DOUYIN, XIAOHONGSHU, WEIBO, TIKTOK, YOUTUBE }
 
     data class Parsed(
         val platform: Platform,
@@ -29,8 +32,15 @@ internal object VideoCollectorLogic {
     private val X_STATUS = Regex("""^/(?:[A-Za-z0-9_]+|i/web)/status/(\d{5,25})(?:/|$)""")
     private val DOUYIN_VIDEO = Regex("""/video/(\d{8,25})""")
     private val DOUYIN_SHORT = Regex("""v\.douyin\.com/([A-Za-z0-9_-]{4,40})""")
-    private val XHS_NOTE = Regex("""/(?:explore|discovery/item)/([0-9a-fA-F]{16,32})(?:/|$)""")
-    private val XHS_SHORT = Regex("""/(?:o|a|m)/([A-Za-z0-9_-]{4,40})""")
+    private val XHS_NOTE = Regex("""/(?:explore|discovery/item)/([0-9a-fA-F]{16,32})""")
+    private val XHS_SHORT = Regex("""/(?:(?:o|a|m)/)?([A-Za-z0-9_-]{4,40})""")
+    private val YOUTUBE_ID = Regex("""[A-Za-z0-9_-]{11}""")
+    private val YOUTUBE_VIDEO = Regex("""/(?:shorts|live|embed)/([A-Za-z0-9_-]{11})""")
+
+    private val WEIBO_POST = Regex("""/(?:[0-9]{4,20}|status|detail)/([A-Za-z0-9]{5,25})""")
+    private val WEIBO_VIDEO = Regex("""/tv/show/(1034:[0-9]{5,25})""")
+    private val TIKTOK_VIDEO = Regex("""/(?:@[A-Za-z0-9_.-]+/video|embed)/([0-9]{8,25})""")
+    private val TIKTOK_SHORT = Regex("""/(?:t/)?([A-Za-z0-9]{4,24})""")
 
     private fun parsedOrNull(platform: Platform, id: String, canonical: String, name: String): Parsed =
         Parsed(platform, id, canonical, canonical, name)
@@ -40,11 +50,12 @@ internal object VideoCollectorLogic {
      * 所以先找出所有 http(s) URL，再逐个按平台规则解析，命中即返回。
      */
     fun parse(text: String): Parsed? {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return null
-        val urls = Regex("""https?://[^\s<>"'（）【】，。；！、]+""", RegexOption.IGNORE_CASE).findAll(trimmed)
+        val shareText = text.take(MAX_SHARE_TEXT_LENGTH)
+        val urls = Regex("""https?://[^\s<>"'（）【】，。；！、]+""", RegexOption.IGNORE_CASE).findAll(shareText)
         for (match in urls) {
+            if (text.length > shareText.length && match.range.last == shareText.lastIndex) continue
             val clean = match.value.trimEnd(',', '.', ';', '!', ')', ']', '》', '」', '』')
+            if (clean.length > MAX_MEDIA_URL_LENGTH) continue
             val uri = runCatching { URI(clean) }.getOrNull() ?: continue
             if (uri.rawUserInfo != null || uri.port != -1) continue
             val host = uri.host?.lowercase(Locale.US) ?: continue
@@ -54,7 +65,11 @@ internal object VideoCollectorLogic {
                     val id = if (host == "b23.tv") path.removePrefix("/")
                         else path.takeIf { it.startsWith("/video/") }?.removePrefix("/video/") ?: continue
                     if (BILIBILI_BV.matches(id) || BILIBILI_AV.matches(id)) {
-                        return parsedOrNull(Platform.BILIBILI, id, "https://www.bilibili.com/video/$id/", "B站-$id")
+                        val page = uri.rawQuery.orEmpty().split('&')
+                            .singleOrNull { it.startsWith("p=") }
+                            ?.substringAfter('=')?.toIntOrNull()?.takeIf { it > 0 }
+                        val query = page?.let { "?p=$it" }.orEmpty()
+                        return parsedOrNull(Platform.BILIBILI, id, "https://www.bilibili.com/video/$id/$query", "B站-$id")
                     }
                     if (host == "b23.tv" && BILIBILI_SHORT.matches(path)) {
                         return parsedOrNull(Platform.BILIBILI, id, "https://b23.tv/$id", "B站-$id")
@@ -66,18 +81,37 @@ internal object VideoCollectorLogic {
                         return parsedOrNull(Platform.X, id, "https://x.com/i/status/$id", "X-$id")
                     }
                 }
+                "weibo.com", "www.weibo.com", "m.weibo.cn" -> {
+                    val id = (WEIBO_POST.matchEntire(path) ?: WEIBO_VIDEO.matchEntire(path))?.groupValues?.get(1)
+                        ?: continue
+                    return parsedOrNull(Platform.WEIBO, id, "https://$host$path", "微博-$id")
+                }
+                "tiktok.com", "www.tiktok.com", "vm.tiktok.com", "vt.tiktok.com" -> {
+                    val shortHost = host == "vm.tiktok.com" || host == "vt.tiktok.com"
+                    val short = if (shortHost || path.startsWith("/t/")) TIKTOK_SHORT.matchEntire(path) else null
+                    val id = (short ?: if (!shortHost) TIKTOK_VIDEO.matchEntire(path) else null)?.groupValues?.get(1)
+                        ?: continue
+                    val canonicalHost = if (shortHost) host else "www.tiktok.com"
+                    return parsedOrNull(Platform.TIKTOK, id, "https://$canonicalHost$path/", "TikTok-$id")
+                }
                 "xiaohongshu.com", "www.xiaohongshu.com", "m.xiaohongshu.com", "xhslink.com", "xhslink.cn" -> {
-                    if (host == "xhslink.com" || host == "xhslink.cn") {
-                        val short = XHS_SHORT.find(path)?.groupValues?.get(1)
-                        if (short != null) {
-                            return parsedOrNull(Platform.XIAOHONGSHU, short, clean, "小红书-$short")
-                        }
-                    } else {
-                        val note = XHS_NOTE.find(path)?.groupValues?.get(1)
-                        if (note != null) {
-                            return parsedOrNull(Platform.XIAOHONGSHU, note, clean, "小红书-${note.take(12)}")
-                        }
-                    }
+                    val shortHost = host == "xhslink.com" || host == "xhslink.cn"
+                    val id = (if (shortHost) XHS_SHORT else XHS_NOTE).matchEntire(path)?.groupValues?.get(1) ?: continue
+                    val canonicalHost = if (shortHost) host else "www.xiaohongshu.com"
+                    val canonicalPath = if (shortHost) path else path.substringBeforeLast('/') + "/" + id.lowercase(Locale.ROOT)
+                    val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+                    val canonicalUrl = "https://$canonicalHost$canonicalPath$query"
+                    if (canonicalUrl.length > MAX_MEDIA_URL_LENGTH) continue
+                    return parsedOrNull(Platform.XIAOHONGSHU, id, canonicalUrl, "小红书-${id.take(12)}")
+                }
+                "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtube-nocookie.com" -> {
+                    val id = when {
+                        host == "youtu.be" -> path.removePrefix("/")
+                        path == "/watch" && host != "www.youtube-nocookie.com" -> uri.rawQuery.orEmpty().split('&')
+                            .singleOrNull { it.startsWith("v=") }?.substringAfter('=')
+                        else -> YOUTUBE_VIDEO.matchEntire(path)?.groupValues?.get(1)
+                    }?.takeIf(YOUTUBE_ID::matches) ?: continue
+                    return parsedOrNull(Platform.YOUTUBE, id, "https://www.youtube.com/watch?v=$id", "YouTube-$id")
                 }
                 "douyin.com", "www.douyin.com", "v.douyin.com" -> {
                     if (host == "douyin.com" || host == "www.douyin.com") {
@@ -133,6 +167,9 @@ internal object VideoCollectorLogic {
         Platform.X -> "X"
         Platform.DOUYIN -> "抖音"
         Platform.XIAOHONGSHU -> "小红书"
+        Platform.WEIBO -> "微博"
+        Platform.TIKTOK -> "TikTok"
+        Platform.YOUTUBE -> "YouTube"
     }
 
     fun collectorOutputPrefix(platform: String): String = when (platform) {
@@ -140,6 +177,9 @@ internal object VideoCollectorLogic {
         "X" -> "X-"
         "DOUYIN" -> "抖音-"
         "XIAOHONGSHU" -> "小红书-"
+        "WEIBO" -> "微博-"
+        "TIKTOK" -> "TikTok-"
+        "YOUTUBE" -> "YouTube-"
         else -> "视频-"
     }
 

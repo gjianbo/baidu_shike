@@ -30,6 +30,7 @@ internal data class UploadRecord(
     val accountId: String = "",
     val commitState: UploadCommitState = UploadCommitState.TRANSFERRING,
     val remoteFileId: String = "",
+    val collectorSource: String = "",
 )
 
 /** 纯逻辑：编解码与列表收敛，可在 JVM 单测里钉死口径。 */
@@ -41,7 +42,7 @@ internal object UploadRecordLogic {
     const val UNCONFIRMED = "网盘提交结果待确认，请先检查目标目录，避免重复上传"
 
     fun canRetry(record: UploadRecord): Boolean =
-        record.state == UploadRecordState.FAILED && record.sourceUri.isNotBlank() &&
+        record.state == UploadRecordState.FAILED && (record.sourceUri.isNotBlank() || record.collectorSource.isNotBlank()) &&
             record.accountId.isNotBlank() && record.commitState == UploadCommitState.TRANSFERRING
 
     fun finish(record: UploadRecord, success: Boolean, message: String, now: Long): UploadRecord {
@@ -56,6 +57,7 @@ internal object UploadRecordLogic {
             finishedAt = now, percent = if (accepted) 100 else record.percent,
             message = detail, label = detail,
             sourceUri = if (accepted || detail == "已取消上传") "" else record.sourceUri,
+            collectorSource = if (accepted || detail == "已取消上传") "" else record.collectorSource,
         )
     }
 
@@ -125,6 +127,7 @@ internal object UploadRecordLogic {
         .put("account", record.accountId)
         .put("commit", record.commitState.name)
         .put("remoteFileId", record.remoteFileId)
+        .put("collectorSource", record.collectorSource)
 
     private fun fromJson(item: JSONObject) = UploadRecord(
         id = item.getLong("id"),
@@ -144,6 +147,7 @@ internal object UploadRecordLogic {
         commitState = UploadCommitState.entries.firstOrNull { it.name == item.optString("commit") }
             ?: UploadCommitState.TRANSFERRING,
         remoteFileId = item.optString("remoteFileId"),
+        collectorSource = item.optString("collectorSource"),
         folderId = item.optString("folderId"),
         provider = runCatching { SourceProvider.valueOf(item.optString("provider")) }
             .getOrDefault(SourceProvider.BAIDU),

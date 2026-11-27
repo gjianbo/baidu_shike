@@ -20,6 +20,13 @@ class VideoCollectorLogicTest {
     }
 
     @Test
+    fun parse_preservesBilibiliPageWithoutTrackingParameters() {
+        val parsed = VideoCollectorLogic.parse("https://www.bilibili.com/video/BV1ms411Q7vw/?spm_id_from=1&p=4")
+        assertEquals("https://www.bilibili.com/video/BV1ms411Q7vw/?p=4", parsed?.canonicalUrl)
+        assertEquals(parsed, VideoCollectorLogic.parse(parsed!!.canonicalUrl))
+    }
+
+    @Test
     fun parse_recognizesAvAndShortLink() {
         val av = VideoCollectorLogic.parse("http://m.bilibili.com/video/av12345678?from=share")
         assertEquals("av12345678", av?.id)
@@ -96,6 +103,44 @@ class VideoCollectorLogicTest {
         assertEquals("6b02eee2000000002a03be8e", note?.id)
         assertTrue(note!!.canonicalUrl.contains("xsec_token=ABC123"))
         assertNull(VideoCollectorLogic.parse("https://xhslink.cn.example.org/o/abc123"))
+    }
+
+    @Test
+    fun parse_recognizesYouTubeLinksAndRemovesPlaylistParameters() {
+        val expected = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+        val links = listOf(
+            "https://youtu.be/jNQXAC9IVRw?si=tracking",
+            "https://m.youtube.com/shorts/jNQXAC9IVRw",
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw&list=PLexample",
+            "https://www.youtube-nocookie.com/embed/jNQXAC9IVRw",
+            "https://www.youtube.com/live/jNQXAC9IVRw",
+        )
+        links.forEach { url ->
+            val parsed = VideoCollectorLogic.parse("分享 $url")
+            assertEquals(VideoCollectorLogic.Platform.YOUTUBE, parsed?.platform)
+            assertEquals(expected, parsed?.canonicalUrl)
+        }
+        assertNull(VideoCollectorLogic.parse("https://www.youtube.com/playlist?list=PLexample"))
+        assertNull(VideoCollectorLogic.parse("https://www.youtube.com/watch?v=jNQXAC9IVRw&v=ABCDEFGHIJK"))
+        assertNull(VideoCollectorLogic.parse("https://youtu.be.example.org/jNQXAC9IVRw"))
+    }
+
+    @Test
+    fun parse_keepsSignedXiaohongshuQueryWhenNormalizingMobileNote() {
+        val note = VideoCollectorLogic.parse(
+            "http://m.xiaohongshu.com/discovery/item/6B02EEE2000000002A03BE8E?xsec_token=abc%3D&xsec_source=app_share",
+        )
+        assertEquals("https://www.xiaohongshu.com/discovery/item/6b02eee2000000002a03be8e?xsec_token=abc%3D&xsec_source=app_share",
+            note?.canonicalUrl)
+    }
+
+    @Test
+    fun parse_preservesLongSignedNoteAndRejectsTruncatedCandidates() {
+        val note = "https://www.xiaohongshu.com/explore/6b02eee2000000002a03be8e"
+        val url = "$note?padding=${"a".repeat(3_000)}&xsec_token=signed%3D"
+        assertEquals(url, VideoCollectorLogic.parse("发布分享 $url 【小红书】")?.canonicalUrl)
+        assertNull(VideoCollectorLogic.parse("$note?xsec_token=${"a".repeat(17_000)}"))
+        assertNull(VideoCollectorLogic.parse(" ".repeat(65_000) + url))
     }
 
     @Test

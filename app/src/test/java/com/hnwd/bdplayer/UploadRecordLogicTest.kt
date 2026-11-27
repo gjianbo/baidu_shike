@@ -119,4 +119,16 @@ class UploadRecordLogicTest {
         assertEquals("", result[1].sourceUri)
         assertTrue(UploadRecordLogic.canRetry(UploadRecordLogic.finish(record, false, "网络错误", 5000)))
     }
+    @Test fun downloadedVideoRemainsRetryableUntilUploadSucceeds() {
+        val source = "collector/account/job-123/video.mp4"
+        val record = UploadRecord(42, "video.mp4", "/", 10, 1,
+            accountId = "account", collectorSource = source)
+        val result = UploadRecordLogic.finish(record, false, "网络中断", 2)
+        val restored = UploadRecordLogic.decode(UploadRecordLogic.encode(listOf(result))).single()
+        assertEquals(source, restored.collectorSource)
+        assertTrue(UploadRecordLogic.canRetry(restored))
+        assertFalse(UploadRecordLogic.canRetry(restored.copy(commitState = UploadCommitState.SUBMITTING)))
+        assertEquals("", UploadRecordLogic.finish(restored, true, "完成", 3).collectorSource)
+    }
+
 }

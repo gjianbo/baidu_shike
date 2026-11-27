@@ -33,6 +33,7 @@ internal data class CollectorTask(
     val message: String = "",
     // null 表示旧版记录；空字符串表示用户明确未指定文件名。
     val customName: String? = null,
+    val localExtension: Boolean = false,
 ) {
     val retryName: String
         get() = customName ?: name.takeUnless { it == "分享视频" }
@@ -44,6 +45,9 @@ internal data class CollectorTask(
             "X" -> "X"
             "DOUYIN" -> "抖音"
             "XIAOHONGSHU" -> "小红书"
+            "WEIBO" -> "微博"
+            "TIKTOK" -> "TikTok"
+            "YOUTUBE" -> "YouTube"
             else -> "视频"
         }
     val providerLabel: String
@@ -211,6 +215,7 @@ internal object CollectorTaskLogic {
         .put("label", task.label)
         .put("message", task.message)
         .put("customName", task.customName)
+        .put("localExtension", task.localExtension)
 
     private fun fromJson(item: JSONObject) = CollectorTask(
         id = item.getLong("id"),
@@ -232,5 +237,6 @@ internal object CollectorTaskLogic {
         label = item.optString("label").ifBlank { "准备收集视频…" },
         message = item.optString("message"),
         customName = item.opt("customName") as? String,
+        localExtension = item.optBoolean("localExtension"),
     )
 }
