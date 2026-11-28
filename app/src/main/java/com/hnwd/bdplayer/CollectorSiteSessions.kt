@@ -30,9 +30,18 @@ internal enum class CollectorSite(
         listOf("https://x.com/", "https://twitter.com/")),
     TIKTOK("TikTok", "https://www.tiktok.com/login", setOf("tiktok.com"),
         listOf("https://www.tiktok.com/"), 2),
-    XIAOHONGSHU("小红书", "https://www.xiaohongshu.com/", setOf("xiaohongshu.com"),
+    XIAOHONGSHU("小红书", "https://www.xiaohongshu.com/login", setOf("xiaohongshu.com"),
         listOf("https://www.xiaohongshu.com/"), 3, allowLegacyParser = true),
-    YOUTUBE("YouTube", null, setOf("youtube.com"), emptyList(), 3);
+    YOUTUBE(
+        "YouTube", "https://www.youtube.com/",
+        setOf("youtube.com", "google.com"),
+        listOf(
+            "https://www.youtube.com/",
+            "https://www.google.com/",
+            "https://accounts.google.com/",
+        ),
+        3,
+    );
 
     fun allows(host: String): Boolean = domains.any { host == it || host.endsWith(".$it") }
 
@@ -44,6 +53,20 @@ internal enum class CollectorSite(
 internal object CollectorSiteCookies {
     private const val MAX_LENGTH = 32_768
     private const val HEADER = "# Netscape HTTP Cookie File\n"
+
+    fun forDownload(platform: String, cookies: String): String {
+        if (platform != CollectorSite.YOUTUBE.name || cookies.isEmpty()) return cookies
+        return cookies.lineSequence()
+            .filter { line ->
+                val domain = line.removePrefix("#HttpOnly_").substringBefore('\t')
+                    .removePrefix(".").lowercase(Locale.ROOT)
+                domain == "youtube.com" || domain.endsWith(".youtube.com")
+            }
+            .toList()
+            .takeIf { it.isNotEmpty() }
+            ?.joinToString("\n", HEADER, "\n")
+            .orEmpty()
+    }
 
     fun normalize(site: CollectorSite, text: String, now: Long = System.currentTimeMillis() / 1000): String? {
         require(text.length <= MAX_LENGTH) { "Cookie 文件太大" }

@@ -198,6 +198,12 @@ class ExtensionsActivity : AppCompatActivity() {
                     }
                 }
             }
+            row.setOnLongClickListener {
+                if (!compatible) return@setOnLongClickListener false
+                runCatching { ExtensionDownload.activateFromUser(this) }
+                    .onFailure { toast(it.message.orEmpty().ifBlank { "无法打开分享下载扩展" }) }
+                true
+            }
             list.addView(row)
         }
         updateButton.visibility = if (canCheckUpdates) View.VISIBLE else View.GONE

@@ -21,6 +21,7 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -82,6 +83,14 @@ class DownloadActivity : AppCompatActivity() {
     private var tasks: List<DownloadTask> = emptyList()
     private var uploads: List<UploadRecord> = emptyList()
     private var collectorTasks: List<CollectorTask> = emptyList()
+    private var extensionRetryTaskId: Long? = null
+    private var extensionReturned = false
+    private var inForeground = false
+    private val wakeExtension = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        // Older extensions finish without setting a result code.
+        extensionReturned = true
+        retryAfterExtensionReturn()
+    }
     private var speeds: Map<Long, Double> = emptyMap()
     private var lastBytes: Map<Long, Long> = emptyMap()
     private var lastSampleAt = 0L
@@ -114,6 +123,8 @@ class DownloadActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        extensionRetryTaskId = savedInstanceState?.getLong(STATE_EXTENSION_RETRY_TASK)?.takeIf { it != 0L }
+        extensionReturned = savedInstanceState?.getBoolean(STATE_EXTENSION_RETURNED) == true
         enableEdgeToEdge()
         WindowInsetsControllerCompat(window, window.decorView).apply {
             isAppearanceLightStatusBars = !ThemeStore.isDark(this@DownloadActivity)
@@ -218,6 +229,8 @@ class DownloadActivity : AppCompatActivity() {
         outState.putInt(STATE_UPLOAD_FILTER, uploadFilter.ordinal)
         // 分享页签当前没有筛选，保留一个固定值，避免恢复时落到越界下标。
         outState.putInt(STATE_COLLECTOR_FILTER, collectorFilter.ordinal)
+        extensionRetryTaskId?.let { outState.putLong(STATE_EXTENSION_RETRY_TASK, it) }
+        outState.putBoolean(STATE_EXTENSION_RETURNED, extensionReturned)
         super.onSaveInstanceState(outState)
     }
 
@@ -309,7 +322,14 @@ class DownloadActivity : AppCompatActivity() {
         handler.post(ticker)
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        inForeground = true
+        retryAfterExtensionReturn()
+    }
+
     override fun onPause() {
+        inForeground = false
         handler.removeCallbacks(ticker)
         super.onPause()
     }
@@ -1199,13 +1219,39 @@ class DownloadActivity : AppCompatActivity() {
                 val label = if (CollectorSite.fromPlatform(task.platform)?.loginUrl == null) "配置 Cookie 并重试" else "登录并重试"
                 row.addView(action(label) { CollectorSiteLogin.show(this, task) { retryCollector(task, it) } })
             } else {
-                row.addView(action("重新收集") { retryCollector(task) })
+                val needsWake = task.message.contains(ExtensionDownload.SYSTEM_EXTENSION_BLOCKED) ||
+                    task.message.contains("无法连接分享下载扩展")
+                val label = if (needsWake) "唤醒扩展并重试" else "重新收集"
+                row.addView(action(label) { if (needsWake) wakeExtensionAndRetry(task) else retryCollector(task) })
             }
         }
         taskList.addView(row)
     }
 
-    /** 失败条目保留原始链接和落点，可直接再跑一次；新任务会生成新 id。 */
+    private fun wakeExtensionAndRetry(task: CollectorTask) {
+        if (extensionRetryTaskId != null) return
+        if (!ExtensionDownload.available(this, task.platform)) {
+            toast("请安装或更新分享下载扩展后重试")
+            return
+        }
+        extensionRetryTaskId = task.id
+        runCatching { wakeExtension.launch(ExtensionDownload.activationIntent(this)) }.onFailure {
+            extensionRetryTaskId = null
+            toast("无法打开分享下载扩展，请检查系统的应用启动设置")
+        }
+    }
+
+    private fun retryAfterExtensionReturn() {
+        if (!inForeground || !extensionReturned) return
+        extensionReturned = false
+        val id = extensionRetryTaskId ?: return
+        extensionRetryTaskId = null
+        CollectorTaskStore.records(this)
+            .firstOrNull { it.id == id && it.state == CollectorTaskState.FAILED }
+            ?.let { retryCollector(it) }
+    }
+
+    /** 在原记录上重试，保留链接和保存位置。 */
     private fun retryCollector(task: CollectorTask, siteCookies: String = "") {
         if (task.url.isBlank() || task.accountId.isBlank()) {
             toast("这条记录缺少链接或账号，请重新添加分享下载")
@@ -1233,7 +1279,7 @@ class DownloadActivity : AppCompatActivity() {
             toast(ForwardServerLogic.INVALID_SERVER_URL)
             return
         }
-        try {
+        val queued = try {
             CollectorForegroundService.start(
                 this,
                 task.url,
@@ -1243,13 +1289,15 @@ class DownloadActivity : AppCompatActivity() {
                 task.retryName,
                 siteCookies,
                 requireExtension = task.localExtension,
+                retryTaskId = task.id,
             )
-        } catch (_: Exception) {
-            toast("无法启动分享下载，请稍后重试")
+        } catch (error: Exception) {
+            val message = error.message.orEmpty().trim()
+            toast(if (message.contains("无法连接")) "扩展被系统拦截，请先点“唤醒扩展并重试”" else message)
             refreshNow()
             return
         }
-        toast("已重新加入分享下载队列")
+        if (queued) toast("已重新加入分享下载队列")
         refreshNow()
     }
 
@@ -1415,6 +1463,8 @@ class DownloadActivity : AppCompatActivity() {
         private const val STATE_DOWNLOAD_FILTER = "transfer_download_filter"
         private const val STATE_UPLOAD_FILTER = "transfer_upload_filter"
         private const val STATE_COLLECTOR_FILTER = "transfer_collector_filter"
+        private const val STATE_EXTENSION_RETRY_TASK = "transfer_extension_retry_task"
+        private const val STATE_EXTENSION_RETURNED = "transfer_extension_returned"
         private const val TAB_DOWNLOADS = 0
         private const val TAB_UPLOADS = 1
         private const val TAB_COLLECTOR = 2

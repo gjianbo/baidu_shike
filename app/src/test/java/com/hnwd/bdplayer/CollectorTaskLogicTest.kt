@@ -1,7 +1,9 @@
 package com.hnwd.bdplayer
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CollectorTaskLogicTest {
@@ -30,6 +32,33 @@ class CollectorTaskLogicTest {
         assertEquals("", roundTrip(task).retryName)
         assertEquals("课程.v2", roundTrip(task.copy(name = "课程.v2")).retryName)
         assertEquals("课程.v2", roundTrip(task.copy(name = "课程.v2.MP4")).retryName)
+    }
+
+    @Test
+    fun retryRestartsOriginalRecordAndClearsFailedAttemptState() {
+        val failed = task.copy(
+            state = CollectorTaskState.FAILED, percent = 80, message = "收集失败", finishedAt = 2,
+        )
+        val next = task.copy(createdAt = 3, updatedAt = 3)
+        val restarted = requireNotNull(CollectorTaskLogic.prepareAttempt(next, failed, retry = true))
+        assertEquals(task.copy(updatedAt = 3), restarted)
+    }
+
+    @Test
+    fun staleRetryCannotReplaceRunningCompletedOrDeletedRecord() {
+        assertNull(CollectorTaskLogic.prepareAttempt(task, task, retry = true))
+        assertNull(CollectorTaskLogic.prepareAttempt(task, task.copy(state = CollectorTaskState.SUCCESS), retry = true))
+        assertNull(CollectorTaskLogic.prepareAttempt(task, null, retry = true))
+    }
+
+    @Test
+    fun mediaValidationAllowsSilentXiaohongshuVideoButRequiresAudioElsewhere() {
+        val silentVideo = listOf("video/avc")
+        val videoWithAudio = listOf("video/avc", "audio/mp4a-latm")
+        assertTrue(ExtensionDownload.hasRequiredTracks(silentVideo, requireAudio = false))
+        assertFalse(ExtensionDownload.hasRequiredTracks(silentVideo, requireAudio = true))
+        assertTrue(ExtensionDownload.hasRequiredTracks(videoWithAudio, requireAudio = true))
+        assertFalse(ExtensionDownload.hasRequiredTracks(listOf("audio/mp4a-latm"), requireAudio = false))
     }
 
     private fun roundTrip(record: CollectorTask) =

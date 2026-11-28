@@ -38,14 +38,35 @@ class CollectorSiteCookiesTest {
     @Test
     fun newSitesKeepCookieDomainsAndMinimumVersionsSeparate() {
         val youtube = ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\ttest"
+        val google = ".google.com\tTRUE\t/\tTRUE\t0\tSID\ttest"
         val xiaohongshu = ".xiaohongshu.com\tTRUE\t/\tTRUE\t0\ta1\ttest"
         org.junit.Assert.assertNotNull(CollectorSiteCookies.normalize(CollectorSite.YOUTUBE, youtube))
+        org.junit.Assert.assertNotNull(CollectorSiteCookies.normalize(CollectorSite.YOUTUBE, google))
         org.junit.Assert.assertNotNull(CollectorSiteCookies.normalize(CollectorSite.XIAOHONGSHU, xiaohongshu))
         org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
             CollectorSiteCookies.normalize(CollectorSite.YOUTUBE, xiaohongshu)
         }
         org.junit.Assert.assertEquals(3L, CollectorSite.YOUTUBE.minExtensionVersion)
         org.junit.Assert.assertEquals(3L, CollectorSite.XIAOHONGSHU.minExtensionVersion)
+        org.junit.Assert.assertTrue(CollectorSite.YOUTUBE.cookieUrls.contains("https://www.youtube.com/"))
+        org.junit.Assert.assertTrue(CollectorSite.YOUTUBE.cookieUrls.contains("https://accounts.google.com/"))
+        org.junit.Assert.assertEquals(
+            "https://www.xiaohongshu.com/login",
+            CollectorSite.XIAOHONGSHU.loginUrl,
+        )
     }
 
+    @Test
+    fun youTubeDownloadReceivesOnlyYouTubeCookiesFromTheSavedSession() {
+        val youtube = "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t0\tSID\ttest"
+        val google = ".google.com\tTRUE\t/\tTRUE\t0\tSID\ttest"
+        val accounts = "accounts.google.com\tFALSE\t/\tTRUE\t0\tSID\ttest"
+        val session = requireNotNull(CollectorSiteCookies.normalize(CollectorSite.YOUTUBE,
+            "$youtube\n$google\n$accounts"))
+        assertEquals("# Netscape HTTP Cookie File\n$youtube\n",
+            CollectorSiteCookies.forDownload("YOUTUBE", session))
+        assertEquals("", CollectorSiteCookies.forDownload("YOUTUBE", "$google\n$accounts"))
+        val x = ".x.com\tTRUE\t/\tTRUE\t0\tauth_token\ttest"
+        assertEquals(x, CollectorSiteCookies.forDownload("X", x))
+    }
 }

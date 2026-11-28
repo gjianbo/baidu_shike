@@ -93,12 +93,15 @@ internal object CollectorTaskStore {
         prefs(context).edit().putString(KEY, CollectorTaskLogic.encode(trimmed)).apply()
     }
 
-    fun begin(context: Context, task: CollectorTask) = synchronized(lock) {
-        CollectorTaskRuntime.markLive(task.id)
+    fun begin(context: Context, task: CollectorTask, retry: Boolean): Boolean = synchronized(lock) {
         val list = readRaw(context).toMutableList()
-        list.removeAll { it.id == task.id }
-        list.add(task)
+        val index = list.indexOfFirst { it.id == task.id }
+        val queued = CollectorTaskLogic.prepareAttempt(task, list.getOrNull(index), retry)
+            ?: return@synchronized false
+        CollectorTaskRuntime.markLive(task.id)
+        if (index >= 0) list[index] = queued else list.add(queued)
         write(context, list)
+        true
     }
 
     fun updateName(context: Context, id: Long, name: String) = synchronized(lock) {
@@ -179,6 +182,12 @@ internal object CollectorTaskStore {
 /** 纯逻辑：分享任务编解码、裁剪和中断文案，可在 JVM 单测里钉死。 */
 internal object CollectorTaskLogic {
     const val INTERRUPTED = "收集中断（应用已关闭）"
+
+    fun prepareAttempt(task: CollectorTask, previous: CollectorTask?, retry: Boolean): CollectorTask? {
+        if (!retry) return task.takeIf { previous == null }
+        if (previous?.state != CollectorTaskState.FAILED) return null
+        return task.copy(createdAt = previous.createdAt)
+    }
 
     fun trim(records: List<CollectorTask>): List<CollectorTask> {
         val active = records.filter(CollectorTask::isActive)

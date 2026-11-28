@@ -727,16 +727,17 @@ internal class CollectorForegroundService : Service() {
         fun cancel(taskId: Long): Boolean = runningService?.cancelTask(taskId) == true
 
         fun start(
-            context: Context, url: String, platform: String, target: CollectorTarget,
+            context: Activity, url: String, platform: String, target: CollectorTarget,
             keepLocal: Boolean, customName: String, siteCookies: String = "", requireExtension: Boolean = false,
-        ): Long {
+            retryTaskId: Long? = null,
+        ): Boolean {
             val local = ExtensionDownload.available(context, platform)
             check((!requireExtension && !ExtensionDownload.requiresLocalExtension(platform) && siteCookies.isEmpty()) || local) { "请安装分享下载扩展后重试" }
             val serverUrl = if (local) null else ForwardServerStore.load(context)?.baseUrl?.let(ForwardServerLogic::normalizeBaseUrl)
                 ?: error("此链接暂无可用的下载方式")
             val now = System.currentTimeMillis()
-            val taskId = taskSequence.updateAndGet { maxOf(now, it + 1) }
-            CollectorTaskStore.begin(
+            val taskId = retryTaskId ?: taskSequence.updateAndGet { maxOf(now, it + 1) }
+            val queued = CollectorTaskStore.begin(
                 context.applicationContext,
                 CollectorTask(
                     id = taskId,
@@ -752,7 +753,9 @@ internal class CollectorForegroundService : Service() {
                     customName = customName,
                     localExtension = local,
                 ),
+                retry = retryTaskId != null,
             )
+            if (!queued) return false
             val intent = Intent(context, CollectorForegroundService::class.java).apply {
                 putExtra(EXTRA_URL, url)
                 putExtra(EXTRA_PROVIDER, target.provider.name)
@@ -767,12 +770,13 @@ internal class CollectorForegroundService : Service() {
                 if (siteCookies.isNotEmpty()) putExtra(EXTRA_SITE_COOKIES, siteCookies)
             }
             try {
+                if (local) ExtensionDownload.activate(context)
                 context.startForegroundService(intent)
             } catch (error: Exception) {
                 CollectorTaskStore.finish(context, taskId, false, "无法启动分享下载：${collectorError(error)}")
                 throw error
             }
-            return taskId
+            return true
         }
     }
 
@@ -854,6 +858,7 @@ internal class CollectorForegroundService : Service() {
         val keep = intent.getBooleanExtra(EXTRA_KEEP, false)
         val customName = intent.getStringExtra(EXTRA_NAME).orEmpty()
         val taskId = intent.getLongExtra(EXTRA_TASK_ID, 0L)
+        if (taskId in acceptedIds) return START_NOT_STICKY
         val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL)?.let(ForwardServerLogic::normalizeBaseUrl)
         val platform = intent.getStringExtra(EXTRA_PLATFORM).orEmpty()
         val siteCookies = intent.getStringExtra(EXTRA_SITE_COOKIES).orEmpty()
@@ -916,10 +921,11 @@ internal class CollectorForegroundService : Service() {
                     check(destination == pending || pending.renameTo(destination)) { "无法保存扩展交接的视频" }
                 }
             } else downloadViaForwardServer(ForwardServerConfig(serverUrl), url, bucket, taskId, customName)
+            checkTaskActive(taskId)
             CollectorTaskStore.updateName(this, taskId, video.name)
             val uri = FileProvider.getUriForFile(applicationContext, "$packageName.fileprovider", video)
             val copyResult = if (keep) {
-                runCatching { publishLocalCopy(video) }
+                runCatching { publishLocalCopy(taskId, video) }
                     .onFailure { logCollectorFailure("保存本机副本失败", it) }
             } else null
             updateTask(taskId, "已下载，正在加入上传队列…", 100)
@@ -990,17 +996,18 @@ internal class CollectorForegroundService : Service() {
                 .onFailure { logCollectorFailure("清理暂存文件失败", it) }
         }
         logCollectorFailure(stage, error)
-        val message = if (cancelledId == taskId) "已取消分享下载" else "$stage：${collectorError(error)}$suffix"
-        if (taskId > 0) CollectorTaskStore.finish(this, taskId, false, message)
         main.post {
             if (cancelled) return@post
+            val message = if (cancelledId == taskId) "已取消分享下载" else "$stage：${collectorError(error)}$suffix"
+            if (taskId > 0) CollectorTaskStore.finish(this, taskId, false, message)
             android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
             completeJob(taskId, message, false)
         }
     }
 
     /** "保留本机"是一次性选择：上传到 MediaStore Downloads/拾课，用系统规范写入。 */
-    private fun publishLocalCopy(file: File) {
+    private fun publishLocalCopy(taskId: Long, file: File) {
+        checkTaskActive(taskId)
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, file.name)
             val mimeType = android.webkit.MimeTypeMap.getSingleton()
@@ -1015,7 +1022,18 @@ internal class CollectorForegroundService : Service() {
         }
         try {
             val stream = checkNotNull(resolver.openOutputStream(uri)) { "无法打开本机副本写入流" }
-            stream.use { out -> file.inputStream().use { it.copyTo(out) } }
+            stream.use { out ->
+                file.inputStream().use { input ->
+                    val buffer = ByteArray(128 * 1024)
+                    while (true) {
+                        checkTaskActive(taskId)
+                        val size = input.read(buffer)
+                        if (size < 0) break
+                        out.write(buffer, 0, size)
+                    }
+                }
+            }
+            checkTaskActive(taskId)
             val done = ContentValues().apply { put(MediaStore.Downloads.IS_PENDING, 0) }
             check(resolver.update(uri, done, null, null) > 0) { "无法发布本机副本" }
         } catch (error: Exception) {
@@ -1059,16 +1077,13 @@ internal class CollectorForegroundService : Service() {
             .build()
     }
 
-    private fun notifyOnUi(text: String, percent: Int) {
-        android.os.Handler(android.os.Looper.getMainLooper()).post {
-            if (!cancelled) runCatching { manager.notify(NOTIFY_ID, notify(text, percent)) }
-        }
-    }
-
     private fun updateTask(taskId: Long, text: String, percent: Int) {
-        if (cancelledId == taskId && text != "正在取消…") return
-        if (taskId > 0) CollectorTaskStore.progress(this, taskId, percent, text)
-        notifyOnUi(text, percent)
+        main.post {
+            if (cancelled || runningId != taskId) return@post
+            if (cancelledId == taskId && text != "正在取消…") return@post
+            CollectorTaskStore.progress(this, taskId, percent, text)
+            runCatching { manager.notify(NOTIFY_ID, notify(text, percent)) }
+        }
     }
 
     private val manager: NotificationManager get() = getSystemService(NotificationManager::class.java)
